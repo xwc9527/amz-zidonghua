@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>类目抓取看板</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
+
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    h1 { font-size: 20px; color: #7eb8f7; }
+
+    .ctrl-btn {
+      padding: 8px 24px; border: none; border-radius: 6px; font-size: 14px;
+      font-weight: 600; cursor: pointer; transition: all 0.2s;
+    }
+    .ctrl-btn.running { background: #e74c3c; color: #fff; }
+    .ctrl-btn.running:hover { background: #c0392b; }
+    .ctrl-btn.paused  { background: #27ae60; color: #fff; }
+    .ctrl-btn.paused:hover  { background: #1e8449; }
+
+    .stats { display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+    .stat-card {
+      background: #1a1d27; border: 1px solid #2a2d3e;
+      border-radius: 8px; padding: 12px 18px; min-width: 130px;
+    }
+    .stat-card .label { font-size: 11px; color: #888; margin-bottom: 4px; }
+    .stat-card .value { font-size: 26px; font-weight: 700; color: #7eb8f7; }
+    .stat-card .value.warn { color: #f7b731; }
+
+    .filters { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .filters input, .filters select {
+      background: #1a1d27; border: 1px solid #2a2d3e; color: #e0e0e0;
+      padding: 6px 12px; border-radius: 6px; font-size: 13px;
+    }
+    .filters input { width: 240px; }
+    .filters select { width: 100px; }
+    .filters label { font-size: 12px; color: #888; }
+
+    .refresh-info { font-size: 11px; color: #555; margin-bottom: 10px; }
+    .refresh-info span { color: #7eb8f7; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-dot.running { background: #27ae60; }
+    .status-dot.paused  { background: #f7b731; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      background: #1a1d27; color: #888; text-align: left;
+      padding: 8px 10px; border-bottom: 1px solid #2a2d3e;
+      position: sticky; top: 0; cursor: pointer;
+    }
+    th:hover { color: #7eb8f7; }
+    td { padding: 6px 10px; border-bottom: 1px solid #1e2130; }
+    tr:hover td { background: #1a1d27; }
+    .has-id { color: #4caf82; font-weight: 600; }
+    .no-id  { color: #555; }
+    .depth-badge {
+      display: inline-block; padding: 2px 8px; border-radius: 10px;
+      font-size: 11px; font-weight: 700;
+    }
+    .d1 { background: #1a3a2a; color: #4caf82; }
+    .d2 { background: #1a2a3a; color: #5dade2; }
+    .d3 { background: #2a2a1a; color: #f7dc6f; }
+    .d4 { background: #3a2a1a; color: #f0b27a; }
+    .d5 { background: #3a1a1a; color: #e74c3c; }
+    .source-bc { color: #f7b731; font-size: 11px; }
+    .source-sb { color: #555; font-size: 11px; }
+    .url-cell { color: #4a7fb5; font-size: 11px; max-width: 380px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ─── Tab ─────────────────────────────────── */
+    .tab-bar { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid #2a2d3e; }
+    .tab {
+      padding: 6px 20px; border: none; background: transparent;
+      color: #888; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent;
+      transition: all 0.18s;
+    }
+    .tab.active { color: #7eb8f7; border-bottom-color: #7eb8f7; }
+    .tab:hover:not(.active) { color: #ccc; }
+
+    /* ─── Tree ────────────────────────────────── */
+    .tree-node { user-select: none; }
+    .tree-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 8px; border-radius: 5px; cursor: pointer;
+      transition: background 0.12s;
+    }
+    .tree-row:hover { background: #1a1d27; }
+    .tree-toggle {
+      width: 16px; text-align: center; font-size: 10px; color: #555;
+      flex-shrink: 0; transition: transform 0.18s;
+    }
+    .tree-toggle.open { transform: rotate(90deg); color: #7eb8f7; }
+    .tree-toggle.leaf { cursor: default; }
+    .tree-name { flex: 1; font-size: 13px; }
+    .tree-meta { font-size: 11px; color: #555; white-space: nowrap; }
+    .tree-link { font-size: 11px; color: #4a9eff; text-decoration: none; }
+    .tree-link:hover { text-decoration: underline; }
+    .tree-children { margin-left: 24px; border-left: 1px solid #2a2d3e; padding-left: 8px; display: none; }
+    .tree-children.open { display: block; }
+    .tree-more {
+      margin: 4px 0 4px 8px; padding: 3px 12px; font-size: 11px;
+      background: #1a1d27; border: 1px solid #2a2d3e; color: #7eb8f7;
+      border-radius: 4px; cursor: pointer;
+    }
+    .tree-more:hover { background: #2a2d3e; }
+    .tree-loading { font-size: 11px; color: #555; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📦 Amazon 类目抓取看板</h1>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+    <button class="ctrl-btn paused" id="ctrlBtn" onclick="togglePause()">▶ 启动抓取</button>
+    <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#888;">
+      <span class="status-dot paused" id="statusDot"></span>
+      <span id="statusText">爬虫未运行</span>
+    </div>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat-card"><div class="label">总节点数</div><div class="value" id="total">—</div></div>
+  <div class="stat-card"><div class="label">待处理队列</div><div class="value warn" id="queue">—</div></div>
+  <div class="stat-card"><div class="label">有 node_id</div><div class="value" id="has_id">—</div></div>
+  <div class="stat-card"><div class="label">面包屑发现</div><div class="value" id="breadcrumb">—</div></div>
+  <div class="stat-card"><div class="label">阶段</div><div class="value" id="phase" style="font-size:14px">—</div></div>
+</div>
+
+<div class="refresh-info">
+  实时刷新 | 上次更新：<span id="last_update">—</span>
+</div>
+
+<div class="tab-bar">
+  <button class="tab active" id="tabList" onclick="switchTab('list')">&#9776; 列表视图</button>
+  <button class="tab" id="tabTree" onclick="switchTab('tree')">&#9658; 树形视图</button>
+</div>
+
+<div id="listView">
+
+<div class="filters">
+  <input type="text" id="search" placeholder="搜索类目名 / node_id ..." oninput="renderTable()">
+  <label>层级：</label>
+  <select id="depthFilter" onchange="renderTable()">
+    <option value="all">全部</option>
+    <option value="1">L1</option>
+    <option value="2">L2</option>
+    <option value="3">L3</option>
+    <option value="4">L4</option>
+    <option value="5">L5+</option>
+  </select>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width:50px">#</th>
+      <th>类目名</th>
+      <th style="width:60px">L级</th>
+      <th style="width:130px">node_id</th>
+      <th style="width:70px">来源</th>
+      <th>URL</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+</div><!-- /listView -->
+
+<div id="treeView" style="display:none;margin-top:8px">
+  <div id="treeRoot"><div class="tree-loading">&#8987; 加载中...</div></div>
+</div>
+
+<script>
+// ── Tab 切换 ──────────────────────────────────────────────────────
+let treeLoaded = false;
+function switchTab(tab) {
+  const isList = tab === 'list';
+  document.getElementById('listView').style.display  = isList ? '' : 'none';
+  document.getElementById('treeView').style.display  = isList ? 'none' : '';
+  document.getElementById('tabList').className = 'tab' + (isList ? ' active' : '');
+  document.getElementById('tabTree').className = 'tab' + (isList ? '' : ' active');
+  if (!isList && !treeLoaded) initTree();
+}
+
+// ── 树形懒加载 ───────────────────────────────────────────────────
+async function initTree() {
+  treeLoaded = true;
+  const root = document.getElementById('treeRoot');
+  root.innerHTML = '<div class="tree-loading">⏳ 加载根节点...</div>';
+  try {
+    const data = await fetch('/api/roots').then(r => r.json());
+    root.innerHTML = '';
+    data.forEach(node => root.appendChild(createTreeNode(node)));
+  } catch(e) {
+    root.innerHTML = '<div class="tree-loading" style="color:#e74c3c">加载失败，请检查服务器</div>';
+  }
+}
+
+function createTreeNode(node) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tree-node';
+
+  const hasKids = (node.child_count || 0) > 0;
+  const dc = node.depth >= 5 ? 'd5' : node.depth >= 4 ? 'd4' : node.depth >= 3 ? 'd3' : node.depth >= 2 ? 'd2' : 'd1';
+  const name = node.name && !String(node.name).match(/^\d+$/) ? node.name : '(未命名)';
+
+  const row = document.createElement('div');
+  row.className = 'tree-row';
+  row.innerHTML = `
+    <span class="tree-toggle ${hasKids ? '' : 'leaf'}">${hasKids ? '▶' : '·'}</span>
+    <span class="depth-badge ${dc}">L${node.depth}</span>
+    <span class="tree-name">${name}</span>
+    <span class="tree-meta">${node.child_count > 0 ? node.child_count + ' 子节点' : ''}</span>
+    ${node.url ? `<a class="tree-link" href="${node.url}" target="_blank" onclick="event.stopPropagation()">↗</a>` : ''}
+  `;
+
+  const children = document.createElement('div');
+  children.className = 'tree-children';
+  wrap.appendChild(row);
+  wrap.appendChild(children);
+
+  if (hasKids) {
+    let expanded = false;
+    let loaded   = false;
+    row.addEventListener('click', async () => {
+      expanded = !expanded;
+      const toggle = row.querySelector('.tree-toggle');
+      toggle.classList.toggle('open', expanded);
+      children.classList.toggle('open', expanded);
+      if (expanded && !loaded) {
+        loaded = true;
+        await loadChildren(node.url, children, 0);
+      }
+    });
+  }
+  return wrap;
+}
+
+async function loadChildren(parentUrl, container, offset) {
+  const loading = document.createElement('div');
+  loading.className = 'tree-loading';
+  loading.textContent = '⏳ 加载中...';
+  container.appendChild(loading);
+
+  try {
+    const url = `/api/children?parent_url=${encodeURIComponent(parentUrl)}&offset=${offset}&limit=50`;
+    const data = await fetch(url).then(r => r.json());
+    loading.remove();
+
+    data.items.forEach(node => container.appendChild(createTreeNode(node)));
+
+    const loaded = offset + data.items.length;
+    if (loaded < data.total) {
+      const btn = document.createElement('button');
+      btn.className = 'tree-more';
+      btn.textContent = `加载更多（${loaded}/${data.total}）`;
+      btn.onclick = async () => {
+        btn.remove();
+        await loadChildren(parentUrl, container, loaded);
+      };
+      container.appendChild(btn);
+    }
+  } catch(e) {
+    loading.textContent = '加载失败';
+    loading.style.color = '#e74c3c';
+  }
+}
+
+let allNodes = [];
+let isPaused = false;
+
+async function load() {
+  try {
+    // 从 API 获取统计
+    const sr = await fetch('/api/stats?t=' + Date.now());
+    if (!sr.ok) throw new Error('HTTP ' + sr.status);
+    const stats = await sr.json();
+    document.getElementById('total').textContent     = stats.total || '—';
+    document.getElementById('queue').textContent     = stats.queue ?? '—';
+    document.getElementById('has_id').textContent    = stats.has_id || 0;
+    document.getElementById('breadcrumb').textContent = stats.breadcrumb || 0;
+
+    // 从 API 获取状态
+    try {
+      const str = await fetch('/api/status?t=' + Date.now());
+      const st = await str.json();
+      document.getElementById('phase').textContent =
+        st.phase === 'sidebar_bfs' ? '侧边栏BFS' :
+        st.phase === 'breadcrumb'  ? '面包屑' :
+        st.phase === 'done'        ? '已完成' : (st.phase || '—');
+      updateBtn(st.scraper_running);
+    } catch(e) {
+      updateBtn(false);
+    }
+
+    // 从 API 获取类目列表（带筛选）
+    const q  = document.getElementById('search').value;
+    const df = document.getElementById('depthFilter').value;
+    let apiUrl = '/api/categories?limit=2000';
+    if (q)  apiUrl += '&q=' + encodeURIComponent(q);
+    if (df !== 'all') apiUrl += '&depth=' + df;
+
+    const cr = await fetch(apiUrl);
+    allNodes = await cr.json();
+    renderTable();
+  } catch(e) {}
+  document.getElementById('last_update').textContent = new Date().toLocaleTimeString();
+}
+
+function renderTable() {
+  const rows = allNodes.map((n, i) => {
+    const d   = n.depth || 0;
+    const dc  = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
+    const indent = d * 16;
+    const name = n.name && !n.name.match(/^\d+$/) ? n.name : '<span style="color:#555;font-style:italic">(未命名)</span>';
+    const urlCell = n.url
+      ? `<a href="${n.url}" target="_blank" style="color:#4a9eff;text-decoration:none;font-size:11px" title="${n.url}">${n.url}</a>`
+      : '—';
+    return `<tr>
+      <td style="color:#555">${i+1}</td>
+      <td style="padding-left:${indent}px">${name}</td>
+      <td><span class="depth-badge ${dc}">L${d}</span></td>
+      <td class="${n.node_id?'has-id':'no-id'}">${n.node_id||'—'}</td>
+      <td class="${n.source==='breadcrumb'?'source-bc':'source-sb'}">${n.source||'sidebar'}</td>
+      <td class="url-cell">${urlCell}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('tbody').innerHTML = rows ||
+    '<tr><td colspan="6" style="color:#555;padding:20px">暂无数据</td></tr>';
+}
+
+function updateBtn(running) {
+  const btn = document.getElementById('ctrlBtn');
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  if (running) {
+    btn.className = 'ctrl-btn running';
+    btn.textContent = '⏹ 停止抓取';
+    dot.className = 'status-dot running';
+    txt.textContent = '运行中';
+  } else {
+    btn.className = 'ctrl-btn paused';
+    btn.textContent = '▶ 启动抓取';
+    dot.className = 'status-dot paused';
+    txt.textContent = '爬虫未运行';
+  }
+}
+
+async function togglePause() {
+  const btn = document.getElementById('ctrlBtn');
+  const url = btn.textContent.includes('启动') ? '/api/start' : '/api/stop';
+  try {
+    const r = await fetch(url, { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'error') alert('操作失败: ' + d.msg);
+    else load();
+  } catch(e) { alert('连接失败，检查 dashboard_server.py 是否在运行'); }
+}
+
+load();
+setInterval(load, 1000);
+</script>
+</body>
+</html>

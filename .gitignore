@@ -1,0 +1,25 @@
+# 数据库（体积大，不入库）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# 状态文件
+data/status.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 临时诊断脚本
+check_url.py
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 系统文件
+.DS_Store
+Thumbs.db
