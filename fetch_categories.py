@@ -55,7 +55,7 @@ def _start_stdin_listener():
 # 全局速率限制器：所有线程共享，确保请求间隔 ≥ 0.7s（1.43 req/s）
 _rate_lock = threading.Lock()
 _rate_last = 0.0
-RATE_INTERVAL = 0.7
+RATE_INTERVAL = 0.4
 
 def _rate_wait():
     """线程安全的全局速率限制。"""
@@ -287,7 +287,7 @@ def phase1_sidebar_bfs() -> dict[str, list[str]]:
     in_flight_lock = threading.Lock()
     root_url = normalize_url(NEW_RELEASES_ROOT)
 
-    NUM_WORKERS = 2
+    NUM_WORKERS = 4
     print(f"[第一遍] {NUM_WORKERS}-worker 并发 BFS 开始 ...", flush=True)
 
     def worker():
@@ -499,11 +499,16 @@ def db_insert(nodes: list[dict], explored: int = 0) -> int:
 
 
 def db_mark_explored(url: str):
-    """标记某个 URL 为已探索。"""
+    """标记某个 URL 为已探索（兼容有/无尾斜杠）。"""
+    normalized = normalize_url(url)
+    bare = normalized.rstrip("/")
     with _db_lock:
         conn = db_conn()
         try:
-            conn.execute("UPDATE categories SET explored=1 WHERE url=?", (normalize_url(url),))
+            conn.execute(
+                "UPDATE categories SET explored=1 WHERE url IN (?, ?)",
+                (normalized, bare)
+            )
             conn.commit()
         finally:
             conn.close()

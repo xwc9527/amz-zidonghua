@@ -47,3 +47,24 @@ EXCEL_FILE         = os.path.join(OUTPUT_DIR, "候选品.xlsx")
 # 精细过滤条件
 FILTER_COMPETITION_MAX = 5000
 FILTER_REVIEWS_FINAL   = 50
+
+# ── 阶段5：商品抓取（榜单批量扫描）─────────────────────────────────
+# 目标 L1 类目 slug（对应 URL 中 /gp/xxx/{slug}/ 部分）
+PRODUCT_TARGET_L1 = ["home-garden", "kitchen"]
+
+# 通用筛选条件（看板 UI 可覆盖）
+PRODUCT_REVIEW_MAX    = 10    # 评论数上限（< 此值才录入）
+PRODUCT_MIN_LIST_SIZE = 100   # 榜单最少商品数（活体检测）
+PRODUCT_PRICE_MIN     = 0.0   # 价格下限（0 = 不限）
+PRODUCT_PRICE_MAX     = 0.0   # 价格上限（0 = 不限）
+
+# 抓取哪些榜单
+PRODUCT_LISTS = ["new-releases", "bestsellers", "most-wished-for"]
+
+# 并发
+PRODUCT_WORKERS = 10
+
+# 输出
+PRODUCTS_DB_TABLE = "product_sightings"
+PRODUCTS_EXCEL    = os.path.join(DATA_DIR, "products.xlsx")
+

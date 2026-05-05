@@ -105,6 +105,37 @@
     }
     .tree-more:hover { background: #2a2d3e; }
     .tree-loading { font-size: 11px; color: #555; padding: 4px 8px; }
+
+    /* ─── 榜单按钮 ─────────────────────────────── */
+    .list-btns { display: flex; gap: 4px; flex-wrap: nowrap; }
+    .lb {
+      padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600;
+      border: none; cursor: pointer; text-decoration: none; display: inline-block;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .lb:hover { opacity: 0.85; transform: scale(1.05); }
+    .lb-unknown { background: #2a2d3e; color: #555; cursor: default; }
+    .lb-valid   { background: #1a3a2a; color: #4caf82; }
+    .lb-invalid { background: #2a1a1a; color: #555; cursor: default; text-decoration: line-through; }
+    .lb-checking{ background: #2a2a1a; color: #f7dc6f; cursor: default; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+    .row-refresh {
+      padding: 2px 6px; font-size: 10px; background: none;
+      border: 1px solid #2a2d3e; color: #555; border-radius: 4px; cursor: pointer;
+    }
+    .row-refresh:hover { color: #7eb8f7; border-color: #7eb8f7; }
+
+    /* ─── 验证进度条 ───────────────────────────── */
+    .check-bar-wrap {
+      display: none; margin-bottom: 10px; background: #1a1d27;
+      border: 1px solid #2a2d3e; border-radius: 6px; padding: 8px 14px;
+    }
+    .check-bar-wrap.active { display: block; }
+    .check-bar-header { display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 6px; }
+    .check-bar-track { height: 6px; background: #2a2d3e; border-radius: 3px; overflow: hidden; }
+    .check-bar-fill  { height: 100%; background: linear-gradient(90deg,#4caf82,#7eb8f7); border-radius: 3px; transition: width 0.5s; }
+    .check-counts { display: flex; gap: 12px; margin-top: 6px; font-size: 10px; }
+    .check-counts span { color: #4caf82; }
   </style>
 </head>
 <body>
@@ -135,6 +166,7 @@
 <div class="tab-bar">
   <button class="tab active" id="tabList" onclick="switchTab('list')">&#9776; 列表视图</button>
   <button class="tab" id="tabTree" onclick="switchTab('tree')">&#9658; 树形视图</button>
+  <button class="tab" id="tabProducts" onclick="switchTab('products')">&#128202; 商品抓取</button>
 </div>
 
 <div id="listView">
@@ -150,6 +182,16 @@
     <option value="4">L4</option>
     <option value="5">L5+</option>
   </select>
+  <button onclick="startCheckAll()" style="margin-left:auto;padding:5px 14px;font-size:12px;background:#1a2a3a;color:#7eb8f7;border:1px solid #2a3a5a;border-radius:5px;cursor:pointer">🔍 一键验证榜单链接</button>
+</div>
+
+<div class="check-bar-wrap" id="checkBar">
+  <div class="check-bar-header">
+    <span>链接验证进度</span>
+    <span id="checkBarText">—</span>
+  </div>
+  <div class="check-bar-track"><div class="check-bar-fill" id="checkBarFill" style="width:0%"></div></div>
+  <div class="check-counts" id="checkCounts"></div>
 </div>
 
 <table>
@@ -160,7 +202,8 @@
       <th style="width:60px">L级</th>
       <th style="width:130px">node_id</th>
       <th style="width:70px">来源</th>
-      <th>URL</th>
+      <th>榜单链接</th>
+      <th style="width:36px"></th>
     </tr>
   </thead>
   <tbody id="tbody"></tbody>
@@ -172,16 +215,118 @@
   <div id="treeRoot"><div class="tree-loading">&#8987; 加载中...</div></div>
 </div>
 
+<!-- ── 商品抓取面板 ────────────────────────────────────────── -->
+<div id="productsView" style="display:none;margin-top:8px">
+
+  <!-- 统计卡片 -->
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+    <div class="stat-card"><div class="label">去重商品</div><div class="value" id="p_total">—</div></div>
+    <div class="stat-card"><div class="label">多榜出现</div><div class="value" style="color:#f7b731" id="p_multi">—</div></div>
+    <div class="stat-card"><div class="label">新品榜</div><div class="value" id="p_nr">—</div></div>
+    <div class="stat-card"><div class="label">畅销榜</div><div class="value" id="p_bs">—</div></div>
+    <div class="stat-card"><div class="label">心愿单</div><div class="value" id="p_mw">—</div></div>
+  </div>
+
+  <!-- 左右布局 -->
+  <div style="display:flex;gap:16px;align-items:flex-start">
+
+    <!-- 左侧：类目树（带勾选） -->
+    <div style="width:320px;min-width:280px;background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:12px;display:flex;flex-direction:column;max-height:60vh">
+      <div style="font-size:13px;color:#aaa;font-weight:600;margin-bottom:6px">
+        选择类目分支 <span id="p_sel_count" style="color:#7eb8f7;font-size:11px;margin-left:6px">0 个已选</span>
+      </div>
+      <!-- 搜索框 -->
+      <input id="pTreeSearch" type="text" placeholder="搜索类目名..." oninput="filterPTree(this.value)"
+        style="width:100%;box-sizing:border-box;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:5px 8px;font-size:12px;margin-bottom:6px">
+      <!-- 树节点容器 -->
+      <div id="pTreeRoot" style="font-size:12px;color:#ccc;overflow-y:auto;flex:1">
+        <div style="color:#555">⏳ 点击加载类目树...</div>
+      </div>
+    </div>
+
+    <!-- 右侧：参数 + 操作 -->
+    <div style="flex:1;min-width:0">
+
+      <!-- 榜单子标签 -->
+      <div style="background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:0;margin-bottom:12px;overflow:hidden">
+        <!-- sub-tab bar -->
+        <div style="display:flex;border-bottom:1px solid #2a2d3e" id="listTabBar">
+          <button class="list-tab active" onclick="switchListTab('nr')" id="ltab_nr" style="flex:1;padding:8px 0;background:none;color:#7eb8f7;border:none;border-bottom:2px solid #7eb8f7;cursor:pointer;font-size:12px">📋 新品榜</button>
+          <button class="list-tab" onclick="switchListTab('bs')" id="ltab_bs" style="flex:1;padding:8px 0;background:none;color:#888;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:12px">📋 畅销榜</button>
+          <button class="list-tab" onclick="switchListTab('mw')" id="ltab_mw" style="flex:1;padding:8px 0;background:none;color:#888;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:12px">📋 心愿单</button>
+        </div>
+
+        <!-- 新品榜面板 -->
+        <div id="lp_nr" class="list-panel" style="padding:10px 12px">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_nr" checked> 启用</label>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_nr" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_nr" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_nr" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_nr" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
+          </div>
+        </div>
+
+        <!-- 畅销榜面板 -->
+        <div id="lp_bs" class="list-panel" style="padding:10px 12px;display:none">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_bs" checked> 启用</label>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_bs" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_bs" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_bs" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_bs" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
+          </div>
+        </div>
+
+        <!-- 心愿单面板 -->
+        <div id="lp_mw" class="list-panel" style="padding:10px 12px;display:none">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_mw" checked> 启用</label>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_mw" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_mw" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
+            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_mw" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_mw" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button id="btnStartProducts" onclick="startProducts()"
+          style="padding:7px 18px;background:#1a3a2a;color:#5fdb8a;border:1px solid #2a5a3a;border-radius:6px;cursor:pointer;font-size:13px">
+          ▶ 开始抓取
+        </button>
+        <button onclick="stopProducts()"
+          style="padding:7px 18px;background:#3a1a1a;color:#f07070;border:1px solid #5a2a2a;border-radius:6px;cursor:pointer;font-size:13px">
+          ⏹ 停止
+        </button>
+        <button onclick="exportExcel()"
+          style="padding:7px 18px;background:#1a2a3a;color:#7eb8f7;border:1px solid #2a3a5a;border-radius:6px;cursor:pointer;font-size:13px">
+          📥 导出 Excel
+        </button>
+        <span id="p_status" style="font-size:12px;color:#888">就绪</span>
+      </div>
+
+      <!-- 进度条 -->
+      <div style="background:#0d1117;border-radius:4px;overflow:hidden;height:6px;margin-bottom:6px">
+        <div id="p_bar" style="height:100%;width:0%;background:linear-gradient(90deg,#5fdb8a,#7eb8f7);transition:width 1s"></div>
+      </div>
+      <div id="p_progress_text" style="font-size:11px;color:#555">—</div>
+
+    </div><!-- /右侧 -->
+  </div><!-- /左右布局 -->
+
+</div><!-- /productsView -->
+
 <script>
 // ── Tab 切换 ──────────────────────────────────────────────────────
 let treeLoaded = false;
 function switchTab(tab) {
-  const isList = tab === 'list';
-  document.getElementById('listView').style.display  = isList ? '' : 'none';
-  document.getElementById('treeView').style.display  = isList ? 'none' : '';
-  document.getElementById('tabList').className = 'tab' + (isList ? ' active' : '');
-  document.getElementById('tabTree').className = 'tab' + (isList ? '' : ' active');
-  if (!isList && !treeLoaded) initTree();
+  document.getElementById('listView').style.display     = tab === 'list'     ? '' : 'none';
+  document.getElementById('treeView').style.display     = tab === 'tree'     ? '' : 'none';
+  document.getElementById('productsView').style.display = tab === 'products' ? '' : 'none';
+  document.getElementById('tabList').className     = 'tab' + (tab === 'list'     ? ' active' : '');
+  document.getElementById('tabTree').className     = 'tab' + (tab === 'tree'     ? ' active' : '');
+  document.getElementById('tabProducts').className = 'tab' + (tab === 'products' ? ' active' : '');
+  if (tab === 'tree' && !treeLoaded) initTree();
+  if (tab === 'products') initProductsTab();
 }
 
 // ── 树形懒加载 ───────────────────────────────────────────────────
@@ -203,14 +348,15 @@ function createTreeNode(node) {
   wrap.className = 'tree-node';
 
   const hasKids = (node.child_count || 0) > 0;
-  const dc = node.depth >= 5 ? 'd5' : node.depth >= 4 ? 'd4' : node.depth >= 3 ? 'd3' : node.depth >= 2 ? 'd2' : 'd1';
+  const td = node.true_depth || node.depth || 1;
+  const dc = td >= 5 ? 'd5' : td >= 4 ? 'd4' : td >= 3 ? 'd3' : td >= 2 ? 'd2' : 'd1';
   const name = node.name && !String(node.name).match(/^\d+$/) ? node.name : '(未命名)';
 
   const row = document.createElement('div');
   row.className = 'tree-row';
   row.innerHTML = `
     <span class="tree-toggle ${hasKids ? '' : 'leaf'}">${hasKids ? '▶' : '·'}</span>
-    <span class="depth-badge ${dc}">L${node.depth}</span>
+    <span class="depth-badge ${dc}">L${td}</span>
     <span class="tree-name">${name}</span>
     <span class="tree-meta">${node.child_count > 0 ? node.child_count + ' 子节点' : ''}</span>
     ${node.url ? `<a class="tree-link" href="${node.url}" target="_blank" onclick="event.stopPropagation()">↗</a>` : ''}
@@ -231,21 +377,21 @@ function createTreeNode(node) {
       children.classList.toggle('open', expanded);
       if (expanded && !loaded) {
         loaded = true;
-        await loadChildren(node.url, children, 0);
+        await loadChildren(node.node_id, children, 0);
       }
     });
   }
   return wrap;
 }
 
-async function loadChildren(parentUrl, container, offset) {
+async function loadChildren(parentId, container, offset) {
   const loading = document.createElement('div');
   loading.className = 'tree-loading';
   loading.textContent = '⏳ 加载中...';
   container.appendChild(loading);
 
   try {
-    const url = `/api/children?parent_url=${encodeURIComponent(parentUrl)}&offset=${offset}&limit=50`;
+    const url = `/api/children?parent_id=${encodeURIComponent(parentId)}&offset=${offset}&limit=200`;
     const data = await fetch(url).then(r => r.json());
     loading.remove();
 
@@ -258,7 +404,7 @@ async function loadChildren(parentUrl, container, offset) {
       btn.textContent = `加载更多（${loaded}/${data.total}）`;
       btn.onclick = async () => {
         btn.remove();
-        await loadChildren(parentUrl, container, loaded);
+        await loadChildren(parentId, container, loaded);
       };
       container.appendChild(btn);
     }
@@ -309,26 +455,86 @@ async function load() {
   document.getElementById('last_update').textContent = new Date().toLocaleTimeString();
 }
 
+function listBtn(label, url, valid, col, nodeId) {
+  if (!url || !nodeId) return `<span class="lb lb-unknown">${label}</span>`;
+  const cls = valid === 1 ? 'lb-valid' : valid === 0 ? 'lb-invalid' : 'lb-unknown';
+  const href = valid === 1 ? `href="${url}" target="_blank"` : '';
+  return `<a class="lb ${cls}" ${href}>${label}</a>`;
+}
+
+function buildListBtns(n) {
+  if (!n.node_id) return '<span style="color:#333;font-size:11px">—</span>';
+  const parts = (n.url || '').replace(/\/$/, '').split('/');
+  const gpIdx = parts.indexOf('gp');
+  const slug  = gpIdx >= 0 ? parts[gpIdx + 2] : '';
+  const nid   = n.node_id;
+  const base  = `https://www.amazon.com/gp`;
+  return `<div class="list-btns">
+    ${listBtn('新品', `${base}/new-releases/${slug}/${nid}/`,       n.nr_valid, 'nr_valid', nid)}
+    ${listBtn('畅销', `${base}/bestsellers/${slug}/${nid}/`,        n.bs_valid, 'bs_valid', nid)}
+    ${listBtn('飙升', `${base}/movers-and-shakers/${slug}/${nid}/`, n.ms_valid, 'ms_valid', nid)}
+    ${listBtn('心愿', `${base}/most-wished-for/${slug}/${nid}/`,    n.mw_valid, 'mw_valid', nid)}
+  </div>`;
+}
+
 function renderTable() {
   const rows = allNodes.map((n, i) => {
     const d   = n.depth || 0;
     const dc  = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
     const indent = d * 16;
     const name = n.name && !n.name.match(/^\d+$/) ? n.name : '<span style="color:#555;font-style:italic">(未命名)</span>';
-    const urlCell = n.url
-      ? `<a href="${n.url}" target="_blank" style="color:#4a9eff;text-decoration:none;font-size:11px" title="${n.url}">${n.url}</a>`
-      : '—';
-    return `<tr>
+    const btns = buildListBtns(n);
+    const refreshBtn = n.node_id
+      ? `<button class="row-refresh" onclick="refreshRow('${n.node_id}',this)" title="重新验证此行">↺</button>`
+      : '';
+    return `<tr id="row-${n.node_id || i}">
       <td style="color:#555">${i+1}</td>
       <td style="padding-left:${indent}px">${name}</td>
       <td><span class="depth-badge ${dc}">L${d}</span></td>
       <td class="${n.node_id?'has-id':'no-id'}">${n.node_id||'—'}</td>
       <td class="${n.source==='breadcrumb'?'source-bc':'source-sb'}">${n.source||'sidebar'}</td>
-      <td class="url-cell">${urlCell}</td>
+      <td>${btns}</td>
+      <td>${refreshBtn}</td>
     </tr>`;
   }).join('');
   document.getElementById('tbody').innerHTML = rows ||
-    '<tr><td colspan="6" style="color:#555;padding:20px">暂无数据</td></tr>';
+    '<tr><td colspan="7" style="color:#555;padding:20px">暂无数据</td></tr>';
+}
+
+// ── 榜单验证 ────────────────────────────────────────
+let _checkPollTimer = null;
+
+async function startCheckAll() {
+  const r = await fetch('/api/check_all', {method:'POST'}).then(r=>r.json());
+  if (r.status === 'already_running') { alert('验证任务已在运行中'); return; }
+  document.getElementById('checkBar').classList.add('active');
+  pollCheckProgress();
+}
+
+async function pollCheckProgress() {
+  clearTimeout(_checkPollTimer);
+  try {
+    const d = await fetch('/api/check_progress').then(r=>r.json());
+    const pct = d.total > 0 ? Math.round(d.checked * 100 / d.total) : 0;
+    document.getElementById('checkBarFill').style.width = pct + '%';
+    document.getElementById('checkBarText').textContent =
+      `${d.checked}/${d.total} (${pct}%) ${d.running ? '运行中...' : '完成'}`;
+    const vc = d.valid_counts || {};
+    document.getElementById('checkCounts').innerHTML =
+      Object.entries(vc).map(([k,v])=>`<span style="color:#888">${k}:</span><span>${v}</span>`).join(' ');
+    if (d.running) _checkPollTimer = setTimeout(pollCheckProgress, 2000);
+  } catch(e) {}
+}
+
+async function refreshRow(nodeId, btn) {
+  btn.textContent = '⏳'; btn.disabled = true;
+  try {
+    await fetch(`/api/check_node?node_id=${nodeId}`, {method:'POST'});
+    // 子进程在后台跑，约3-5秒完成，延迟后刷新
+    setTimeout(() => { load(); btn.textContent = '↺'; btn.disabled = false; }, 6000);
+  } catch(e) {
+    btn.textContent = '↺'; btn.disabled = false;
+  }
 }
 
 function updateBtn(running) {
@@ -361,6 +567,220 @@ async function togglePause() {
 
 load();
 setInterval(load, 1000);
+
+// ── 商品抓取面板 JS ───────────────────────────────────────────────
+
+let _productPollTimer = null;
+const _selectedRoots = new Set();
+
+async function initProductsTab() {
+  await loadProductTree();
+  await refreshProductStats();
+  startProductPoll();
+}
+
+// ── 商品树（带 checkbox）──────────────────────────────────────────
+async function loadProductTree() {
+  const root = document.getElementById('pTreeRoot');
+  root.innerHTML = '<div style="color:#555">⏳ 加载中...</div>';
+  try {
+    const r = await fetch('/api/roots');
+    const items = await r.json();
+    root.innerHTML = '';
+    items.forEach(it => root.appendChild(buildPTreeNode(it)));
+  } catch(e) {
+    root.innerHTML = '<div style="color:#f07070">加载失败</div>';
+  }
+}
+
+// 搜索过滤（只过滤顶层节点文字，收起状态不受影响）
+let _allL1Nodes = [];
+function filterPTree(q) {
+  const kw = q.trim().toLowerCase();
+  const root = document.getElementById('pTreeRoot');
+  [...root.children].forEach(div => {
+    const label = div.querySelector('span[data-label]') || div.querySelector('span:nth-child(3)');
+    const text = (label ? label.textContent : '').toLowerCase();
+    div.style.display = (!kw || text.includes(kw)) ? '' : 'none';
+  });
+}
+
+function buildPTreeNode(item) {
+  const div = document.createElement('div');
+  div.style.marginLeft = '0px';
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:2px 0;cursor:pointer';
+
+  // checkbox
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.dataset.nodeId = item.node_id || '';
+  cb.dataset.name = item.name || '';
+  cb.addEventListener('change', () => {
+    if (cb.checked) _selectedRoots.add(cb.dataset.nodeId);
+    else _selectedRoots.delete(cb.dataset.nodeId);
+    document.getElementById('p_sel_count').textContent = _selectedRoots.size + ' 个已选';
+  });
+  if (item.node_id) row.appendChild(cb);
+
+  // 展开箭头
+  const arrow = document.createElement('span');
+  arrow.textContent = '▶';
+  arrow.style.cssText = 'font-size:9px;color:#555;width:12px;transition:transform .2s';
+  row.appendChild(arrow);
+
+  // 名称
+  const label = document.createElement('span');
+  label.textContent = `${item.name || '?'}`;
+  label.setAttribute('data-label', '1');
+  label.style.cssText = 'color:#ccc;font-size:12px';
+  row.appendChild(label);
+
+  // 子节点数
+  if (item.child_count > 0) {
+    const cnt = document.createElement('span');
+    cnt.textContent = `(${item.child_count})`;
+    cnt.style.cssText = 'color:#555;font-size:10px;margin-left:4px';
+    row.appendChild(cnt);
+  }
+
+  div.appendChild(row);
+
+  // 子容器（懒加载）
+  const childBox = document.createElement('div');
+  childBox.style.cssText = 'display:none;margin-left:16px';
+  div.appendChild(childBox);
+
+  let loaded = false;
+  row.addEventListener('click', async (e) => {
+    if (e.target === cb) return; // 点 checkbox 不展开
+    const open = childBox.style.display !== 'none';
+    if (open) {
+      childBox.style.display = 'none';
+      arrow.style.transform = '';
+    } else {
+      childBox.style.display = '';
+      arrow.style.transform = 'rotate(90deg)';
+      if (!loaded && item.child_count > 0) {
+        loaded = true;
+        childBox.innerHTML = '<div style="color:#555;font-size:11px">加载中...</div>';
+        try {
+          const pid = item.node_id || '';
+          const r = await fetch(`/api/children?parent_id=${encodeURIComponent(pid)}&limit=200`);
+          const data = await r.json();
+          const kids = data.items || data;
+          childBox.innerHTML = '';
+          kids.forEach(k => childBox.appendChild(buildPTreeNode(k)));
+        } catch(e) {
+          childBox.innerHTML = '<div style="color:#f07070">失败</div>';
+        }
+      }
+    }
+  });
+
+  return div;
+}
+
+async function refreshProductStats() {
+  try {
+    const r = await fetch('/api/product_stats');
+    const d = await r.json();
+    document.getElementById('p_total').textContent = d.total_asins || 0;
+    document.getElementById('p_multi').textContent = d.multi_list || 0;
+    const byList = {};
+    (d.by_list || []).forEach(row => byList[row.list_type] = row.cnt);
+    document.getElementById('p_nr').textContent = byList['new-releases']  || 0;
+    document.getElementById('p_bs').textContent = byList['bestsellers']   || 0;
+    document.getElementById('p_mw').textContent = byList['most-wished-for'] || 0;
+
+    const running = d.running;
+    document.getElementById('p_status').textContent = running ? '⚙ 抓取中...' : '就绪';
+    document.getElementById('p_status').style.color  = running ? '#5fdb8a' : '#888';
+  } catch(e) {}
+}
+
+function startProductPoll() {
+  if (_productPollTimer) return;
+  _productPollTimer = setInterval(refreshProductStats, 3000);
+}
+
+// ── 榜单子标签切换 ────────────────────────────────────────────────
+function switchListTab(key) {
+  ['nr','bs','mw'].forEach(k => {
+    document.getElementById('lp_'+k).style.display = k===key ? '' : 'none';
+    const btn = document.getElementById('ltab_'+k);
+    btn.style.color = k===key ? '#7eb8f7' : '#888';
+    btn.style.borderBottomColor = k===key ? '#7eb8f7' : 'transparent';
+  });
+}
+
+// ── 收集每个榜单独立参数 ──────────────────────────────────────────
+function collectListParams(key, listType) {
+  const enabled = document.getElementById('len_'+key).checked;
+  if (!enabled) return null;
+  return {
+    list_type:  listType,
+    review_max: +document.getElementById('rv_'+key).value,
+    min_list:   +document.getElementById('ml_'+key).value,
+    price_min:  +document.getElementById('pmin_'+key).value,
+    price_max:  +document.getElementById('pmax_'+key).value,
+  };
+}
+
+async function startProducts() {
+  const roots = [..._selectedRoots].filter(Boolean);
+  if (!roots.length) { alert('请在左侧类目树中勾选至少一个类目'); return; }
+
+  const lists = {};
+  const nr = collectListParams('nr','new-releases');
+  const bs = collectListParams('bs','bestsellers');
+  const mw = collectListParams('mw','most-wished-for');
+  if (nr) lists['new-releases'] = nr;
+  if (bs) lists['bestsellers'] = bs;
+  if (mw) lists['most-wished-for'] = mw;
+
+  if (!Object.keys(lists).length) { alert('请至少启用一个榜单'); return; }
+
+  const params = { roots, lists };
+
+  try {
+    const r = await fetch('/api/start_products', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params)
+    });
+    const d = await r.json();
+    if (d.status === 'already_running') alert('抓取进程已在运行中');
+    else {
+      document.getElementById('p_status').textContent = `⚙ 已启动 PID=${d.pid}`;
+      document.getElementById('p_status').style.color = '#5fdb8a';
+    }
+  } catch(e) { alert('启动失败: ' + e); }
+}
+
+async function stopProducts() {
+  try {
+    const r = await fetch('/api/stop_products', {method: 'POST'});
+    const d = await r.json();
+    document.getElementById('p_status').textContent = '已停止';
+    document.getElementById('p_status').style.color = '#888';
+  } catch(e) { alert('停止失败: ' + e); }
+}
+
+async function exportExcel() {
+  document.getElementById('p_status').textContent = '导出中...';
+  try {
+    const r = await fetch('/api/export_excel', {method: 'POST'});
+    const d = await r.json();
+    if (d.status === 'ok') {
+      document.getElementById('p_status').textContent = '✅ Excel 已导出到 data/products.xlsx';
+    } else {
+      document.getElementById('p_status').textContent = '❌ ' + (d.msg || '导出失败');
+    }
+  } catch(e) { alert('导出失败: ' + e); }
+}
+
 </script>
 </body>
 </html>
