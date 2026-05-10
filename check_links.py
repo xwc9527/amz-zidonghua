@@ -42,6 +42,47 @@ def db_conn():
     return c
 
 
+def ensure_cache_table():
+    """创建独立的 link_cache 表——与 categories 解耦，重建数据库后仍可恢复验证结果。"""
+    with _db_lock:
+        conn = db_conn()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS link_cache (
+                    node_id  TEXT PRIMARY KEY,
+                    nr_valid INTEGER,
+                    bs_valid INTEGER,
+                    ms_valid INTEGER,
+                    mw_valid INTEGER,
+                    checked_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_lc_node ON link_cache(node_id)")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def restore_from_cache():
+    """把 link_cache 的验证结果同步回 categories（数据库重建后调用）。"""
+    with _db_lock:
+        conn = db_conn()
+        try:
+            n = conn.execute("""
+                UPDATE categories SET
+                    nr_valid = (SELECT nr_valid FROM link_cache WHERE link_cache.node_id = categories.node_id),
+                    bs_valid = (SELECT bs_valid FROM link_cache WHERE link_cache.node_id = categories.node_id),
+                    ms_valid = (SELECT ms_valid FROM link_cache WHERE link_cache.node_id = categories.node_id),
+                    mw_valid = (SELECT mw_valid FROM link_cache WHERE link_cache.node_id = categories.node_id)
+                WHERE node_id IN (SELECT node_id FROM link_cache)
+            """).rowcount
+            conn.commit()
+            print(f"[link_cache] 已从缓存恢复 {n} 条验证结果", flush=True)
+            return n
+        finally:
+            conn.close()
+
+
 def extract_slug_and_id(url: str):
     """从 new-releases URL 提取 slug 和 node_id。"""
     parts = url.rstrip("/").split("/")
@@ -77,18 +118,31 @@ def check_node(node_id: str, url: str, session: requests.Session) -> dict:
 
 
 def save_result(node_id: str, results: dict):
+    """写入验证结果：同时更新 categories（快速展示）和 link_cache（持久备份）。"""
     sets = ", ".join(f"{k}=?" for k in results)
     vals = list(results.values()) + [node_id]
+    cache_cols = ", ".join(results.keys())
+    cache_phs  = ", ".join("?" * len(results))
+    cache_upd  = ", ".join(f"{k}=excluded.{k}" for k in results)
     with _db_lock:
         conn = db_conn()
         try:
+            # 1. 写 categories（即时反映到看板）
             conn.execute(f"UPDATE categories SET {sets} WHERE node_id=?", vals)
+            # 2. 写 link_cache（持久备份，不受数据库重建影响）
+            conn.execute(
+                f"INSERT INTO link_cache (node_id, {cache_cols}, checked_at) "
+                f"VALUES (?, {cache_phs}, datetime('now')) "
+                f"ON CONFLICT(node_id) DO UPDATE SET {cache_upd}, checked_at=datetime('now')",
+                [node_id] + list(results.values())
+            )
             conn.commit()
         finally:
             conn.close()
 
 
 def run_batch(workers: int = 10, target_node_id: str = None):
+    ensure_cache_table()  # 确保 link_cache 表存在
     conn = db_conn()
     if target_node_id:
         rows = conn.execute(
@@ -96,6 +150,9 @@ def run_batch(workers: int = 10, target_node_id: str = None):
             (target_node_id,)
         ).fetchall()
     else:
+        # 先从 link_cache 恢复（修复因数据库重建丢失的结果）
+        restored = restore_from_cache()
+        # 只抓未验证的（categories.nr_valid 仍为 NULL）
         rows = conn.execute(
             "SELECT node_id, url FROM categories WHERE node_id IS NOT NULL AND nr_valid IS NULL"
         ).fetchall()

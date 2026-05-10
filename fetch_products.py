@@ -75,24 +75,42 @@ def get_descendant_nodes(root_ids: list, lists: list) -> list:
     # 也包含根节点自身
     like_clauses.append(f"node_id IN ({placeholders})")
 
-    valid_map = {
-        "new-releases": "nr_valid=1",
-        "bestsellers": "bs_valid=1",
-        "most-wished-for": "mw_valid=1",
-    }
-    valid_clauses = " OR ".join(valid_map[l] for l in lists if l in valid_map)
-
     sql = f"""
         SELECT node_id, url, name, depth FROM categories
         WHERE node_id IS NOT NULL
           AND ({" OR ".join(like_clauses)})
-          AND ({valid_clauses})
         ORDER BY depth, name
     """
     rows = conn.execute(sql, root_ids).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
     print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点")
+    return result
+
+
+def get_nodes_by_slugs(slugs: list, lists: list) -> list:
+    """根据 L1 slug 查出所有后代节点（URL 前缀匹配）。"""
+    conn = db_conn()
+    like_clauses = []
+    for slug in slugs:
+        like_clauses.append(f"url LIKE '%/gp/new-releases/{slug}/%'")
+        like_clauses.append(f"url LIKE '%/gp/bestsellers/{slug}/%'")
+        like_clauses.append(f"url LIKE '%/gp/most-wished-for/{slug}/%'")
+
+    if not like_clauses:
+        conn.close()
+        return []
+
+    sql = f"""
+        SELECT DISTINCT node_id, url, name, depth FROM categories
+        WHERE node_id IS NOT NULL
+          AND ({" OR ".join(like_clauses)})
+        ORDER BY depth, name
+    """
+    rows = conn.execute(sql).fetchall()
+    conn.close()
+    result = [dict(r) for r in rows]
+    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点")
     return result
 
 
@@ -347,9 +365,13 @@ def process_node(node: dict, lists: list, review_max: int,
 
 def run_batch(root_ids: list, lists: list, review_max: int,
               min_list_size: int, delay: float = 2.0,
-              price_min: float = 0.0, price_max: float = 0.0):
+              price_min: float = 0.0, price_max: float = 0.0,
+              slugs: list = None):
     """主入口：单线程顺序抓取。"""
-    nodes = get_descendant_nodes(root_ids, lists)
+    if slugs:
+        nodes = get_nodes_by_slugs(slugs, lists)
+    else:
+        nodes = get_descendant_nodes(root_ids, lists)
     _stats["total_nodes"] = len(nodes)
 
     if not nodes:
@@ -443,8 +465,11 @@ def export_excel():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Amazon 榜单商品抓取")
-    parser.add_argument("--roots", nargs="+", required=True,
-                        help="根节点 node_id 列表")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--roots", nargs="+",
+                       help="根节点 node_id 列表")
+    group.add_argument("--slugs", nargs="+",
+                       help="L1 类目 slug 列表 (如 automotive baby-products)")
     parser.add_argument("--review-max", type=int, default=DEFAULT_REVIEW_MAX)
     parser.add_argument("--min-list",   type=int, default=DEFAULT_MIN_LIST_SIZE)
     parser.add_argument("--price-min",  type=float, default=DEFAULT_PRICE_MIN)
@@ -454,12 +479,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_batch(
-        root_ids=args.roots,
+        root_ids=args.roots or [],
         lists=args.lists,
         review_max=args.review_max,
         min_list_size=args.min_list,
         delay=args.delay,
         price_min=args.price_min,
         price_max=args.price_max,
+        slugs=args.slugs,
     )
 

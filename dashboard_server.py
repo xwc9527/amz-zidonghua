@@ -8,8 +8,10 @@
 import json
 import os
 import sys
+import re
 import sqlite3
 import http.server
+import socketserver
 import functools
 import urllib.parse
 import subprocess
@@ -47,6 +49,81 @@ def db_scalar(sql, params=()):
         return conn.execute(sql, params).fetchone()[0]
     finally:
         conn.close()
+
+
+def _ensure_tables():
+    """启动时自动创建缺失的表/列，避免运行时崩溃。"""
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    # product_sightings 表
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS product_sightings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asin TEXT NOT NULL,
+        name TEXT,
+        price REAL,
+        price_raw TEXT,
+        original_price TEXT,
+        discount_pct TEXT,
+        rating REAL,
+        review_count INTEGER,
+        rank INTEGER,
+        image_url TEXT,
+        product_url TEXT,
+        has_video INTEGER DEFAULT 0,
+        is_amazon_choice INTEGER DEFAULT 0,
+        node_id TEXT,
+        category_name TEXT,
+        category_slug TEXT,
+        category_depth INTEGER,
+        list_type TEXT,
+        list_total INTEGER,
+        scraped_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(asin, node_id, list_type)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ps_asin ON product_sightings(asin);
+    CREATE INDEX IF NOT EXISTS idx_ps_node ON product_sightings(node_id);
+    CREATE INDEX IF NOT EXISTS idx_ps_list ON product_sightings(list_type);
+    """)
+    # 榜单验证列
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(categories)")}
+    for col in ["nr_valid", "bs_valid", "ms_valid", "mw_valid"]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE categories ADD COLUMN {col} INTEGER")
+    # link_cache 独立验证缓存表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS link_cache (
+            node_id  TEXT PRIMARY KEY,
+            nr_valid INTEGER,
+            bs_valid INTEGER,
+            ms_valid INTEGER,
+            mw_valid INTEGER,
+            checked_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lc_node ON link_cache(node_id)")
+    conn.commit()
+    # 启动时自动从 link_cache 恢复验证结果（防止重建数据库后丢失）
+    n = conn.execute("""
+        UPDATE categories SET
+            nr_valid = COALESCE(nr_valid, (SELECT nr_valid FROM link_cache lc WHERE lc.node_id = categories.node_id)),
+            bs_valid = COALESCE(bs_valid, (SELECT bs_valid FROM link_cache lc WHERE lc.node_id = categories.node_id)),
+            ms_valid = COALESCE(ms_valid, (SELECT ms_valid FROM link_cache lc WHERE lc.node_id = categories.node_id)),
+            mw_valid = COALESCE(mw_valid, (SELECT mw_valid FROM link_cache lc WHERE lc.node_id = categories.node_id))
+        WHERE node_id IN (SELECT node_id FROM link_cache)
+          AND (nr_valid IS NULL OR bs_valid IS NULL OR ms_valid IS NULL OR mw_valid IS NULL)
+    """).rowcount
+    conn.commit()
+    if n > 0:
+        print(f"[启动] 已从 link_cache 恢复 {n} 条验证结果", flush=True)
+    conn.close()
+
+
+# ── 使用 ThreadingHTTPServer 防止单请求阻塞整个服务 ─────────────────
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
@@ -87,12 +164,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/status":
             self._json_response(self._get_status())
 
-        elif path == "/api/roots":
-            self._json_response(self._get_roots())
+        elif path == "/api/l1_categories":
+            self._json_response(self._get_l1_categories())
 
-        elif path == "/api/children":
+        elif path == "/api/slug_children":
             qs = urllib.parse.parse_qs(parsed.query)
-            self._json_response(self._get_children(qs))
+            self._json_response(self._get_slug_children(qs))
 
         elif path == "/api/check_progress":
             self._json_response(self._get_check_progress())
@@ -102,9 +179,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         elif path == "/api/product_progress":
             self._json_response(_get_product_progress())
-
-        elif path == "/api/l1_slugs":
-            self._json_response(_get_l1_slugs())
 
         else:
             super().do_GET()
@@ -160,9 +234,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         }
 
     def _get_categories(self, qs):
-        sql = ("SELECT name, url, node_id, depth, source, explored, "
-               "nr_valid, bs_valid, ms_valid, mw_valid "
-               "FROM categories WHERE 1=1")
+        # LEFT JOIN link_cache 保证即使 categories 里值为 NULL 也能展示缓存的验证结果
+        sql = ("SELECT c.name, c.url, c.node_id, c.depth, c.source, c.explored, "
+               "COALESCE(c.nr_valid, lc.nr_valid) AS nr_valid, "
+               "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
+               "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
+               "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid "
+               "FROM categories c "
+               "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
+               "WHERE 1=1")
         params = []
 
         search = qs.get("q", [""])[0]
@@ -214,42 +294,65 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass  # 客户端已断开
 
-    def _get_roots(self):
-        """返回 L1 顶级类目（parent_node_id IS NULL 且 true_depth=2）。"""
+    def _get_l1_categories(self):
+        """返回 L1 顶级类目列表（slug 格式），供商品抓取面板使用。"""
         rows = db_query(
-            "SELECT c.name, c.url, c.node_id, c.true_depth, "
-            "IFNULL(cc.cnt, 0) AS child_count "
-            "FROM categories c "
-            "LEFT JOIN (SELECT parent_node_id, COUNT(*) AS cnt "
-            "           FROM categories GROUP BY parent_node_id) cc "
-            "  ON cc.parent_node_id = c.node_id "
-            "WHERE c.parent_node_id IS NULL AND c.true_depth IS NOT NULL "
-            "ORDER BY c.name"
+            "SELECT name, url FROM categories WHERE depth=1 AND node_id IS NULL "
+            "ORDER BY name"
         )
-        return rows
+        result = []
+        seen_slugs = set()
+        for r in rows:
+            m = re.search(r'/gp/new-releases/([a-z][a-z0-9-]+)', r['url'])
+            if m:
+                slug = m.group(1)
+                if slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
+                child_count = db_scalar(
+                    "SELECT COUNT(*) FROM categories "
+                    "WHERE node_id IS NOT NULL AND url LIKE ?",
+                    (f"%/gp/new-releases/{slug}/%",)
+                )
+                result.append({
+                    "name": r['name'],
+                    "slug": slug,
+                    "child_count": child_count,
+                })
+        # 防御性：扫描子节点 URL 实际出现的 slug，补充 L1 行里缺失的孤儿 slug
+        all_child_urls = db_query(
+            "SELECT DISTINCT url FROM categories WHERE node_id IS NOT NULL"
+        )
+        for r in all_child_urls:
+            m = re.search(r'/gp/new-releases/([a-z][a-z0-9-]+)/', r['url'])
+            if m:
+                slug = m.group(1)
+                if slug not in seen_slugs:
+                    seen_slugs.add(slug)
+                    child_count = db_scalar(
+                        "SELECT COUNT(*) FROM categories "
+                        "WHERE node_id IS NOT NULL AND url LIKE ?",
+                        (f"%/gp/new-releases/{slug}/%",)
+                    )
+                    result.append({
+                        "name": slug.replace("-", " ").title(),
+                        "slug": slug,
+                        "child_count": child_count,
+                    })
+        result.sort(key=lambda x: x['name'])
+        return result
 
-    def _get_children(self, qs):
-        """返回指定 parent_node_id 的直接子节点。"""
-        parent_id = qs.get("parent_id", [""])[0]
-        offset    = int(qs.get("offset", ["0"])[0])
-        limit     = int(qs.get("limit",  ["200"])[0])
-        if not parent_id:
+    def _get_slug_children(self, qs):
+        """返回指定 slug 下所有子类目节点，供商品面板展开树使用。"""
+        slug = qs.get("slug", [""])[0]
+        if not slug:
             return []
-        rows = db_query(
-            "SELECT c.name, c.url, c.node_id, c.true_depth, "
-            "IFNULL(cc.cnt, 0) AS child_count "
-            "FROM categories c "
-            "LEFT JOIN (SELECT parent_node_id, COUNT(*) AS cnt "
-            "           FROM categories GROUP BY parent_node_id) cc "
-            "  ON cc.parent_node_id = c.node_id "
-            "WHERE c.parent_node_id=? "
-            "ORDER BY c.name LIMIT ? OFFSET ?",
-            (parent_id, limit, offset)
+        return db_query(
+            "SELECT name, url, node_id, depth FROM categories "
+            "WHERE node_id IS NOT NULL AND url LIKE ? "
+            "ORDER BY depth, name",
+            (f"%/gp/new-releases/{slug}/%",)
         )
-        total = db_scalar(
-            "SELECT COUNT(*) FROM categories WHERE parent_node_id=?", (parent_id,)
-        )
-        return {"items": rows, "total": total, "offset": offset, "limit": limit}
 
     def _get_check_progress(self):
         total   = db_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
@@ -329,25 +432,6 @@ def _stop_scraper():
 
 # ── 商品抓取进程管理 ──────────────────────────────────────────────────
 
-def _get_l1_slugs():
-    """返回 DB 中所有 L1 的 slug 列表供前端下拉。"""
-    rows = db_query(
-        "SELECT DISTINCT REPLACE(SUBSTR(url, INSTR(url,'new-releases/')+13), "
-        "SUBSTR(REPLACE(SUBSTR(url, INSTR(url,'new-releases/')+13),'/','-'), "
-        "INSTR(REPLACE(SUBSTR(url, INSTR(url,'new-releases/')+13),'/','-'),'-')), '') "
-        "FROM categories WHERE depth=1 AND url LIKE '%/new-releases/%'"
-    )
-    # 简化：直接用正则从 url 提取 L1 slug
-    import re
-    all_urls = db_query("SELECT DISTINCT url FROM categories WHERE depth=1")
-    slugs = set()
-    for row in all_urls:
-        m = re.search(r'/gp/new-releases/([^/]+)/', row["url"])
-        if m:
-            slugs.add(m.group(1))
-    return sorted(slugs)
-
-
 def _get_product_stats():
     """商品数据统计。"""
     try:
@@ -385,8 +469,13 @@ def _start_product_scraper(params: dict):
             return {"status": "already_running"}
         cmd = [sys.executable, "-u",
                os.path.join(BASE_DIR, "fetch_products.py")]
-        if params.get("roots"):
+        # 新版用 --slugs 替代 --roots
+        if params.get("slugs"):
+            cmd += ["--slugs"] + params["slugs"]
+        elif params.get("roots"):
             cmd += ["--roots"] + params["roots"]
+        else:
+            return {"status": "error", "msg": "no slugs or roots specified"}
         if params.get("lists"):
             cmd += ["--lists"] + params["lists"]
         if params.get("review_max"):
@@ -434,8 +523,11 @@ def main():
         print("请先运行 init_db.py")
         sys.exit(1)
 
+    # 自动建表/加列，防止运行时因 Schema 不一致崩溃
+    _ensure_tables()
+
     handler = functools.partial(DashboardHandler, directory=DATA_DIR)
-    server = http.server.HTTPServer(("localhost", port), handler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     stats = db_query("SELECT COUNT(*) as total FROM categories")[0]
     print(f"[看板] http://localhost:{port}/dashboard.html", flush=True)
     print(f"[看板] 数据库: {DB_FILE}  当前 {stats['total']} 个节点", flush=True)

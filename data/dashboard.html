@@ -78,33 +78,7 @@
     .tab.active { color: #7eb8f7; border-bottom-color: #7eb8f7; }
     .tab:hover:not(.active) { color: #ccc; }
 
-    /* ─── Tree ────────────────────────────────── */
-    .tree-node { user-select: none; }
-    .tree-row {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 8px; border-radius: 5px; cursor: pointer;
-      transition: background 0.12s;
-    }
-    .tree-row:hover { background: #1a1d27; }
-    .tree-toggle {
-      width: 16px; text-align: center; font-size: 10px; color: #555;
-      flex-shrink: 0; transition: transform 0.18s;
-    }
-    .tree-toggle.open { transform: rotate(90deg); color: #7eb8f7; }
-    .tree-toggle.leaf { cursor: default; }
-    .tree-name { flex: 1; font-size: 13px; }
-    .tree-meta { font-size: 11px; color: #555; white-space: nowrap; }
-    .tree-link { font-size: 11px; color: #4a9eff; text-decoration: none; }
-    .tree-link:hover { text-decoration: underline; }
-    .tree-children { margin-left: 24px; border-left: 1px solid #2a2d3e; padding-left: 8px; display: none; }
-    .tree-children.open { display: block; }
-    .tree-more {
-      margin: 4px 0 4px 8px; padding: 3px 12px; font-size: 11px;
-      background: #1a1d27; border: 1px solid #2a2d3e; color: #7eb8f7;
-      border-radius: 4px; cursor: pointer;
-    }
-    .tree-more:hover { background: #2a2d3e; }
-    .tree-loading { font-size: 11px; color: #555; padding: 4px 8px; }
+
 
     /* ─── 榜单按钮 ─────────────────────────────── */
     .list-btns { display: flex; gap: 4px; flex-wrap: nowrap; }
@@ -165,7 +139,6 @@
 
 <div class="tab-bar">
   <button class="tab active" id="tabList" onclick="switchTab('list')">&#9776; 列表视图</button>
-  <button class="tab" id="tabTree" onclick="switchTab('tree')">&#9658; 树形视图</button>
   <button class="tab" id="tabProducts" onclick="switchTab('products')">&#128202; 商品抓取</button>
 </div>
 
@@ -211,9 +184,7 @@
 
 </div><!-- /listView -->
 
-<div id="treeView" style="display:none;margin-top:8px">
-  <div id="treeRoot"><div class="tree-loading">&#8987; 加载中...</div></div>
-</div>
+
 
 <!-- ── 商品抓取面板 ────────────────────────────────────────── -->
 <div id="productsView" style="display:none;margin-top:8px">
@@ -317,102 +288,15 @@
 
 <script>
 // ── Tab 切换 ──────────────────────────────────────────────────────
-let treeLoaded = false;
 function switchTab(tab) {
   document.getElementById('listView').style.display     = tab === 'list'     ? '' : 'none';
-  document.getElementById('treeView').style.display     = tab === 'tree'     ? '' : 'none';
   document.getElementById('productsView').style.display = tab === 'products' ? '' : 'none';
   document.getElementById('tabList').className     = 'tab' + (tab === 'list'     ? ' active' : '');
-  document.getElementById('tabTree').className     = 'tab' + (tab === 'tree'     ? ' active' : '');
   document.getElementById('tabProducts').className = 'tab' + (tab === 'products' ? ' active' : '');
-  if (tab === 'tree' && !treeLoaded) initTree();
   if (tab === 'products') initProductsTab();
 }
 
-// ── 树形懒加载 ───────────────────────────────────────────────────
-async function initTree() {
-  treeLoaded = true;
-  const root = document.getElementById('treeRoot');
-  root.innerHTML = '<div class="tree-loading">⏳ 加载根节点...</div>';
-  try {
-    const data = await fetch('/api/roots').then(r => r.json());
-    root.innerHTML = '';
-    data.forEach(node => root.appendChild(createTreeNode(node)));
-  } catch(e) {
-    root.innerHTML = '<div class="tree-loading" style="color:#e74c3c">加载失败，请检查服务器</div>';
-  }
-}
 
-function createTreeNode(node) {
-  const wrap = document.createElement('div');
-  wrap.className = 'tree-node';
-
-  const hasKids = (node.child_count || 0) > 0;
-  const td = node.true_depth || node.depth || 1;
-  const dc = td >= 5 ? 'd5' : td >= 4 ? 'd4' : td >= 3 ? 'd3' : td >= 2 ? 'd2' : 'd1';
-  const name = node.name && !String(node.name).match(/^\d+$/) ? node.name : '(未命名)';
-
-  const row = document.createElement('div');
-  row.className = 'tree-row';
-  row.innerHTML = `
-    <span class="tree-toggle ${hasKids ? '' : 'leaf'}">${hasKids ? '▶' : '·'}</span>
-    <span class="depth-badge ${dc}">L${td}</span>
-    <span class="tree-name">${name}</span>
-    <span class="tree-meta">${node.child_count > 0 ? node.child_count + ' 子节点' : ''}</span>
-    ${node.url ? `<a class="tree-link" href="${node.url}" target="_blank" onclick="event.stopPropagation()">↗</a>` : ''}
-  `;
-
-  const children = document.createElement('div');
-  children.className = 'tree-children';
-  wrap.appendChild(row);
-  wrap.appendChild(children);
-
-  if (hasKids) {
-    let expanded = false;
-    let loaded   = false;
-    row.addEventListener('click', async () => {
-      expanded = !expanded;
-      const toggle = row.querySelector('.tree-toggle');
-      toggle.classList.toggle('open', expanded);
-      children.classList.toggle('open', expanded);
-      if (expanded && !loaded) {
-        loaded = true;
-        await loadChildren(node.node_id, children, 0);
-      }
-    });
-  }
-  return wrap;
-}
-
-async function loadChildren(parentId, container, offset) {
-  const loading = document.createElement('div');
-  loading.className = 'tree-loading';
-  loading.textContent = '⏳ 加载中...';
-  container.appendChild(loading);
-
-  try {
-    const url = `/api/children?parent_id=${encodeURIComponent(parentId)}&offset=${offset}&limit=200`;
-    const data = await fetch(url).then(r => r.json());
-    loading.remove();
-
-    data.items.forEach(node => container.appendChild(createTreeNode(node)));
-
-    const loaded = offset + data.items.length;
-    if (loaded < data.total) {
-      const btn = document.createElement('button');
-      btn.className = 'tree-more';
-      btn.textContent = `加载更多（${loaded}/${data.total}）`;
-      btn.onclick = async () => {
-        btn.remove();
-        await loadChildren(parentId, container, loaded);
-      };
-      container.appendChild(btn);
-    }
-  } catch(e) {
-    loading.textContent = '加载失败';
-    loading.style.color = '#e74c3c';
-  }
-}
 
 let allNodes = [];
 let isPaused = false;
@@ -579,107 +463,136 @@ async function initProductsTab() {
   startProductPoll();
 }
 
-// ── 商品树（带 checkbox）──────────────────────────────────────────
+// ── 商品 L1 类目列表（slug 勾选）────────────────────────────────
+const _selectedSlugs = new Set();
+
 async function loadProductTree() {
   const root = document.getElementById('pTreeRoot');
   root.innerHTML = '<div style="color:#555">⏳ 加载中...</div>';
   try {
-    const r = await fetch('/api/roots');
-    const items = await r.json();
+    const items = await fetch('/api/l1_categories').then(r => r.json());
     root.innerHTML = '';
-    items.forEach(it => root.appendChild(buildPTreeNode(it)));
+    items.forEach(it => root.appendChild(buildSlugRow(it)));
+    if (!items.length) root.innerHTML = '<div style="color:#f07070">无 L1 类目数据</div>';
   } catch(e) {
-    root.innerHTML = '<div style="color:#f07070">加载失败</div>';
+    root.innerHTML = '<div style="color:#f07070">加载失败: ' + e + '</div>';
   }
 }
 
-// 搜索过滤（只过滤顶层节点文字，收起状态不受影响）
-let _allL1Nodes = [];
-function filterPTree(q) {
-  const kw = q.trim().toLowerCase();
-  const root = document.getElementById('pTreeRoot');
-  [...root.children].forEach(div => {
-    const label = div.querySelector('span[data-label]') || div.querySelector('span:nth-child(3)');
-    const text = (label ? label.textContent : '').toLowerCase();
-    div.style.display = (!kw || text.includes(kw)) ? '' : 'none';
-  });
-}
+function buildSlugRow(item) {
+  const wrap = document.createElement('div');
 
-function buildPTreeNode(item) {
-  const div = document.createElement('div');
-  div.style.marginLeft = '0px';
-
+  // ── 主行 ──
   const row = document.createElement('div');
-  row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:2px 0;cursor:pointer';
-
-  // checkbox
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.dataset.nodeId = item.node_id || '';
-  cb.dataset.name = item.name || '';
-  cb.addEventListener('change', () => {
-    if (cb.checked) _selectedRoots.add(cb.dataset.nodeId);
-    else _selectedRoots.delete(cb.dataset.nodeId);
-    document.getElementById('p_sel_count').textContent = _selectedRoots.size + ' 个已选';
-  });
-  if (item.node_id) row.appendChild(cb);
+  row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;cursor:pointer';
+  row.onmouseenter = () => row.style.background = '#1a2a3a';
+  row.onmouseleave = () => row.style.background = '';
 
   // 展开箭头
   const arrow = document.createElement('span');
   arrow.textContent = '▶';
-  arrow.style.cssText = 'font-size:9px;color:#555;width:12px;transition:transform .2s';
+  arrow.style.cssText = 'font-size:9px;color:#555;width:12px;flex-shrink:0;transition:transform .18s;user-select:none';
   row.appendChild(arrow);
 
-  // 名称
+  // L1 checkbox（选整个 L1）
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.title = '选择整个 ' + item.name + ' 大类';
+  cb.addEventListener('change', e => {
+    e.stopPropagation();
+    if (cb.checked) _selectedSlugs.add(item.slug);
+    else _selectedSlugs.delete(item.slug);
+    document.getElementById('p_sel_count').textContent = _selectedSlugs.size + ' 个已选';
+  });
+  row.appendChild(cb);
+
   const label = document.createElement('span');
-  label.textContent = `${item.name || '?'}`;
+  label.textContent = item.name;
+  label.style.cssText = 'color:#ccc;font-size:12px;flex:1';
   label.setAttribute('data-label', '1');
-  label.style.cssText = 'color:#ccc;font-size:12px';
   row.appendChild(label);
 
-  // 子节点数
-  if (item.child_count > 0) {
-    const cnt = document.createElement('span');
-    cnt.textContent = `(${item.child_count})`;
-    cnt.style.cssText = 'color:#555;font-size:10px;margin-left:4px';
-    row.appendChild(cnt);
-  }
+  const cnt = document.createElement('span');
+  cnt.textContent = item.child_count + ' 类';
+  cnt.style.cssText = 'color:#555;font-size:10px;flex-shrink:0';
+  row.appendChild(cnt);
 
-  div.appendChild(row);
+  wrap.appendChild(row);
 
-  // 子容器（懒加载）
+  // ── 子节点容器（懒加载）──
   const childBox = document.createElement('div');
-  childBox.style.cssText = 'display:none;margin-left:16px';
-  div.appendChild(childBox);
+  childBox.style.cssText = 'display:none;margin-left:20px;border-left:1px solid #2a2d3e;padding-left:8px';
+  wrap.appendChild(childBox);
 
-  let loaded = false;
-  row.addEventListener('click', async (e) => {
-    if (e.target === cb) return; // 点 checkbox 不展开
-    const open = childBox.style.display !== 'none';
-    if (open) {
-      childBox.style.display = 'none';
-      arrow.style.transform = '';
-    } else {
-      childBox.style.display = '';
-      arrow.style.transform = 'rotate(90deg)';
-      if (!loaded && item.child_count > 0) {
-        loaded = true;
-        childBox.innerHTML = '<div style="color:#555;font-size:11px">加载中...</div>';
-        try {
-          const pid = item.node_id || '';
-          const r = await fetch(`/api/children?parent_id=${encodeURIComponent(pid)}&limit=200`);
-          const data = await r.json();
-          const kids = data.items || data;
-          childBox.innerHTML = '';
-          kids.forEach(k => childBox.appendChild(buildPTreeNode(k)));
-        } catch(e) {
-          childBox.innerHTML = '<div style="color:#f07070">失败</div>';
+  let expanded = false;
+  let loaded   = false;
+
+  row.addEventListener('click', async e => {
+    if (e.target === cb) return;
+    expanded = !expanded;
+    arrow.style.transform = expanded ? 'rotate(90deg)' : '';
+    arrow.style.color     = expanded ? '#7eb8f7' : '#555';
+    childBox.style.display = expanded ? '' : 'none';
+
+    if (expanded && !loaded) {
+      loaded = true;
+      childBox.innerHTML = '<div style="color:#555;font-size:11px;padding:4px">⏳ 加载中...</div>';
+      try {
+        const data = await fetch('/api/slug_children?slug=' + encodeURIComponent(item.slug)).then(r => r.json());
+        childBox.innerHTML = '';
+        if (!data.length) {
+          childBox.innerHTML = '<div style="color:#555;font-size:11px;padding:4px">暂无子类目</div>';
+          return;
         }
+        data.forEach(node => childBox.appendChild(buildChildRow(node)));
+      } catch(e) {
+        childBox.innerHTML = '<div style="color:#f07070;font-size:11px">加载失败</div>';
       }
     }
   });
 
+  return wrap;
+}
+
+function buildChildRow(node) {
+  const div = document.createElement('div');
+  div.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px';
+  div.onmouseenter = () => div.style.background = '#1a2a3a';
+  div.onmouseleave = () => div.style.background = '';
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.dataset.nodeId = node.node_id;
+  cb.addEventListener('change', () => {
+    if (cb.checked) _selectedSlugs.add('__node__' + node.node_id);
+    else _selectedSlugs.delete('__node__' + node.node_id);
+    document.getElementById('p_sel_count').textContent = _selectedSlugs.size + ' 个已选';
+  });
+  div.appendChild(cb);
+
+  const depthBadge = document.createElement('span');
+  const d = node.depth || 0;
+  const dc = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
+  depthBadge.className = 'depth-badge ' + dc;
+  depthBadge.textContent = 'L' + d;
+  div.appendChild(depthBadge);
+
+  const name = document.createElement('span');
+  name.textContent = node.name || '(未命名)';
+  name.style.cssText = 'color:#aaa;font-size:11px;flex:1';
+  div.appendChild(name);
+
   return div;
+}
+
+function filterPTree(q) {
+  const kw = q.trim().toLowerCase();
+  const root = document.getElementById('pTreeRoot');
+  [...root.children].forEach(div => {
+    const label = div.querySelector('span[data-label]');
+    const text = (label ? label.textContent : '').toLowerCase();
+    div.style.display = (!kw || text.includes(kw)) ? '' : 'none';
+  });
 }
 
 async function refreshProductStats() {
@@ -729,20 +642,28 @@ function collectListParams(key, listType) {
 }
 
 async function startProducts() {
-  const roots = [..._selectedRoots].filter(Boolean);
-  if (!roots.length) { alert('请在左侧类目树中勾选至少一个类目'); return; }
+  const allSelected = [..._selectedSlugs].filter(Boolean);
+  if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
 
-  const lists = {};
-  const nr = collectListParams('nr','new-releases');
-  const bs = collectListParams('bs','bestsellers');
-  const mw = collectListParams('mw','most-wished-for');
-  if (nr) lists['new-releases'] = nr;
-  if (bs) lists['bestsellers'] = bs;
-  if (mw) lists['most-wished-for'] = mw;
+  // 区分 L1 slug 选择 和 具体子节点选择
+  const slugs = allSelected.filter(s => !s.startsWith('__node__'));
+  const roots = allSelected.filter(s => s.startsWith('__node__')).map(s => s.replace('__node__', ''));
 
-  if (!Object.keys(lists).length) { alert('请至少启用一个榜单'); return; }
+  const enabledLists = [];
+  if (document.getElementById('len_nr').checked) enabledLists.push('new-releases');
+  if (document.getElementById('len_bs').checked) enabledLists.push('bestsellers');
+  if (document.getElementById('len_mw').checked) enabledLists.push('most-wished-for');
+  if (!enabledLists.length) { alert('请至少启用一个榜单'); return; }
 
-  const params = { roots, lists };
+  const params = {
+    lists:      enabledLists,
+    review_max: +document.getElementById('rv_nr').value,
+    min_list:   +document.getElementById('ml_nr').value,
+    price_min:  +document.getElementById('pmin_nr').value,
+    price_max:  +document.getElementById('pmax_nr').value,
+  };
+  if (slugs.length) params.slugs = slugs;
+  if (roots.length) params.roots = roots;
 
   try {
     const r = await fetch('/api/start_products', {
@@ -752,6 +673,7 @@ async function startProducts() {
     });
     const d = await r.json();
     if (d.status === 'already_running') alert('抓取进程已在运行中');
+    else if (d.status === 'error') alert('启动失败: ' + d.msg);
     else {
       document.getElementById('p_status').textContent = `⚙ 已启动 PID=${d.pid}`;
       document.getElementById('p_status').style.color = '#5fdb8a';

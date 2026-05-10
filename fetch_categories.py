@@ -482,11 +482,11 @@ def db_insert(nodes: list[dict], explored: int = 0) -> int:
                 try:
                     conn.execute(
                         "INSERT OR IGNORE INTO categories"
-                        "(name, url, node_id, depth, source, explored, parent_url) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                        "(name, url, node_id, depth, source, explored) "
+                        "VALUES(?, ?, ?, ?, ?, ?)",
                         (n.get("name", ""), url, n.get("node_id"),
                          n.get("depth", 0), n.get("source", "sidebar"),
-                         explored, _parent_url(url))
+                         explored)
                     )
                     if conn.total_changes:
                         added += conn.total_changes
