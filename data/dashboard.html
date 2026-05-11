@@ -182,10 +182,10 @@
   </div>
 
   <!-- 左右布局 -->
-  <div style="display:flex;gap:16px;height:calc(100vh - 260px)">
+  <div style="display:flex;gap:16px;height:calc(100vh - 260px);overflow:hidden;min-height:0">
 
     <!-- 左侧：类目树（带勾选） -->
-    <div style="width:35%;min-width:320px;background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:12px;display:flex;flex-direction:column;height:100%;overflow:hidden">
+    <div style="width:35%;min-width:320px;background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:12px;display:flex;flex-direction:column;height:100%;overflow:hidden;min-height:0">
       <div style="font-size:13px;color:#aaa;font-weight:600;margin-bottom:6px">
         选择类目分支 <span id="p_sel_count" style="color:#7eb8f7;font-size:11px;margin-left:6px">0 个已选</span>
       </div>
@@ -199,7 +199,7 @@
     </div>
 
     <!-- 右侧：参数 + 操作 -->
-    <div style="flex:1;min-width:0">
+    <div style="flex:1;min-width:0;height:100%;overflow-y:auto;min-height:0">
 
       <!-- 榜单子标签 -->
       <div style="background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:0;margin-bottom:12px;overflow:hidden">
