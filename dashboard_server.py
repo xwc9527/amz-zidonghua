@@ -242,7 +242,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid "
                "FROM categories c "
                "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
-               "WHERE 1=1")
+               "WHERE c.node_id IS NOT NULL")
         params = []
 
         search = qs.get("q", [""])[0]
@@ -274,8 +274,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             st = rows[0] if rows else {"phase": "idle"}
         except Exception:
             st = {"phase": "idle"}
+        # 检测外部启动的爬虫：数据库状态在 60s 内有更新且非终态
+        if not running and st.get("updated_at"):
+            try:
+                from datetime import datetime, timezone
+                last = datetime.fromisoformat(st["updated_at"]).replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - last).total_seconds() < 60 \
+                   and st.get("phase") not in ("idle", "done", None):
+                    running = True
+            except Exception:
+                pass
         st["scraper_running"] = running
-        # 爬虫已退出时，根据队列实际状态推导阶段
         if not running:
             queue = db_scalar("SELECT COUNT(*) FROM categories WHERE explored=0")
             if queue == 0 and db_scalar("SELECT COUNT(*) FROM categories") > 0:
@@ -348,7 +357,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if not slug:
             return []
         return db_query(
-            "SELECT name, url, node_id, depth FROM categories "
+            "SELECT name, url, node_id, depth, parent_node_id FROM categories "
             "WHERE node_id IS NOT NULL AND url LIKE ? "
             "ORDER BY depth, name",
             (f"%/gp/new-releases/{slug}/%",)

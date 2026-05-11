@@ -158,6 +158,54 @@ def extract_node_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+# 榜单验证（内嵌到 BFS 遍历中，省去 check_links.py 的二次遍历）
+LIST_PREFIXES = [
+    ("nr_valid",  "new-releases"),
+    ("bs_valid",  "bestsellers"),
+    ("ms_valid",  "movers-and-shakers"),
+    ("mw_valid",  "most-wished-for"),
+]
+
+def _probe_list_url(url: str) -> int:
+    """GET+stream 探测榜单 URL，返回 1(200) 或 0。"""
+    try:
+        r = SESSION.get(url, stream=True, timeout=(5, 3), allow_redirects=True)
+        r.close()
+        return 1 if r.status_code == 200 else 0
+    except Exception:
+        return 0
+
+def _validate_and_save(node_id: str, url: str):
+    """对一个节点的 4 个榜单 URL 做探测并写入 categories + link_cache。"""
+    slug_match = re.search(r'/gp/new-releases/([^/]+)/(\d+)', url)
+    if not slug_match:
+        return
+    slug, nid = slug_match.group(1), slug_match.group(2)
+    results = {}
+    for col, prefix in LIST_PREFIXES:
+        test_url = f"https://www.amazon.com/gp/{prefix}/{slug}/{nid}/"
+        _rate_wait()
+        results[col] = _probe_list_url(test_url)
+    sets = ", ".join(f"{k}=?" for k in results)
+    vals = list(results.values()) + [node_id]
+    cache_cols = ", ".join(results.keys())
+    cache_phs  = ", ".join("?" * len(results))
+    cache_upd  = ", ".join(f"{k}=excluded.{k}" for k in results)
+    with _db_lock:
+        conn = db_conn()
+        try:
+            conn.execute(f"UPDATE categories SET {sets} WHERE node_id=?", vals)
+            conn.execute(
+                f"INSERT INTO link_cache (node_id, {cache_cols}) "
+                f"VALUES (?, {cache_phs}) "
+                f"ON CONFLICT(node_id) DO UPDATE SET {cache_upd}",
+                [node_id] + list(results.values())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 解析层：侧边栏、ASIN、面包屑
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -326,6 +374,7 @@ def phase1_sidebar_bfs() -> dict[str, list[str]]:
 
                 for c in new_children:
                     c["depth"] = depth + 1
+                    c["parent_node_id"] = node.get("node_id") or extract_node_id(node.get("url", ""))
 
                 # 新节点直接写入 SQLite（explored=0，即自动加入队列）
                 to_insert = [c for c in new_children if normalize_url(c["url"]) != root_url]
@@ -340,6 +389,11 @@ def phase1_sidebar_bfs() -> dict[str, list[str]]:
 
                 # 标记当前节点为已探索
                 db_mark_explored(url)
+
+                # 顺便验证当前节点的 4 个榜单 URL（省去 check_links.py 二次遍历）
+                cur_nid = node.get("node_id") or extract_node_id(url)
+                if cur_nid:
+                    _validate_and_save(cur_nid, url)
 
                 if url != root_url and asins:
                     with nodes_lock:
@@ -481,12 +535,12 @@ def db_insert(nodes: list[dict], explored: int = 0) -> int:
                     continue
                 try:
                     conn.execute(
-                        "INSERT OR IGNORE INTO categories"
-                        "(name, url, node_id, depth, source, explored) "
-                        "VALUES(?, ?, ?, ?, ?, ?)",
+                        "INSERT OR IGNORE INTO categories "
+                        "(name, url, node_id, depth, source, explored, parent_node_id) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?)",
                         (n.get("name", ""), url, n.get("node_id"),
                          n.get("depth", 0), n.get("source", "sidebar"),
-                         explored)
+                         explored, n.get("parent_node_id"))
                     )
                     if conn.total_changes:
                         added += conn.total_changes
@@ -574,6 +628,20 @@ def db_update_status(phase: str):
 if __name__ == "__main__":
     # 启动 stdin 控制监听（接收 dashboard_server 的 pause/resume/stop 指令）
     _start_stdin_listener()
+
+    # 确保 link_cache 表存在（供内嵌榜单验证使用）
+    with _db_lock:
+        _c = db_conn()
+        _c.execute("""
+            CREATE TABLE IF NOT EXISTS link_cache (
+                node_id TEXT PRIMARY KEY,
+                nr_valid INTEGER, bs_valid INTEGER,
+                ms_valid INTEGER, mw_valid INTEGER,
+                checked_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        _c.commit()
+        _c.close()
 
     # 检查数据库
     stats = db_stats()
