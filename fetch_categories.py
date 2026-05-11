@@ -285,12 +285,12 @@ def parse_breadcrumb(html: str) -> list[dict]:
     return results
 
 
-def verify_node_has_new_releases(node_id: str) -> bool:
+def verify_node_has_new_releases(node_id: str, slug: str = "home-garden") -> bool:
     """
     验证 node_id 是否有对应的新品榜页面（HTTP 200）。
     用流式读取，只读 1KB 就关闭，避免下载完整页面。
     """
-    url = f"https://www.amazon.com/gp/new-releases/home-garden/{node_id}/"
+    url = f"https://www.amazon.com/gp/new-releases/{slug}/{node_id}/"
     try:
         r = SESSION.get(url, timeout=10, stream=True)
         next(r.iter_content(1024), None)
@@ -474,19 +474,28 @@ def phase2_breadcrumb_discovery(asin_cache: dict):
 
         crumbs = parse_breadcrumb(html)
         found  = 0
-        for crumb in crumbs:
+        # 从叶子 URL 提取正确的 slug（如 automotive、kitchen 等）
+        slug_m = re.search(r'/gp/new-releases/([^/]+)/', url)
+        leaf_slug = slug_m.group(1) if slug_m else "home-garden"
+
+        for j, crumb in enumerate(crumbs):
             nid = crumb["node_id"]
             if nid in known_ids:
                 continue
 
-            if verify_node_has_new_releases(nid):
-                nr_url = f"https://www.amazon.com/gp/new-releases/home-garden/{nid}/"
+            if verify_node_has_new_releases(nid, slug=leaf_slug):
+                nr_url = f"https://www.amazon.com/gp/new-releases/{leaf_slug}/{nid}/"
+                # 面包屑链天然有序(L1→Ln)，crumbs[j-1] 是当前节点的父节点
+                parent_nid = crumbs[j-1]["node_id"] if j > 0 else leaf.get("node_id")
+                bc_depth   = leaf.get("depth", 1) + j + 1
                 db_insert([{"name": crumb["name"], "url": nr_url,
-                           "node_id": nid, "source": "breadcrumb"}], explored=1)
+                           "node_id": nid, "source": "breadcrumb",
+                           "parent_node_id": parent_nid,
+                           "depth": bc_depth}], explored=1)
                 known_ids.add(nid)
                 found += 1
                 found_total += 1
-                print(f"    [发现] {crumb['name']} ({nid})", flush=True)
+                print(f"    [发现] {crumb['name']} ({nid}) depth={bc_depth} parent={parent_nid}", flush=True)
             delay(is_product=True)
 
         print(f"  [{i}/{len(leaves)}] {leaf['name']}  新发现:{found}", flush=True)
@@ -647,6 +656,26 @@ if __name__ == "__main__":
     stats = db_stats()
     print(f"[启动] 数据库: {DB_FILE}", flush=True)
     print(f"[启动] 已有 {stats['total']} 个节点, 队列 {stats['queue']} 个待处理", flush=True)
+
+    # 补验存量节点的榜单链接（nr_valid IS NULL 且 node_id 有值）
+    with _db_lock:
+        _cv = db_conn()
+        _pending = _cv.execute(
+            "SELECT node_id, url FROM categories "
+            "WHERE node_id IS NOT NULL AND nr_valid IS NULL"
+        ).fetchall()
+        _cv.close()
+    if _pending:
+        print(f"[补验] {len(_pending)} 个节点待验证榜单链接...", flush=True)
+        db_update_status("validating")
+        for _idx, _row in enumerate(_pending, 1):
+            if _stop_flag.is_set():
+                break
+            _validate_and_save(_row[0], _row[1])
+            if _idx % 100 == 0:
+                print(f"  [补验] {_idx}/{len(_pending)}", flush=True)
+                db_update_status("validating")
+        print(f"[补验] 完成", flush=True)
 
     # 第一遍（并发 BFS）— 直接从 SQLite 读队列、写结果
     asin_cache = phase1_sidebar_bfs()

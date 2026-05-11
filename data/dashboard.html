@@ -100,16 +100,7 @@
     .row-refresh:hover { color: #7eb8f7; border-color: #7eb8f7; }
 
     /* ─── 验证进度条 ───────────────────────────── */
-    .check-bar-wrap {
-      display: none; margin-bottom: 10px; background: #1a1d27;
-      border: 1px solid #2a2d3e; border-radius: 6px; padding: 8px 14px;
-    }
-    .check-bar-wrap.active { display: block; }
-    .check-bar-header { display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 6px; }
-    .check-bar-track { height: 6px; background: #2a2d3e; border-radius: 3px; overflow: hidden; }
-    .check-bar-fill  { height: 100%; background: linear-gradient(90deg,#4caf82,#7eb8f7); border-radius: 3px; transition: width 0.5s; }
-    .check-counts { display: flex; gap: 12px; margin-top: 6px; font-size: 10px; }
-    .check-counts span { color: #4caf82; }
+
   </style>
 </head>
 <body>
@@ -155,17 +146,9 @@
     <option value="4">L4</option>
     <option value="5">L5+</option>
   </select>
-  <button onclick="startCheckAll()" style="margin-left:auto;padding:5px 14px;font-size:12px;background:#1a2a3a;color:#7eb8f7;border:1px solid #2a3a5a;border-radius:5px;cursor:pointer">🔍 一键验证榜单链接</button>
 </div>
 
-<div class="check-bar-wrap" id="checkBar">
-  <div class="check-bar-header">
-    <span>链接验证进度</span>
-    <span id="checkBarText">—</span>
-  </div>
-  <div class="check-bar-track"><div class="check-bar-fill" id="checkBarFill" style="width:0%"></div></div>
-  <div class="check-counts" id="checkCounts"></div>
-</div>
+
 
 <table>
   <thead>
@@ -385,30 +368,6 @@ function renderTable() {
     '<tr><td colspan="7" style="color:#555;padding:20px">暂无数据</td></tr>';
 }
 
-// ── 榜单验证 ────────────────────────────────────────
-let _checkPollTimer = null;
-
-async function startCheckAll() {
-  const r = await fetch('/api/check_all', {method:'POST'}).then(r=>r.json());
-  if (r.status === 'already_running') { alert('验证任务已在运行中'); return; }
-  document.getElementById('checkBar').classList.add('active');
-  pollCheckProgress();
-}
-
-async function pollCheckProgress() {
-  clearTimeout(_checkPollTimer);
-  try {
-    const d = await fetch('/api/check_progress').then(r=>r.json());
-    const pct = d.total > 0 ? Math.round(d.checked * 100 / d.total) : 0;
-    document.getElementById('checkBarFill').style.width = pct + '%';
-    document.getElementById('checkBarText').textContent =
-      `${d.checked}/${d.total} (${pct}%) ${d.running ? '运行中...' : '完成'}`;
-    const vc = d.valid_counts || {};
-    document.getElementById('checkCounts').innerHTML =
-      Object.entries(vc).map(([k,v])=>`<span style="color:#888">${k}:</span><span>${v}</span>`).join(' ');
-    if (d.running) _checkPollTimer = setTimeout(pollCheckProgress, 2000);
-  } catch(e) {}
-}
 
 async function refreshRow(nodeId, btn) {
   btn.textContent = '⏳'; btn.disabled = true;
@@ -544,7 +503,25 @@ function buildSlugRow(item) {
           childBox.innerHTML = '<div style="color:#555;font-size:11px;padding:4px">暂无子类目</div>';
           return;
         }
-        data.forEach(node => childBox.appendChild(buildChildRow(node)));
+        // 按 parent_node_id 分组构建树
+        const byParent = new Map();
+        data.forEach(n => {
+          const pk = n.parent_node_id || item.slug;
+          if (!byParent.has(pk)) byParent.set(pk, []);
+          byParent.get(pk).push(n);
+        });
+        // 渲染 L1 slug 直属子节点（parent 指向 slug 字符串 或 null 的根节点）
+        const roots = byParent.get(item.slug) || [];
+        // 没有parent的节点也加入根级
+        data.filter(n => !n.parent_node_id).forEach(n => {
+          if (!roots.find(r => r.node_id === n.node_id)) roots.push(n);
+        });
+        if (!roots.length) {
+          // fallback：parent数据不足时平铺显示
+          data.forEach(n => childBox.appendChild(buildTreeNode(n, byParent)));
+        } else {
+          roots.forEach(n => childBox.appendChild(buildTreeNode(n, byParent)));
+        }
       } catch(e) {
         childBox.innerHTML = '<div style="color:#f07070;font-size:11px">加载失败</div>';
       }
@@ -554,36 +531,75 @@ function buildSlugRow(item) {
   return wrap;
 }
 
-function buildChildRow(node) {
-  const div = document.createElement('div');
-  div.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px';
-  div.onmouseenter = () => div.style.background = '#1a2a3a';
-  div.onmouseleave = () => div.style.background = '';
+function buildTreeNode(node, byParent) {
+  const children = (byParent && byParent.get(node.node_id)) || [];
+  const hasKids = children.length > 0;
 
+  const wrap = document.createElement('div');
+
+  // 主行
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px;cursor:pointer';
+  row.onmouseenter = () => row.style.background = '#1a2a3a';
+  row.onmouseleave = () => row.style.background = '';
+
+  // 展开箭头（无子节点时占位）
+  const arrow = document.createElement('span');
+  arrow.style.cssText = 'font-size:9px;width:10px;flex-shrink:0;transition:transform .15s;user-select:none';
+  arrow.textContent = hasKids ? '▶' : ' ';
+  arrow.style.color = hasKids ? '#555' : 'transparent';
+  row.appendChild(arrow);
+
+  // checkbox
   const cb = document.createElement('input');
   cb.type = 'checkbox';
   cb.dataset.nodeId = node.node_id;
-  cb.addEventListener('change', () => {
+  cb.addEventListener('change', ev => {
+    ev.stopPropagation();
     if (cb.checked) _selectedSlugs.add('__node__' + node.node_id);
     else _selectedSlugs.delete('__node__' + node.node_id);
     document.getElementById('p_sel_count').textContent = _selectedSlugs.size + ' 个已选';
   });
-  div.appendChild(cb);
+  row.appendChild(cb);
 
-  const depthBadge = document.createElement('span');
+  // depth badge
+  const badge = document.createElement('span');
   const d = node.depth || 0;
   const dc = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
-  depthBadge.className = 'depth-badge ' + dc;
-  depthBadge.textContent = 'L' + d;
-  div.appendChild(depthBadge);
+  badge.className = 'depth-badge ' + dc;
+  badge.textContent = 'L' + d;
+  row.appendChild(badge);
 
+  // 名称
   const name = document.createElement('span');
   name.textContent = node.name || '(未命名)';
   name.style.cssText = 'color:#aaa;font-size:11px;flex:1';
-  div.appendChild(name);
+  row.appendChild(name);
 
-  return div;
+  wrap.appendChild(row);
+
+  if (!hasKids) return wrap;
+
+  // 子容器
+  const kidBox = document.createElement('div');
+  kidBox.style.cssText = 'display:none;margin-left:14px;border-left:1px solid #2a2d3e;padding-left:6px';
+  wrap.appendChild(kidBox);
+
+  let expanded = false;
+  row.addEventListener('click', e => {
+    if (e.target === cb) return;
+    expanded = !expanded;
+    arrow.style.transform = expanded ? 'rotate(90deg)' : '';
+    arrow.style.color = expanded ? '#7eb8f7' : '#555';
+    kidBox.style.display = expanded ? '' : 'none';
+    if (expanded && !kidBox.childElementCount) {
+      children.forEach(c => kidBox.appendChild(buildTreeNode(c, byParent)));
+    }
+  });
+
+  return wrap;
 }
+
 
 function filterPTree(q) {
   const kw = q.trim().toLowerCase();
