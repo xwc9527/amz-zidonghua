@@ -223,24 +223,45 @@ def parse_sidebar_links(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     seen, results = set(), []
 
-    for a in soup.select("a[href*='/gp/new-releases/']"):
+    # 找到 zg-browse-root 容器
+    root = soup.select_one("ul[class*='zg-browse-root']")
+    if not root:
+        return results
+
+    # 找当前节点（zg-selected 标记）
+    selected = root.select_one("[class*='zg-selected']")
+    if selected:
+        # 当前节点的 li → 下一个兄弟 li 里的 ul 是直接子节点容器
+        cur_li = selected.find_parent("li")
+        next_li = cur_li.find_next_sibling("li") if cur_li else None
+        container = next_li.select_one("ul[class*='zg-browse-group']") if next_li else None
+    else:
+        # slug 入口页（无 zg-selected）：取最深层的 zg-browse-group
+        groups = root.select("ul[class*='zg-browse-group']")
+        container = groups[-1] if groups else None
+
+    if not container:
+        return results
+
+    # 只取 container 的直接 li 子元素（不递归孙节点）
+    for li in container.find_all("li", recursive=False):
+        # 排除 zg-browse-up（祖先回退链接，带 ‹ 符号）
+        li_classes = " ".join(li.get("class", []))
+        if "browse-up" in li_classes:
+            continue
+        a = li.select_one("a[href*='/gp/new-releases/']")
+        if not a:
+            continue
         name = clean_name(a.get_text(strip=True))
         href = a.get("href", "")
-        if not name or not href:
+        if not name or not href or name.isdigit():
             continue
-
         if href.startswith("/"):
             href = "https://www.amazon.com" + href
         href = normalize_url(href)
-
         if href in seen:
             continue
         seen.add(href)
-
-        # 过滤纯数字名字（分页链接如"1" "2"...）
-        if name.isdigit():
-            continue
-
         results.append({
             "name":    name,
             "url":     href,
