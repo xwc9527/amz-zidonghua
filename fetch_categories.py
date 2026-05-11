@@ -666,16 +666,36 @@ if __name__ == "__main__":
         ).fetchall()
         _cv.close()
     if _pending:
-        print(f"[补验] {len(_pending)} 个节点待验证榜单链接...", flush=True)
+        _vq = _queue_mod.Queue()
+        for _row in _pending:
+            _vq.put((_row[0], _row[1]))
+        _done_count = [0]
+        _done_lock  = threading.Lock()
+        _vtotal     = len(_pending)
+        print(f"[补验] {_vtotal} 个节点待验证, 4-worker 并发...", flush=True)
         db_update_status("validating")
-        for _idx, _row in enumerate(_pending, 1):
-            if _stop_flag.is_set():
-                break
-            _validate_and_save(_row[0], _row[1])
-            if _idx % 100 == 0:
-                print(f"  [补验] {_idx}/{len(_pending)}", flush=True)
-                db_update_status("validating")
-        print(f"[补验] 完成", flush=True)
+
+        def _val_worker():
+            while not _stop_flag.is_set():
+                try:
+                    nid, url = _vq.get(timeout=2)
+                except _queue_mod.Empty:
+                    break
+                _validate_and_save(nid, url)
+                with _done_lock:
+                    _done_count[0] += 1
+                    _c = _done_count[0]
+                if _c % 200 == 0:
+                    print(f"  [补验] {_c}/{_vtotal}", flush=True)
+                    db_update_status("validating")
+                _vq.task_done()
+
+        _vthreads = [threading.Thread(target=_val_worker, daemon=True) for _ in range(4)]
+        for _vt in _vthreads:
+            _vt.start()
+        for _vt in _vthreads:
+            _vt.join()
+        print(f"[补验] 完成 {_done_count[0]}/{_vtotal}", flush=True)
 
     # 第一遍（并发 BFS）— 直接从 SQLite 读队列、写结果
     asin_cache = phase1_sidebar_bfs()

@@ -120,7 +120,7 @@
   <div class="stat-card"><div class="label">总节点数</div><div class="value" id="total">—</div></div>
   <div class="stat-card"><div class="label">待处理队列</div><div class="value warn" id="queue">—</div></div>
   <div class="stat-card"><div class="label">有 node_id</div><div class="value" id="has_id">—</div></div>
-  <div class="stat-card"><div class="label">面包屑发现</div><div class="value" id="breadcrumb">—</div></div>
+  <div class="stat-card"><div class="label">已验证</div><div class="value" id="validated">—</div></div>
   <div class="stat-card"><div class="label">阶段</div><div class="value" id="phase" style="font-size:14px">—</div></div>
 </div>
 
@@ -293,7 +293,7 @@ async function load() {
     document.getElementById('total').textContent     = stats.total || '—';
     document.getElementById('queue').textContent     = stats.queue ?? '—';
     document.getElementById('has_id').textContent    = stats.has_id || 0;
-    document.getElementById('breadcrumb').textContent = stats.breadcrumb || 0;
+    document.getElementById('validated').textContent = stats.validated || 0;
 
     // 从 API 获取状态
     try {
@@ -302,6 +302,7 @@ async function load() {
       document.getElementById('phase').textContent =
         st.phase === 'sidebar_bfs' ? '侧边栏BFS' :
         st.phase === 'breadcrumb'  ? '面包屑' :
+        st.phase === 'validating'  ? '补验榜单' :
         st.phase === 'done'        ? '已完成' : (st.phase || '—');
       updateBtn(st.scraper_running);
     } catch(e) {

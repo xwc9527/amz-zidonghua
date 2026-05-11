@@ -224,12 +224,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         queue = db_scalar("SELECT COUNT(*) FROM categories WHERE explored=0")
         has_id = db_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
         bc = db_scalar("SELECT COUNT(*) FROM categories WHERE source='breadcrumb'")
+        validated = db_scalar("SELECT COUNT(*) FROM categories WHERE nr_valid IS NOT NULL")
         depths = {}
         for r in db_query("SELECT depth, COUNT(*) as cnt FROM categories GROUP BY depth ORDER BY depth"):
             depths[f"L{r['depth']}"] = r['cnt']
         return {
             "total": total, "queue": queue,
             "has_id": has_id, "breadcrumb": bc,
+            "validated": validated,
             "depths": depths,
         }
 
