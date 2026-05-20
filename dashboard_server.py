@@ -283,7 +283,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                    "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
                    "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
                    "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
-                   "(SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id) AS child_count "
+                   "COALESCE(NULLIF((SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id), 0), "
+                   "         (SELECT COUNT(*) - 1 FROM categories sub WHERE sub.node_id IS NOT NULL AND sub.url LIKE c.url || '%')) AS child_count "
                    "FROM categories c "
                    "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
                    "WHERE c.node_id IS NOT NULL")
@@ -292,8 +293,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 sql += " AND c.parent_node_id = ?"
                 params.append(parent)
             else:
-                sql += " AND c.parent_node_id IS NULL AND c.url LIKE ?"
-                params.append(f"%/gp/new-releases/{parent}/%")
+                # 兼容：如果数据库中 parent_node_id 已经建好树，则匹配之；否则回退到旧版的 url 匹配逻辑
+                sql += " AND (c.parent_node_id = ? OR ((c.parent_node_id IS NULL OR c.parent_node_id = '') AND c.url LIKE ?))"
+                params.extend([parent, f"%/gp/new-releases/{parent}/%"])
 
             if search:
                 sql += " AND (c.name LIKE ? OR c.node_id LIKE ?)"
@@ -309,7 +311,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                    "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
                    "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
                    "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
-                   "(SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id) AS child_count "
+                   "COALESCE(NULLIF((SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id), 0), "
+                   "         (SELECT COUNT(*) - 1 FROM categories sub WHERE sub.node_id IS NOT NULL AND sub.url LIKE c.url || '%')) AS child_count "
                    "FROM categories c "
                    "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
                    "WHERE c.node_id IS NOT NULL")
