@@ -180,6 +180,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/product_progress":
             self._json_response(_get_product_progress())
 
+        elif path == "/api/products":
+            self._json_response(self._get_products())
+
         else:
             super().do_GET()
 
@@ -236,38 +239,107 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         }
 
     def _get_categories(self, qs):
-        # LEFT JOIN link_cache 保证即使 categories 里值为 NULL 也能展示缓存的验证结果
-        sql = ("SELECT c.name, c.url, c.node_id, c.depth, c.source, c.explored, "
-               "COALESCE(c.nr_valid, lc.nr_valid) AS nr_valid, "
-               "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
-               "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
-               "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid "
-               "FROM categories c "
-               "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
-               "WHERE c.node_id IS NOT NULL")
-        params = []
-
+        parent = qs.get("parent", [""])[0]
         search = qs.get("q", [""])[0]
-        if search:
-            sql += " AND (name LIKE ? OR node_id LIKE ?)"
-            params.extend([f"%{search}%", f"%{search}%"])
-
-        depth = qs.get("depth", [""])[0]
-        if depth and depth != "all":
-            d = int(depth)
-            if d >= 5:
-                sql += " AND depth >= 5"
-            else:
-                sql += " AND depth = ?"
-                params.append(d)
-
-        sql += " ORDER BY depth, name"
-
-        limit = int(qs.get("limit", ["500"])[0])
+        limit = int(qs.get("limit", ["2000"])[0])
         offset = int(qs.get("offset", ["0"])[0])
-        sql += f" LIMIT {limit} OFFSET {offset}"
 
-        return db_query(sql, params)
+        if parent == "root":
+            sql = "SELECT id, name, url, depth, source, explored FROM categories WHERE depth=1 AND node_id IS NULL"
+            params = []
+            if search:
+                sql += " AND name LIKE ?"
+                params.append(f"%{search}%")
+            sql += " ORDER BY name"
+            rows = db_query(sql, params)
+            result = []
+            for r in rows:
+                m = re.search(r"/gp/new-releases/([a-z][a-z0-9-]+)", r["url"])
+                slug = m.group(1) if m else ""
+                child_count = db_scalar(
+                    "SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL AND url LIKE ?",
+                    (f"%/gp/new-releases/{slug}/%",)
+                )
+                result.append({
+                    "id": r["id"],
+                    "name": r["name"],
+                    "url": r["url"],
+                    "node_id": None,
+                    "slug": slug,
+                    "depth": r["depth"],
+                    "source": r["source"],
+                    "explored": r["explored"],
+                    "nr_valid": None,
+                    "bs_valid": None,
+                    "ms_valid": None,
+                    "mw_valid": None,
+                    "child_count": child_count
+                })
+            return result[offset:offset+limit]
+
+        elif parent:
+            sql = ("SELECT c.id, c.name, c.url, c.node_id, c.depth, c.source, c.explored, "
+                   "COALESCE(c.nr_valid, lc.nr_valid) AS nr_valid, "
+                   "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
+                   "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
+                   "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
+                   "(SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id) AS child_count "
+                   "FROM categories c "
+                   "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
+                   "WHERE c.node_id IS NOT NULL")
+            params = []
+            if parent.isdigit():
+                sql += " AND c.parent_node_id = ?"
+                params.append(parent)
+            else:
+                sql += " AND c.parent_node_id IS NULL AND c.url LIKE ?"
+                params.append(f"%/gp/new-releases/{parent}/%")
+
+            if search:
+                sql += " AND (c.name LIKE ? OR c.node_id LIKE ?)"
+                params.extend([f"%{search}%", f"%{search}%"])
+
+            sql += " ORDER BY c.name"
+            sql += f" LIMIT {limit} OFFSET {offset}"
+            return db_query(sql, params)
+
+        else:
+            sql = ("SELECT c.id, c.name, c.url, c.node_id, c.depth, c.source, c.explored, "
+                   "COALESCE(c.nr_valid, lc.nr_valid) AS nr_valid, "
+                   "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
+                   "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
+                   "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
+                   "(SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id) AS child_count "
+                   "FROM categories c "
+                   "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
+                   "WHERE c.node_id IS NOT NULL")
+            params = []
+            if search:
+                sql += " AND (c.name LIKE ? OR c.node_id LIKE ?)"
+                params.extend([f"%{search}%", f"%{search}%"])
+
+            depth = qs.get("depth", [""])[0]
+            if depth and depth != "all":
+                d = int(depth)
+                if d >= 5:
+                    sql += " AND c.depth >= 5"
+                else:
+                    sql += " AND c.depth = ?"
+                    params.append(d)
+
+            sql += " ORDER BY c.depth, c.name"
+            sql += f" LIMIT {limit} OFFSET {offset}"
+            return db_query(sql, params)
+
+    def _get_products(self):
+        """返回最新的 50 个商品记录，供商品抓取任务面板实时展示。"""
+        try:
+            return db_query(
+                "SELECT name, asin, price, review_count, rank FROM product_sightings "
+                "ORDER BY scraped_at DESC LIMIT 50"
+            )
+        except Exception:
+            return []
 
     def _get_status(self):
         running = _proc is not None and _proc.poll() is None
@@ -526,15 +598,92 @@ def _export_excel():
         return {"status": "error", "msg": str(e)}
 
 
+def get_py_files():
+    py_files = []
+    for root, dirs, files in os.walk(BASE_DIR):
+        if "venv" in root or ".git" in root or "__pycache__" in root:
+            continue
+        for file in files:
+            if file.endswith(".py"):
+                py_files.append(os.path.join(root, file))
+    return py_files
+
+
+def get_mtimes(files):
+    mtimes = {}
+    for f in files:
+        try:
+            mtimes[f] = os.path.getmtime(f)
+        except OSError:
+            pass
+    return mtimes
+
+
 def main():
+    # 启用自修复与代码热重载机制 (开发/守护模式)
+    ENV_VAR = "DASHBOARD_SERVER_CHILD"
+    if ENV_VAR not in os.environ:
+        import time
+        print("[守护进程] 自修复与代码热重载机制已启动。", flush=True)
+        p = None
+        try:
+            while True:
+                child_env = os.environ.copy()
+                child_env[ENV_VAR] = "1"
+                p = subprocess.Popen([sys.executable] + sys.argv, env=child_env)
+                
+                py_files = get_py_files()
+                mtimes = get_mtimes(py_files)
+                
+                restarted = False
+                while p.poll() is None:
+                    time.sleep(1)
+                    current_files = get_py_files()
+                    current_mtimes = get_mtimes(current_files)
+                    
+                    changed = False
+                    if set(current_files) != set(py_files):
+                        changed = True
+                    else:
+                        for f in current_files:
+                            if current_mtimes.get(f) != mtimes.get(f):
+                                changed = True
+                                break
+                    if changed:
+                        print("[守护进程] 检测到代码修改，正在自动重启后端服务...", flush=True)
+                        p.terminate()
+                        try:
+                            p.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            p.kill()
+                        restarted = True
+                        break
+                
+                if not restarted:
+                    code = p.returncode
+                    if code == 0:
+                        break
+                    else:
+                        print(f"[守护进程] 后端服务异常崩溃 (退出码: {code})。自修复机制将在 2 秒后自动重启服务...", flush=True)
+                        time.sleep(2)
+        except KeyboardInterrupt:
+            print("\n[守护进程] 正在停止守护与后端服务...", flush=True)
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        sys.exit(0)
+
+    # 子进程执行的实际 HTTP 服务逻辑
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 
     if not os.path.exists(DB_FILE):
-        print(f"[错误] 数据库不存在: {DB_FILE}")
-        print("请先运行 init_db.py")
+        print(f"[错误] 数据库不存在: {DB_FILE}", flush=True)
+        print("请先运行 init_db.py", flush=True)
         sys.exit(1)
 
-    # 自动建表/加列，防止运行时因 Schema 不一致崩溃
     _ensure_tables()
 
     handler = functools.partial(DashboardHandler, directory=DATA_DIR)
@@ -547,7 +696,6 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[看板] 正在停止...")
         _stop_scraper()
 
 

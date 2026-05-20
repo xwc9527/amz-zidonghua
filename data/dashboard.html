@@ -2,724 +2,760 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-  <title>类目抓取看板</title>
+  <title>Amazon 类目抓取看板</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }
-
-    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-    h1 { font-size: 20px; color: #7eb8f7; }
-
-    .ctrl-btn {
-      padding: 8px 24px; border: none; border-radius: 6px; font-size: 14px;
-      font-weight: 600; cursor: pointer; transition: all 0.2s;
+    :root {
+      --sidebar-bg: #FFFFFF; 
+      --sidebar-fg: #4B5563; 
+      --sidebar-hover: #F3F4F6;
+      
+      --bg: #F3F4F6; --panel: #FFFFFF; --fg: #1F2937; --gray: #6B7280; --border: #E5E7EB;
+      --primary: #4F46E5; --primary-hover: #4338CA; --success: #10B981; --danger: #EF4444; --warning: #F59E0B;
+      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --radius: 8px;
     }
-    .ctrl-btn.running { background: #e74c3c; color: #fff; }
-    .ctrl-btn.running:hover { background: #c0392b; }
-    .ctrl-btn.paused  { background: #27ae60; color: #fff; }
-    .ctrl-btn.paused:hover  { background: #1e8449; }
+    body { margin: 0; padding: 0; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden; display: flex; }
+    * { box-sizing: border-box; }
+    
+    /* ── Sidebar ── */
+    .sidebar { width: 240px; background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); }
+    .sidebar-logo { height: 64px; display: flex; align-items: center; padding: 0 20px; font-size: 16px; font-weight: 700; color: var(--fg); letter-spacing: -0.02em; border-bottom: 1px solid var(--border); }
+    .nav-menu { padding: 20px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .nav-item { padding: 10px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 10px; }
+    .nav-item:hover { background: var(--sidebar-hover); color: var(--fg); }
+    .nav-item.active { background: rgba(79, 70, 229, 0.10); color: var(--primary); font-weight: 600;}
+    
+    .sidebar-bottom { padding: 20px; border-top: 1px solid var(--border); background: var(--sidebar-bg); }
+    .mini-stat-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; color: var(--gray); font-weight: 600; }
+    .mini-stat-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; font-weight: 500;}
+    .mini-stat-row span:last-child { color: var(--fg); font-variant-numeric: tabular-nums; }
+    .sidebar-ctrl { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+    
+    /* ── Main Layout ── */
+    .main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .topbar { height: 64px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; }
+    .topbar-title { font-size: 18px; font-weight: 600; margin: 0; color: var(--fg); }
+    .topbar-stats { display: flex; gap: 12px; }
+    .stat-badge { background: var(--bg); border: 1px solid var(--border); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; color: var(--gray); display: flex; align-items: center; gap: 6px; }
+    .stat-badge span { color: var(--fg); font-weight: 600; }
 
-    .stats { display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
-    .stat-card {
-      background: #1a1d27; border: 1px solid #2a2d3e;
-      border-radius: 8px; padding: 12px 18px; min-width: 130px;
-    }
-    .stat-card .label { font-size: 11px; color: #888; margin-bottom: 4px; }
-    .stat-card .value { font-size: 26px; font-weight: 700; color: #7eb8f7; }
-    .stat-card .value.warn { color: #f7b731; }
+    .workspace { flex: 1; display: flex; gap: 20px; padding: 24px; min-height: 0; }
+    .panel { background: var(--panel); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: hidden; }
+    .panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: #FAFAFA; font-size: 14px; font-weight: 600; color: var(--fg); display: flex; justify-content: space-between; align-items: center; }
 
-    .filters { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-    .filters input, .filters select {
-      background: #1a1d27; border: 1px solid #2a2d3e; color: #e0e0e0;
-      padding: 6px 12px; border-radius: 6px; font-size: 13px;
-    }
-    .filters input { width: 240px; }
-    .filters select { width: 100px; }
-    .filters label { font-size: 12px; color: #888; }
+    /* ── Drill-down Components ── */
+    .breadcrumb-bar { padding: 12px 16px; background: #FFFFFF; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 500; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 44px; }
+    .bc-item { display: flex; align-items: center; gap: 4px; }
+    .bc-link { color: var(--primary); cursor: pointer; transition: color 0.1s; padding: 2px 4px; border-radius: 4px; }
+    .bc-link:hover { background: #EEF2FF; }
+    .bc-sep { color: #D1D5DB; font-size: 12px; }
+    .bc-current { color: var(--fg); font-weight: 600; padding: 2px 4px; }
 
-    .refresh-info { font-size: 11px; color: #555; margin-bottom: 10px; }
-    .refresh-info span { color: #7eb8f7; }
-    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-    .status-dot.running { background: #27ae60; }
-    .status-dot.paused  { background: #f7b731; }
+    .tree-panel { width: 380px; flex-shrink: 0; }
+    .tree-search { padding: 12px 16px; border-bottom: 1px solid var(--border); background: #FAFAFA; }
+    .tree-search input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: #FFF; }
+    .tree-search input:focus { border-color: var(--primary); }
+    
+    .drill-content { flex: 1; overflow-y: auto; padding: 8px; }
+    .drill-item { display: flex; align-items: center; gap: 8px; padding: 8px; margin-bottom: 2px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--fg); border: 1px solid transparent; transition: all 0.1s; }
+    .drill-item:hover { background: #F9FAFB; border-color: var(--border); }
+    .drill-item.selected { background: #EEF2FF; border-color: #C7D2FE; }
+    
+    .item-name { flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-meta { font-size: 11px; color: var(--gray); background: var(--bg); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); font-family: monospace; }
+    
+    .drill-btn { padding: 4px 8px; font-size: 11px; font-weight: 600; color: var(--primary); background: #EEF2FF; border-radius: 4px; display: flex; align-items: center; gap: 4px; transition: background 0.1s; }
+    .drill-btn:hover { background: #E0E7FF; }
+    
+    input[type="checkbox"] { accent-color: var(--primary); cursor: pointer; width: 16px; height: 16px; margin: 0; }
+    .badge-lvl { background: #F3F4F6; color: #4B5563; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; border: 1px solid #E5E7EB; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th {
-      background: #1a1d27; color: #888; text-align: left;
-      padding: 8px 10px; border-bottom: 1px solid #2a2d3e;
-      position: sticky; top: 0; cursor: pointer;
-    }
-    th:hover { color: #7eb8f7; }
-    td { padding: 6px 10px; border-bottom: 1px solid #1e2130; }
-    tr:hover td { background: #1a1d27; }
-    .has-id { color: #4caf82; font-weight: 600; }
-    .no-id  { color: #555; }
-    .depth-badge {
-      display: inline-block; padding: 2px 8px; border-radius: 10px;
-      font-size: 11px; font-weight: 700;
-    }
-    .d1 { background: #1a3a2a; color: #4caf82; }
-    .d2 { background: #1a2a3a; color: #5dade2; }
-    .d3 { background: #2a2a1a; color: #f7dc6f; }
-    .d4 { background: #3a2a1a; color: #f0b27a; }
-    .d5 { background: #3a1a1a; color: #e74c3c; }
-    .source-bc { color: #f7b731; font-size: 11px; }
-    .source-sb { color: #555; font-size: 11px; }
-    .url-cell { color: #4a7fb5; font-size: 11px; max-width: 380px;
-                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .right-area { flex: 1; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+    .config-panel { flex-shrink: 0; }
+    .config-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--panel); }
+    .config-tab { padding: 12px 24px; font-size: 13px; font-weight: 500; color: var(--gray); cursor: pointer; border-bottom: 2px solid transparent; }
+    .config-tab.active { color: var(--primary); border-bottom-color: var(--primary); background: #F9FAFB; }
+    .config-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+    .form-row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+    .form-group { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gray); font-weight: 500;}
+    .form-group input[type="number"] { width: 70px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; outline: none; font-size: 13px; background: #FFF; }
+    .btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s;}
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { filter: brightness(1.1); }
+    .btn-danger { background: #fff; border-color: #FECACA; color: var(--danger); border: 1px solid; }
+    .btn-danger:hover { background: #FEF2F2; }
+    .btn-outline { background: #fff; border-color: var(--border); color: var(--fg); border: 1px solid;}
+    .btn-outline:hover { background: var(--hover); }
+    
+    .results-panel { flex: 1; min-height: 0; }
+    .table-container { flex: 1; overflow-y: auto; }
+    
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+    th { background: #FAFAFA; padding: 14px 16px; color: var(--gray); font-weight: 500; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1;}
+    td { padding: 14px 16px; border-bottom: 1px solid var(--border); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #F9FAFB; }
 
-    /* ─── Tab ─────────────────────────────────── */
-    .tab-bar { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid #2a2d3e; }
-    .tab {
-      padding: 6px 20px; border: none; background: transparent;
-      color: #888; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent;
-      transition: all 0.18s;
-    }
-    .tab.active { color: #7eb8f7; border-bottom-color: #7eb8f7; }
-    .tab:hover:not(.active) { color: #ccc; }
-
-
-
-    /* ─── 榜单按钮 ─────────────────────────────── */
+    /* ── List Buttons (4 榜单) ── */
     .list-btns { display: flex; gap: 4px; flex-wrap: nowrap; }
-    .lb {
-      padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600;
-      border: none; cursor: pointer; text-decoration: none; display: inline-block;
-      transition: opacity 0.15s, transform 0.1s;
+    .list-btn { 
+      padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; 
+      text-decoration: none; transition: all 0.2s; border: 1px solid transparent; 
+      display: inline-flex; justify-content: center; align-items: center; white-space: nowrap;
     }
-    .lb:hover { opacity: 0.85; transform: scale(1.05); }
-    .lb-unknown { background: #2a2d3e; color: #555; cursor: default; }
-    .lb-valid   { background: #1a3a2a; color: #4caf82; }
-    .lb-invalid { background: #2a1a1a; color: #555; cursor: default; text-decoration: line-through; }
-    .lb-checking{ background: #2a2a1a; color: #f7dc6f; cursor: default; animation: pulse 1s infinite; }
+    .list-btn.active { background: #EEF2FF; color: var(--primary); border-color: #C7D2FE; }
+    .list-btn.active:hover { background: #E0E7FF; transform: translateY(-1px); box-shadow: 0 2px 4px rgba(79,70,229,0.1); }
+    .list-btn.disabled { background: #F3F4F6; color: #9CA3AF; cursor: not-allowed; border-color: #E5E7EB; }
+    .list-btn.checking { background: #FFFBEB; color: var(--warning); cursor: default; border-color: #FDE68A; animation: pulse 1s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
-    .row-refresh {
-      padding: 2px 6px; font-size: 10px; background: none;
-      border: 1px solid #2a2d3e; color: #555; border-radius: 4px; cursor: pointer;
+
+    /* 极简图标按钮 (用于刷新) */
+    .icon-btn {
+      background: transparent; border: 1px solid var(--border); border-radius: 6px;
+      width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+      cursor: pointer; color: var(--gray); transition: all 0.2s; padding: 0;
     }
-    .row-refresh:hover { color: #7eb8f7; border-color: #7eb8f7; }
+    .icon-btn:hover { background: var(--hover); color: var(--fg); border-color: #D1D5DB; }
+    .icon-btn:active { transform: scale(0.95); }
 
-    /* ─── 验证进度条 ───────────────────────────── */
+    /* progress */
+    .progress-wrap { background: var(--bg); border-radius: 4px; overflow: hidden; height: 6px; }
+    .progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary), #818CF8); transition: width 0.5s; }
+    .progress-text { font-size: 12px; color: var(--gray); display: flex; justify-content: space-between; margin-bottom: 8px; }
 
+    /* ctrl button (爬虫启停) */
+    .ctrl-btn { width: 100%; padding: 8px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; font-family: inherit; transition: all 0.2s; }
+    .ctrl-btn.paused { background: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
+    .ctrl-btn.running { background: #FEF2F2; color: var(--danger); border: 1px solid #FECACA; }
+    .status-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--gray); margin-top: 6px; justify-content: center; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+    .status-dot.running { background: var(--success); }
+    .status-dot.paused  { background: var(--warning); }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
   </style>
 </head>
 <body>
-
-<div class="header">
-  <h1>📦 Amazon 类目抓取看板</h1>
-  <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-    <button class="ctrl-btn paused" id="ctrlBtn" onclick="togglePause()">▶ 启动抓取</button>
-    <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#888;">
-      <span class="status-dot paused" id="statusDot"></span>
-      <span id="statusText">爬虫未运行</span>
+  
+  <!-- ══════════════════ SIDEBAR ══════════════════ -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">📦 Amazon Engine</div>
+    <div class="nav-menu">
+      <div class="nav-item active" id="nav-list" onclick="switchView('list')">🗂️ 类目全量发现 (List)</div>
+      <div class="nav-item" id="nav-tasks" onclick="switchView('tasks')">🚀 商品定向抓取 (Tasks)</div>
     </div>
-  </div>
-</div>
-
-<div class="stats">
-  <div class="stat-card"><div class="label">总节点数</div><div class="value" id="total">—</div></div>
-  <div class="stat-card"><div class="label">待处理队列</div><div class="value warn" id="queue">—</div></div>
-  <div class="stat-card"><div class="label">有 node_id</div><div class="value" id="has_id">—</div></div>
-  <div class="stat-card"><div class="label">已验证</div><div class="value" id="validated">—</div></div>
-  <div class="stat-card"><div class="label">阶段</div><div class="value" id="phase" style="font-size:14px">—</div></div>
-</div>
-
-<div class="refresh-info">
-  实时刷新 | 上次更新：<span id="last_update">—</span>
-</div>
-
-<div class="tab-bar">
-  <button class="tab active" id="tabList" onclick="switchTab('list')">&#9776; 列表视图</button>
-  <button class="tab" id="tabProducts" onclick="switchTab('products')">&#128202; 商品抓取</button>
-</div>
-
-<div id="listView">
-
-<div class="filters">
-  <input type="text" id="search" placeholder="搜索类目名 / node_id ..." oninput="renderTable()">
-  <label>层级：</label>
-  <select id="depthFilter" onchange="renderTable()">
-    <option value="all">全部</option>
-    <option value="1">L1</option>
-    <option value="2">L2</option>
-    <option value="3">L3</option>
-    <option value="4">L4</option>
-    <option value="5">L5+</option>
-  </select>
-</div>
-
-
-
-<table>
-  <thead>
-    <tr>
-      <th style="width:50px">#</th>
-      <th>类目名</th>
-      <th style="width:60px">L级</th>
-      <th style="width:130px">node_id</th>
-      <th style="width:70px">来源</th>
-      <th>榜单链接</th>
-      <th style="width:36px"></th>
-    </tr>
-  </thead>
-  <tbody id="tbody"></tbody>
-</table>
-
-</div><!-- /listView -->
-
-
-
-<!-- ── 商品抓取面板 ────────────────────────────────────────── -->
-<div id="productsView" style="display:none;margin-top:8px">
-
-  <!-- 统计卡片 -->
-  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-    <div class="stat-card"><div class="label">去重商品</div><div class="value" id="p_total">—</div></div>
-    <div class="stat-card"><div class="label">多榜出现</div><div class="value" style="color:#f7b731" id="p_multi">—</div></div>
-    <div class="stat-card"><div class="label">新品榜</div><div class="value" id="p_nr">—</div></div>
-    <div class="stat-card"><div class="label">畅销榜</div><div class="value" id="p_bs">—</div></div>
-    <div class="stat-card"><div class="label">心愿单</div><div class="value" id="p_mw">—</div></div>
-  </div>
-
-  <!-- 左右布局 -->
-  <div style="display:flex;gap:16px;height:calc(100vh - 260px);overflow:hidden;min-height:0">
-
-    <!-- 左侧：类目树（带勾选） -->
-    <div style="width:35%;min-width:320px;background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:12px;display:flex;flex-direction:column;height:100%;overflow:hidden;min-height:0">
-      <div style="font-size:13px;color:#aaa;font-weight:600;margin-bottom:6px">
-        选择类目分支 <span id="p_sel_count" style="color:#7eb8f7;font-size:11px;margin-left:6px">0 个已选</span>
-      </div>
-      <!-- 搜索框 -->
-      <input id="pTreeSearch" type="text" placeholder="搜索类目名..." oninput="filterPTree(this.value)"
-        style="width:100%;box-sizing:border-box;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:5px 8px;font-size:12px;margin-bottom:6px">
-      <!-- 树节点容器 -->
-      <div id="pTreeRoot" style="font-size:12px;color:#ccc;overflow-y:auto;flex:1">
-        <div style="color:#555">⏳ 点击加载类目树...</div>
+    <div class="sidebar-bottom">
+      <div class="mini-stat-title">大盘监控</div>
+      <div class="mini-stat-row"><span>总节点</span><span id="total">—</span></div>
+      <div class="mini-stat-row"><span>待处理</span><span id="queue" style="color:var(--warning)">—</span></div>
+      <div class="mini-stat-row"><span>已验证</span><span id="validated" style="color: var(--success)">—</span></div>
+      <div class="mini-stat-row"><span>阶段</span><span id="phase">—</span></div>
+      <div class="sidebar-ctrl">
+        <button class="ctrl-btn paused" id="ctrlBtn" onclick="togglePause()">▶ 启动抓取</button>
+        <div class="status-row">
+          <span class="status-dot paused" id="statusDot"></span>
+          <span id="statusText">爬虫未运行</span>
+        </div>
       </div>
     </div>
+  </aside>
 
-    <!-- 右侧：参数 + 操作 -->
-    <div style="flex:1;min-width:0;height:100%;overflow-y:auto;min-height:0">
+  <!-- ══════════════════ MAIN ══════════════════ -->
+  <main class="main-content">
+    <header class="topbar">
+      <h2 class="topbar-title" id="mainTitle">🗂️ 类目全量发现 (List)</h2>
+      <div class="topbar-stats" id="taskStats" style="display: none;">
+        <div class="stat-badge">去重商品: <span id="p_total">0</span></div>
+        <div class="stat-badge">多榜出现: <span id="p_multi" style="color: var(--warning)">0</span></div>
+      </div>
+    </header>
 
-      <!-- 榜单子标签 -->
-      <div style="background:#141824;border:1px solid #2a2d3e;border-radius:8px;padding:0;margin-bottom:12px;overflow:hidden">
-        <!-- sub-tab bar -->
-        <div style="display:flex;border-bottom:1px solid #2a2d3e" id="listTabBar">
-          <button class="list-tab active" onclick="switchListTab('nr')" id="ltab_nr" style="flex:1;padding:8px 0;background:none;color:#7eb8f7;border:none;border-bottom:2px solid #7eb8f7;cursor:pointer;font-size:12px">📋 新品榜</button>
-          <button class="list-tab" onclick="switchListTab('bs')" id="ltab_bs" style="flex:1;padding:8px 0;background:none;color:#888;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:12px">📋 畅销榜</button>
-          <button class="list-tab" onclick="switchListTab('mw')" id="ltab_mw" style="flex:1;padding:8px 0;background:none;color:#888;border:none;border-bottom:2px solid transparent;cursor:pointer;font-size:12px">📋 心愿单</button>
+    <!-- 视图 1：类目全量发现 (List) -->
+    <div id="viewList" class="workspace" style="display: flex; flex-direction: column;">
+        <div class="panel" style="flex: 1;">
+            <div class="panel-header" style="padding: 0; display: flex; align-items: stretch;">
+               <div id="listBcBar" class="breadcrumb-bar" style="flex: 1; border-bottom: none;"></div>
+               <div class="tree-search" style="border-bottom: none; border-left: 1px solid var(--border); width: 260px;">
+                  <input type="text" placeholder="搜索当前层级类目..." oninput="searchList(this.value)">
+               </div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>类目名称 (点击下钻)</th>
+                            <th style="width: 60px; text-align: center;">L级</th>
+                            <th style="width: 140px;">节点 ID</th>
+                            <th style="width: 100px; text-align: right; padding-right: 32px;">子节点</th>
+                            <th style="width: 240px; text-align: right; padding-right: 32px;">榜单状态</th>
+                            <th style="width: 60px; text-align: right;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="listTbody">
+                        <!-- JS 动态加载 -->
+                    </tbody>
+                </table>
+            </div>
         </div>
+    </div>
 
-        <!-- 新品榜面板 -->
-        <div id="lp_nr" class="list-panel" style="padding:10px 12px">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_nr" checked> 启用</label>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_nr" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_nr" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_nr" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_nr" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
+    <!-- 视图 2：商品定向抓取 (Tasks) -->
+    <div id="viewTasks" class="workspace" style="display: none;">
+      <!-- 左：下钻类目选择器 -->
+      <div class="panel tree-panel">
+        <div class="panel-header">
+          <span>1. 选择目标类目</span>
+          <span style="font-size: 12px; font-weight: 500; color: var(--primary); background: #EEF2FF; padding: 2px 8px; border-radius: 10px; cursor: pointer;" id="selCount">0 个已选</span>
+        </div>
+        <div class="breadcrumb-bar" id="bcBar"></div>
+        <div class="tree-search"><input type="text" placeholder="在当前层级中搜索..." oninput="searchTask(this.value)"></div>
+        <div class="drill-content" id="drillList"></div>
+      </div>
+
+      <!-- 右：抓取配置 + 进度 + 实时商品 -->
+      <div class="right-area">
+        <!-- 配置面板 -->
+        <div class="panel config-panel">
+          <div class="panel-header" style="background: #FFFFFF; cursor: pointer;" onclick="toggleConfig()" title="点击折叠/展开面板">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span id="configToggleIcon" style="transition: transform 0.2s; color: var(--gray); font-size: 12px;">▼</span>
+              <span>2. 抓取规则配置</span>
+            </div>
+            <div style="display: flex; gap: 8px;" onclick="event.stopPropagation()">
+              <button class="btn btn-primary" id="btnStartProducts" onclick="startProducts()">▶ 运行抓取</button>
+              <button class="btn btn-danger" onclick="stopProducts()">⏹ 停止</button>
+            </div>
+          </div>
+          <div id="configContent">
+              <div class="config-tabs">
+                <div class="config-tab active" id="ltab_nr" onclick="switchListTab('nr')">📋 新品榜</div>
+                <div class="config-tab" id="ltab_bs" onclick="switchListTab('bs')">📋 畅销榜</div>
+                <div class="config-tab" id="ltab_mw" onclick="switchListTab('mw')">📋 心愿单</div>
+              </div>
+              <div class="config-body">
+                <!-- 新品榜 -->
+                <div id="lp_nr" class="form-row">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
+                    <input type="checkbox" id="len_nr" checked> 启用抓取
+                  </label>
+                  <div class="form-group">评论数 ≤ <input type="number" id="rv_nr" value="10" min="0"></div>
+                  <div class="form-group">活体率 ≥ <input type="number" id="ml_nr" value="100" min="0" max="100">%</div>
+                  <div class="form-group">价格 $ <input type="number" id="pmin_nr" value="0" min="0"> — <input type="number" id="pmax_nr" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
+                </div>
+                <!-- 畅销榜 -->
+                <div id="lp_bs" class="form-row" style="display:none">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
+                    <input type="checkbox" id="len_bs" checked> 启用抓取
+                  </label>
+                  <div class="form-group">评论数 ≤ <input type="number" id="rv_bs" value="10" min="0"></div>
+                  <div class="form-group">活体率 ≥ <input type="number" id="ml_bs" value="100" min="0" max="100">%</div>
+                  <div class="form-group">价格 $ <input type="number" id="pmin_bs" value="0" min="0"> — <input type="number" id="pmax_bs" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
+                </div>
+                <!-- 心愿单 -->
+                <div id="lp_mw" class="form-row" style="display:none">
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
+                    <input type="checkbox" id="len_mw" checked> 启用抓取
+                  </label>
+                  <div class="form-group">评论数 ≤ <input type="number" id="rv_mw" value="10" min="0"></div>
+                  <div class="form-group">活体率 ≥ <input type="number" id="ml_mw" value="100" min="0" max="100">%</div>
+                  <div class="form-group">价格 $ <input type="number" id="pmin_mw" value="0" min="0"> — <input type="number" id="pmax_mw" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
+                </div>
+
+                <!-- 进度条 -->
+                <div style="background: #F9FAFB; padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border);">
+                  <div class="progress-text">
+                    <span id="p_status">就绪</span><span id="p_progress_text" style="color: var(--primary); font-weight: 600;">0%</span>
+                  </div>
+                  <div class="progress-wrap">
+                    <div id="p_bar" class="progress-bar-inner" style="width: 0%;"></div>
+                  </div>
+                </div>
+              </div>
           </div>
         </div>
 
-        <!-- 畅销榜面板 -->
-        <div id="lp_bs" class="list-panel" style="padding:10px 12px;display:none">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_bs" checked> 启用</label>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_bs" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_bs" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_bs" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_bs" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
+        <!-- 实时结果面板 -->
+        <div class="panel results-panel">
+          <div class="panel-header">
+            <span>3. 实时分析结果</span>
+            <button class="btn btn-outline" style="padding: 6px 12px; font-size: 12px;" onclick="exportExcel()">📥 导出 Excel</button>
+          </div>
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 60px;">排名</th>
+                  <th>商品信息</th>
+                  <th style="width: 120px;">价格</th>
+                  <th style="width: 100px;">评论数</th>
+                </tr>
+              </thead>
+              <tbody id="demoProducts">
+                <!-- JS 动态注入 -->
+              </tbody>
+            </table>
           </div>
         </div>
-
-        <!-- 心愿单面板 -->
-        <div id="lp_mw" class="list-panel" style="padding:10px 12px;display:none">
-          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <label style="font-size:12px;color:#ccc;white-space:nowrap"><input type="checkbox" id="len_mw" checked> 启用</label>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">评论≤</span><input type="number" id="rv_mw" value="10" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">活体≥</span><input type="number" id="ml_mw" value="100" min="0" max="100" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"></div>
-            <div style="display:flex;align-items:center;gap:3px"><span style="font-size:11px;color:#888">价格$</span><input type="number" id="pmin_mw" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="color:#555">—</span><input type="number" id="pmax_mw" value="0" min="0" style="width:56px;background:#0d1117;color:#ccc;border:1px solid #2a3a5a;border-radius:4px;padding:4px;font-size:12px"><span style="font-size:9px;color:#555">0=不限</span></div>
-          </div>
-        </div>
       </div>
+    </div>
+  </main>
 
-      <!-- 操作按钮 -->
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-        <button id="btnStartProducts" onclick="startProducts()"
-          style="padding:7px 18px;background:#1a3a2a;color:#5fdb8a;border:1px solid #2a5a3a;border-radius:6px;cursor:pointer;font-size:13px">
-          ▶ 开始抓取
-        </button>
-        <button onclick="stopProducts()"
-          style="padding:7px 18px;background:#3a1a1a;color:#f07070;border:1px solid #5a2a2a;border-radius:6px;cursor:pointer;font-size:13px">
-          ⏹ 停止
-        </button>
-        <button onclick="exportExcel()"
-          style="padding:7px 18px;background:#1a2a3a;color:#7eb8f7;border:1px solid #2a3a5a;border-radius:6px;cursor:pointer;font-size:13px">
-          📥 导出 Excel
-        </button>
-        <span id="p_status" style="font-size:12px;color:#888">就绪</span>
-      </div>
-
-      <!-- 进度条 -->
-      <div style="background:#0d1117;border-radius:4px;overflow:hidden;height:6px;margin-bottom:6px">
-        <div id="p_bar" style="height:100%;width:0%;background:linear-gradient(90deg,#5fdb8a,#7eb8f7);transition:width 1s"></div>
-      </div>
-      <div id="p_progress_text" style="font-size:11px;color:#555">—</div>
-
-    </div><!-- /右侧 -->
-  </div><!-- /左右布局 -->
-
-</div><!-- /productsView -->
-
-<script>
-// ── Tab 切换 ──────────────────────────────────────────────────────
-function switchTab(tab) {
-  document.getElementById('listView').style.display     = tab === 'list'     ? '' : 'none';
-  document.getElementById('productsView').style.display = tab === 'products' ? '' : 'none';
-  document.getElementById('tabList').className     = 'tab' + (tab === 'list'     ? ' active' : '');
-  document.getElementById('tabProducts').className = 'tab' + (tab === 'products' ? ' active' : '');
-  if (tab === 'products') initProductsTab();
-}
-
-
-
-let allNodes = [];
-let isPaused = false;
-
-async function load() {
-  try {
-    // 从 API 获取统计
-    const sr = await fetch('/api/stats?t=' + Date.now());
-    if (!sr.ok) throw new Error('HTTP ' + sr.status);
-    const stats = await sr.json();
-    document.getElementById('total').textContent     = stats.total || '—';
-    document.getElementById('queue').textContent     = stats.queue ?? '—';
-    document.getElementById('has_id').textContent    = stats.has_id || 0;
-    document.getElementById('validated').textContent = stats.validated || 0;
-
-    // 从 API 获取状态
-    try {
-      const str = await fetch('/api/status?t=' + Date.now());
-      const st = await str.json();
-      document.getElementById('phase').textContent =
-        st.phase === 'sidebar_bfs' ? '侧边栏BFS' :
-        st.phase === 'breadcrumb'  ? '面包屑' :
-        st.phase === 'validating'  ? '补验榜单' :
-        st.phase === 'done'        ? '已完成' : (st.phase || '—');
-      updateBtn(st.scraper_running);
-    } catch(e) {
-      updateBtn(false);
-    }
-
-    // 从 API 获取类目列表（带筛选）
-    const q  = document.getElementById('search').value;
-    const df = document.getElementById('depthFilter').value;
-    let apiUrl = '/api/categories?limit=2000';
-    if (q)  apiUrl += '&q=' + encodeURIComponent(q);
-    if (df !== 'all') apiUrl += '&depth=' + df;
-
-    const cr = await fetch(apiUrl);
-    allNodes = await cr.json();
-    renderTable();
-  } catch(e) {}
-  document.getElementById('last_update').textContent = new Date().toLocaleTimeString();
-}
-
-function listBtn(label, url, valid, col, nodeId) {
-  if (!url || !nodeId) return `<span class="lb lb-unknown">${label}</span>`;
-  const cls = valid === 1 ? 'lb-valid' : valid === 0 ? 'lb-invalid' : 'lb-unknown';
-  const href = valid === 1 ? `href="${url}" target="_blank"` : '';
-  return `<a class="lb ${cls}" ${href}>${label}</a>`;
-}
-
-function buildListBtns(n) {
-  if (!n.node_id) return '<span style="color:#333;font-size:11px">—</span>';
-  const parts = (n.url || '').replace(/\/$/, '').split('/');
-  const gpIdx = parts.indexOf('gp');
-  const slug  = gpIdx >= 0 ? parts[gpIdx + 2] : '';
-  const nid   = n.node_id;
-  const base  = `https://www.amazon.com/gp`;
-  return `<div class="list-btns">
-    ${listBtn('新品', `${base}/new-releases/${slug}/${nid}/`,       n.nr_valid, 'nr_valid', nid)}
-    ${listBtn('畅销', `${base}/bestsellers/${slug}/${nid}/`,        n.bs_valid, 'bs_valid', nid)}
-    ${listBtn('飙升', `${base}/movers-and-shakers/${slug}/${nid}/`, n.ms_valid, 'ms_valid', nid)}
-    ${listBtn('心愿', `${base}/most-wished-for/${slug}/${nid}/`,    n.mw_valid, 'mw_valid', nid)}
-  </div>`;
-}
-
-function renderTable() {
-  const rows = allNodes.map((n, i) => {
-    const d   = n.depth || 0;
-    const dc  = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
-    const indent = d * 16;
-    const name = n.name && !n.name.match(/^\d+$/) ? n.name : '<span style="color:#555;font-style:italic">(未命名)</span>';
-    const btns = buildListBtns(n);
-    const refreshBtn = n.node_id
-      ? `<button class="row-refresh" onclick="refreshRow('${n.node_id}',this)" title="重新验证此行">↺</button>`
-      : '';
-    return `<tr id="row-${n.node_id || i}">
-      <td style="color:#555">${i+1}</td>
-      <td style="padding-left:${indent}px">${name}</td>
-      <td><span class="depth-badge ${dc}">L${d}</span></td>
-      <td class="${n.node_id?'has-id':'no-id'}">${n.node_id||'—'}</td>
-      <td class="${n.source==='breadcrumb'?'source-bc':'source-sb'}">${n.source||'sidebar'}</td>
-      <td>${btns}</td>
-      <td>${refreshBtn}</td>
-    </tr>`;
-  }).join('');
-  document.getElementById('tbody').innerHTML = rows ||
-    '<tr><td colspan="7" style="color:#555;padding:20px">暂无数据</td></tr>';
-}
-
-
-async function refreshRow(nodeId, btn) {
-  btn.textContent = '⏳'; btn.disabled = true;
-  try {
-    await fetch(`/api/check_node?node_id=${nodeId}`, {method:'POST'});
-    // 子进程在后台跑，约3-5秒完成，延迟后刷新
-    setTimeout(() => { load(); btn.textContent = '↺'; btn.disabled = false; }, 6000);
-  } catch(e) {
-    btn.textContent = '↺'; btn.disabled = false;
-  }
-}
-
-function updateBtn(running) {
-  const btn = document.getElementById('ctrlBtn');
-  const dot = document.getElementById('statusDot');
-  const txt = document.getElementById('statusText');
-  if (running) {
-    btn.className = 'ctrl-btn running';
-    btn.textContent = '⏹ 停止抓取';
-    dot.className = 'status-dot running';
-    txt.textContent = '运行中';
-  } else {
-    btn.className = 'ctrl-btn paused';
-    btn.textContent = '▶ 启动抓取';
-    dot.className = 'status-dot paused';
-    txt.textContent = '爬虫未运行';
-  }
-}
-
-async function togglePause() {
-  const btn = document.getElementById('ctrlBtn');
-  const url = btn.textContent.includes('启动') ? '/api/start' : '/api/stop';
-  try {
-    const r = await fetch(url, { method: 'POST' });
-    const d = await r.json();
-    if (d.status === 'error') alert('操作失败: ' + d.msg);
-    else load();
-  } catch(e) { alert('连接失败，检查 dashboard_server.py 是否在运行'); }
-}
-
-load();
-setInterval(load, 1000);
-
-// ── 商品抓取面板 JS ───────────────────────────────────────────────
-
-let _productPollTimer = null;
-const _selectedRoots = new Set();
-
-async function initProductsTab() {
-  await loadProductTree();
-  await refreshProductStats();
-  startProductPoll();
-}
-
-// ── 商品 L1 类目列表（slug 勾选）────────────────────────────────
-const _selectedSlugs = new Set();
-
-async function loadProductTree() {
-  const root = document.getElementById('pTreeRoot');
-  root.innerHTML = '<div style="color:#555">⏳ 加载中...</div>';
-  try {
-    const items = await fetch('/api/l1_categories').then(r => r.json());
-    root.innerHTML = '';
-    items.forEach(it => root.appendChild(buildSlugRow(it)));
-    if (!items.length) root.innerHTML = '<div style="color:#f07070">无 L1 类目数据</div>';
-  } catch(e) {
-    root.innerHTML = '<div style="color:#f07070">加载失败: ' + e + '</div>';
-  }
-}
-
-function buildSlugRow(item) {
-  const wrap = document.createElement('div');
-
-  // ── 主行 ──
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;cursor:pointer';
-  row.onmouseenter = () => row.style.background = '#1a2a3a';
-  row.onmouseleave = () => row.style.background = '';
-
-  // 展开箭头
-  const arrow = document.createElement('span');
-  arrow.textContent = '▶';
-  arrow.style.cssText = 'font-size:9px;color:#555;width:12px;flex-shrink:0;transition:transform .18s;user-select:none';
-  row.appendChild(arrow);
-
-  // L1 checkbox（选整个 L1）
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.title = '选择整个 ' + item.name + ' 大类';
-  cb.addEventListener('change', e => {
-    e.stopPropagation();
-    if (cb.checked) _selectedSlugs.add(item.slug);
-    else _selectedSlugs.delete(item.slug);
-    document.getElementById('p_sel_count').textContent = _selectedSlugs.size + ' 个已选';
-  });
-  row.appendChild(cb);
-
-  const label = document.createElement('span');
-  label.textContent = item.name;
-  label.style.cssText = 'color:#ccc;font-size:12px;flex:1';
-  label.setAttribute('data-label', '1');
-  row.appendChild(label);
-
-  const cnt = document.createElement('span');
-  cnt.textContent = item.child_count + ' 类';
-  cnt.style.cssText = 'color:#555;font-size:10px;flex-shrink:0';
-  row.appendChild(cnt);
-
-  wrap.appendChild(row);
-
-  // ── 子节点容器（懒加载）──
-  const childBox = document.createElement('div');
-  childBox.style.cssText = 'display:none;margin-left:20px;border-left:1px solid #2a2d3e;padding-left:8px';
-  wrap.appendChild(childBox);
-
-  let expanded = false;
-  let loaded   = false;
-
-  row.addEventListener('click', async e => {
-    if (e.target === cb) return;
-    expanded = !expanded;
-    arrow.style.transform = expanded ? 'rotate(90deg)' : '';
-    arrow.style.color     = expanded ? '#7eb8f7' : '#555';
-    childBox.style.display = expanded ? '' : 'none';
-
-    if (expanded && !loaded) {
-      loaded = true;
-      childBox.innerHTML = '<div style="color:#555;font-size:11px;padding:4px">⏳ 加载中...</div>';
-      try {
-        const data = await fetch('/api/slug_children?slug=' + encodeURIComponent(item.slug)).then(r => r.json());
-        childBox.innerHTML = '';
-        if (!data.length) {
-          childBox.innerHTML = '<div style="color:#555;font-size:11px;padding:4px">暂无子类目</div>';
-          return;
-        }
-        // 按 parent_node_id 分组构建树
-        const byParent = new Map();
-        data.forEach(n => {
-          const pk = n.parent_node_id || item.slug;
-          if (!byParent.has(pk)) byParent.set(pk, []);
-          byParent.get(pk).push(n);
-        });
-        // 渲染 L1 slug 直属子节点（parent 指向 slug 字符串 或 null 的根节点）
-        const roots = byParent.get(item.slug) || [];
-        // 没有parent的节点也加入根级
-        data.filter(n => !n.parent_node_id).forEach(n => {
-          if (!roots.find(r => r.node_id === n.node_id)) roots.push(n);
-        });
-        if (!roots.length) {
-          // fallback：parent数据不足时平铺显示
-          data.forEach(n => childBox.appendChild(buildTreeNode(n, byParent)));
-        } else {
-          roots.forEach(n => childBox.appendChild(buildTreeNode(n, byParent)));
-        }
-      } catch(e) {
-        childBox.innerHTML = '<div style="color:#f07070;font-size:11px">加载失败</div>';
+  <script>
+    // ── 1. 视图切换 ────────────────────────────────────────────────
+    function switchView(view) {
+      const isList = view === 'list';
+      document.getElementById('viewList').style.display  = isList ? 'flex' : 'none';
+      document.getElementById('viewTasks').style.display = isList ? 'none' : 'flex';
+      document.getElementById('nav-list').classList.toggle('active', isList);
+      document.getElementById('nav-tasks').classList.toggle('active', !isList);
+      
+      document.getElementById('mainTitle').textContent = isList ? '🗂️ 类目全量发现 (List)' : '🚀 商品定向抓取 (Tasks)';
+      document.getElementById('taskStats').style.display = isList ? 'none' : 'flex';
+      
+      if (isList) {
+        loadListDrillDown();
+      } else {
+        loadTaskDrillDown();
+        loadLiveProducts();
       }
     }
-  });
 
-  return wrap;
-}
-
-function buildTreeNode(node, byParent) {
-  const children = (byParent && byParent.get(node.node_id)) || [];
-  const hasKids = children.length > 0;
-
-  const wrap = document.createElement('div');
-
-  // 主行
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:2px 4px;border-radius:3px;cursor:pointer';
-  row.onmouseenter = () => row.style.background = '#1a2a3a';
-  row.onmouseleave = () => row.style.background = '';
-
-  // 展开箭头（无子节点时占位）
-  const arrow = document.createElement('span');
-  arrow.style.cssText = 'font-size:9px;width:10px;flex-shrink:0;transition:transform .15s;user-select:none';
-  arrow.textContent = hasKids ? '▶' : ' ';
-  arrow.style.color = hasKids ? '#555' : 'transparent';
-  row.appendChild(arrow);
-
-  // checkbox
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  cb.dataset.nodeId = node.node_id;
-  cb.addEventListener('change', ev => {
-    ev.stopPropagation();
-    if (cb.checked) _selectedSlugs.add('__node__' + node.node_id);
-    else _selectedSlugs.delete('__node__' + node.node_id);
-    document.getElementById('p_sel_count').textContent = _selectedSlugs.size + ' 个已选';
-  });
-  row.appendChild(cb);
-
-  // depth badge
-  const badge = document.createElement('span');
-  const d = node.depth || 0;
-  const dc = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
-  badge.className = 'depth-badge ' + dc;
-  badge.textContent = 'L' + d;
-  row.appendChild(badge);
-
-  // 名称
-  const name = document.createElement('span');
-  name.textContent = node.name || '(未命名)';
-  name.style.cssText = 'color:#aaa;font-size:11px;flex:1';
-  row.appendChild(name);
-
-  wrap.appendChild(row);
-
-  if (!hasKids) return wrap;
-
-  // 子容器
-  const kidBox = document.createElement('div');
-  kidBox.style.cssText = 'display:none;margin-left:14px;border-left:1px solid #2a2d3e;padding-left:6px';
-  wrap.appendChild(kidBox);
-
-  let expanded = false;
-  row.addEventListener('click', e => {
-    if (e.target === cb) return;
-    expanded = !expanded;
-    arrow.style.transform = expanded ? 'rotate(90deg)' : '';
-    arrow.style.color = expanded ? '#7eb8f7' : '#555';
-    kidBox.style.display = expanded ? '' : 'none';
-    if (expanded && !kidBox.childElementCount) {
-      children.forEach(c => kidBox.appendChild(buildTreeNode(c, byParent)));
+    // ── 2. 配置面板折叠 ──────────────────────────────────────────────
+    function toggleConfig() {
+      const content = document.getElementById('configContent');
+      const icon = document.getElementById('configToggleIcon');
+      const isHidden = content.style.display === 'none';
+      content.style.display = isHidden ? 'block' : 'none';
+      icon.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(-90deg)';
     }
-  });
 
-  return wrap;
-}
-
-
-function filterPTree(q) {
-  const kw = q.trim().toLowerCase();
-  const root = document.getElementById('pTreeRoot');
-  [...root.children].forEach(div => {
-    const label = div.querySelector('span[data-label]');
-    const text = (label ? label.textContent : '').toLowerCase();
-    div.style.display = (!kw || text.includes(kw)) ? '' : 'none';
-  });
-}
-
-async function refreshProductStats() {
-  try {
-    const r = await fetch('/api/product_stats');
-    const d = await r.json();
-    document.getElementById('p_total').textContent = d.total_asins || 0;
-    document.getElementById('p_multi').textContent = d.multi_list || 0;
-    const byList = {};
-    (d.by_list || []).forEach(row => byList[row.list_type] = row.cnt);
-    document.getElementById('p_nr').textContent = byList['new-releases']  || 0;
-    document.getElementById('p_bs').textContent = byList['bestsellers']   || 0;
-    document.getElementById('p_mw').textContent = byList['most-wished-for'] || 0;
-
-    const running = d.running;
-    document.getElementById('p_status').textContent = running ? '⚙ 抓取中...' : '就绪';
-    document.getElementById('p_status').style.color  = running ? '#5fdb8a' : '#888';
-  } catch(e) {}
-}
-
-function startProductPoll() {
-  if (_productPollTimer) return;
-  _productPollTimer = setInterval(refreshProductStats, 3000);
-}
-
-// ── 榜单子标签切换 ────────────────────────────────────────────────
-function switchListTab(key) {
-  ['nr','bs','mw'].forEach(k => {
-    document.getElementById('lp_'+k).style.display = k===key ? '' : 'none';
-    const btn = document.getElementById('ltab_'+k);
-    btn.style.color = k===key ? '#7eb8f7' : '#888';
-    btn.style.borderBottomColor = k===key ? '#7eb8f7' : 'transparent';
-  });
-}
-
-// ── 收集每个榜单独立参数 ──────────────────────────────────────────
-function collectListParams(key, listType) {
-  const enabled = document.getElementById('len_'+key).checked;
-  if (!enabled) return null;
-  return {
-    list_type:  listType,
-    review_max: +document.getElementById('rv_'+key).value,
-    min_list:   +document.getElementById('ml_'+key).value,
-    price_min:  +document.getElementById('pmin_'+key).value,
-    price_max:  +document.getElementById('pmax_'+key).value,
-  };
-}
-
-async function startProducts() {
-  const allSelected = [..._selectedSlugs].filter(Boolean);
-  if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
-
-  // 区分 L1 slug 选择 和 具体子节点选择
-  const slugs = allSelected.filter(s => !s.startsWith('__node__'));
-  const roots = allSelected.filter(s => s.startsWith('__node__')).map(s => s.replace('__node__', ''));
-
-  const enabledLists = [];
-  if (document.getElementById('len_nr').checked) enabledLists.push('new-releases');
-  if (document.getElementById('len_bs').checked) enabledLists.push('bestsellers');
-  if (document.getElementById('len_mw').checked) enabledLists.push('most-wished-for');
-  if (!enabledLists.length) { alert('请至少启用一个榜单'); return; }
-
-  const params = {
-    lists:      enabledLists,
-    review_max: +document.getElementById('rv_nr').value,
-    min_list:   +document.getElementById('ml_nr').value,
-    price_min:  +document.getElementById('pmin_nr').value,
-    price_max:  +document.getElementById('pmax_nr').value,
-  };
-  if (slugs.length) params.slugs = slugs;
-  if (roots.length) params.roots = roots;
-
-  try {
-    const r = await fetch('/api/start_products', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(params)
-    });
-    const d = await r.json();
-    if (d.status === 'already_running') alert('抓取进程已在运行中');
-    else if (d.status === 'error') alert('启动失败: ' + d.msg);
-    else {
-      document.getElementById('p_status').textContent = `⚙ 已启动 PID=${d.pid}`;
-      document.getElementById('p_status').style.color = '#5fdb8a';
+    // ── 3. 榜单配置 Sub-tab 切换 ─────────────────────────────────────
+    function switchListTab(key) {
+      ['nr','bs','mw'].forEach(k => {
+        document.getElementById('lp_'+k).style.display = k === key ? 'flex' : 'none';
+        const btn = document.getElementById('ltab_'+k);
+        if (k === key) btn.classList.add('active'); else btn.classList.remove('active');
+      });
     }
-  } catch(e) { alert('启动失败: ' + e); }
-}
 
-async function stopProducts() {
-  try {
-    const r = await fetch('/api/stop_products', {method: 'POST'});
-    const d = await r.json();
-    document.getElementById('p_status').textContent = '已停止';
-    document.getElementById('p_status').style.color = '#888';
-  } catch(e) { alert('停止失败: ' + e); }
-}
+    // ── 4. 大盘监控与全局状态更新 ──────────────────────────────────────
+    async function loadStats() {
+      try {
+        const sr = await fetch('/api/stats?t=' + Date.now());
+        if (!sr.ok) throw new Error('HTTP ' + sr.status);
+        const stats = await sr.json();
+        document.getElementById('total').textContent     = stats.total || '—';
+        document.getElementById('queue').textContent     = stats.queue ?? '—';
+        document.getElementById('validated').textContent = stats.validated || 0;
 
-async function exportExcel() {
-  document.getElementById('p_status').textContent = '导出中...';
-  try {
-    const r = await fetch('/api/export_excel', {method: 'POST'});
-    const d = await r.json();
-    if (d.status === 'ok') {
-      document.getElementById('p_status').textContent = '✅ Excel 已导出到 data/products.xlsx';
-    } else {
-      document.getElementById('p_status').textContent = '❌ ' + (d.msg || '导出失败');
+        try {
+          const str = await fetch('/api/status?t=' + Date.now());
+          const st = await str.json();
+          document.getElementById('phase').textContent =
+            st.phase === 'sidebar_bfs' ? '侧边栏BFS' :
+            st.phase === 'breadcrumb'  ? '面包屑' :
+            st.phase === 'validating'  ? '补验榜单' :
+            st.phase === 'done'        ? '已完成' : (st.phase || '—');
+          updateScraperBtn(st.scraper_running);
+        } catch(e) { updateScraperBtn(false); }
+      } catch(e) {}
     }
-  } catch(e) { alert('导出失败: ' + e); }
-}
 
-</script>
+    function updateScraperBtn(running) {
+      const btn = document.getElementById('ctrlBtn');
+      const dot = document.getElementById('statusDot');
+      const txt = document.getElementById('statusText');
+      if (running) {
+        btn.className = 'ctrl-btn running';
+        btn.textContent = '⏹ 停止抓取';
+        dot.className = 'status-dot running';
+        txt.textContent = '运行中';
+      } else {
+        btn.className = 'ctrl-btn paused';
+        btn.textContent = '▶ 启动抓取';
+        dot.className = 'status-dot paused';
+        txt.textContent = '爬虫未运行';
+      }
+    }
+
+    async function togglePause() {
+      const btn = document.getElementById('ctrlBtn');
+      const url = btn.textContent.includes('启动') ? '/api/start' : '/api/stop';
+      try {
+        const r = await fetch(url, { method: 'POST' });
+        const d = await r.json();
+        if (d.status === 'error') alert('操作失败: ' + d.msg);
+        else loadStats();
+      } catch(e) { alert('连接失败，检查 dashboard_server.py 是否在运行'); }
+    }
+
+    // ── 5. 榜单校验状态 HTML 渲染 ─────────────────────────────────────
+    function listBtn(label, url, valid, nodeId) {
+      if (!url || !nodeId) return `<span class="list-btn disabled">${label}</span>`;
+      const cls = valid === 1 ? 'active' : valid === 0 ? 'disabled' : 'checking';
+      const href = valid === 1 ? `href="${url}" target="_blank"` : 'javascript:void(0)';
+      return `<a class="list-btn ${cls}" ${href}>${label}</a>`;
+    }
+
+    function buildListBtns(n) {
+      if (!n.node_id) return '<span style="color:#ccc;font-size:11px">—</span>';
+      const parts = (n.url || '').replace(/\/$/, '').split('/');
+      const gpIdx = parts.indexOf('gp');
+      const slug  = gpIdx >= 0 ? parts[gpIdx + 2] : '';
+      const nid   = n.node_id;
+      const base  = `https://www.amazon.com/gp`;
+      return `<div class="list-btns">
+        ${listBtn('新品', `${base}/new-releases/${slug}/${nid}/`,       n.nr_valid, nid)}
+        ${listBtn('畅销', `${base}/bestsellers/${slug}/${nid}/`,        n.bs_valid, nid)}
+        ${listBtn('飙升', `${base}/movers-and-shakers/${slug}/${nid}/`, n.ms_valid, nid)}
+        ${listBtn('心愿', `${base}/most-wished-for/${slug}/${nid}/`,    n.mw_valid, nid)}
+      </div>`;
+    }
+
+    async function refreshRow(nodeId, btn) {
+      btn.disabled = true;
+      try {
+        await fetch(`/api/check_node?node_id=${nodeId}`, {method:'POST'});
+        setTimeout(() => { loadListDrillDown(); btn.disabled = false; }, 4000);
+      } catch(e) { btn.disabled = false; }
+    }
+
+
+    // ════ VIEW 1: 类目全量发现 (List View) 下钻 ════
+    let listCurrentPath = [{ node_id: 'root', name: '🏠 全部分类', slug: 'root' }];
+    let listSearchKeyword = '';
+    let currentListChildren = [];
+
+    async function loadListDrillDown() {
+      const current = listCurrentPath[listCurrentPath.length - 1];
+      
+      // 渲染面包屑
+      const bcHtml = listCurrentPath.map((node, idx) => {
+        const isLast = idx === listCurrentPath.length - 1;
+        if (isLast) return `<div class="bc-item bc-current">${node.name}</div>`;
+        return `<div class="bc-item"><span class="bc-link" onclick="navListTo(${idx})">${node.name}</span><span class="bc-sep">/</span></div>`;
+      }).join('');
+      document.getElementById('listBcBar').innerHTML = bcHtml;
+
+      // 显示加载中
+      document.getElementById('listTbody').innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--gray);">⏳ 加载中...</td></tr>';
+
+      try {
+        let url = '/api/categories?limit=500';
+        if (current.node_id === 'root') {
+          url += '&parent=root';
+        } else if (current.slug && !current.node_id) {
+          url += '&parent=' + current.slug;
+        } else {
+          url += '&parent=' + current.node_id;
+        }
+        if (listSearchKeyword) {
+          url += '&q=' + encodeURIComponent(listSearchKeyword);
+        }
+
+        const res = await fetch(url + '&t=' + Date.now());
+        currentListChildren = await res.json();
+
+        let listHtml = '';
+        if (currentListChildren && currentListChildren.length > 0) {
+          currentListChildren.forEach((child, idx) => {
+            const hasChild = child.child_count > 0;
+            const d = child.depth || 1;
+            const dc = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
+            const btns = buildListBtns(child);
+            const refreshBtn = child.node_id
+              ? `<button class="icon-btn" onclick="event.stopPropagation(); refreshRow('${child.node_id}', this)" title="刷新榜单校验状态">
+                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path></svg>
+                 </button>`
+              : '';
+
+            const rowStyle = hasChild ? 'cursor: pointer; transition: background 0.15s;' : '';
+            const onClickAttr = hasChild ? `onclick="listDiveIn(${idx})"` : '';
+
+            listHtml += `
+            <tr style="${rowStyle}" ${onClickAttr} title="${hasChild ? '点击进入下级类目' : ''}">
+                <td style="font-weight: 500;">
+                   <div style="display:flex; align-items:center; gap:8px;">
+                       ${hasChild ? '<span style="color:var(--warning); font-size:16px; flex-shrink:0;">📁</span>' : '<span style="color:var(--gray); font-size:16px; flex-shrink:0;">📄</span>'}
+                       <span style="color: var(--fg); border-bottom: 1px dashed ${hasChild ? 'var(--gray)' : 'transparent'}; padding-bottom:1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${child.name}</span>
+                   </div>
+                </td>
+                <td style="text-align: center;"><span class="badge-lvl">L${d}</span></td>
+                <td><span class="item-meta">${child.node_id || '—'}</span></td>
+                <td style="color:var(--gray); font-size:12px; text-align: right; padding-right: 32px;">${hasChild ? child.child_count + ' 个' : '0 个'}</td>
+                <td style="text-align: right; padding-right: 32px;" onclick="event.stopPropagation()">${btns}</td>
+                <td style="text-align: right;" onclick="event.stopPropagation()">${refreshBtn}</td>
+            </tr>`;
+          });
+        } else {
+          listHtml = `<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--gray);">该类目下没有子节点数据</td></tr>`;
+        }
+        document.getElementById('listTbody').innerHTML = listHtml;
+      } catch (err) {
+        document.getElementById('listTbody').innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--danger);">加载失败: ${err}</td></tr>`;
+      }
+    }
+
+    function navListTo(idx) {
+      listCurrentPath = listCurrentPath.slice(0, idx + 1);
+      loadListDrillDown();
+    }
+
+    function listDiveIn(idx) {
+      listCurrentPath.push(currentListChildren[idx]);
+      loadListDrillDown();
+    }
+
+    function searchList(kw) {
+      listSearchKeyword = kw.trim();
+      loadListDrillDown();
+    }
+
+
+    // ════ VIEW 2: 商品定向抓取 (Tasks View) 下钻 ════
+    let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类', slug: 'root' }];
+    let taskSearchKeyword = '';
+    const _selectedSlugs = new Set(); 
+    let currentTaskChildren = [];
+
+    async function loadTaskDrillDown() {
+      const current = taskCurrentPath[taskCurrentPath.length - 1];
+
+      // 渲染面包屑
+      const bcHtml = taskCurrentPath.map((node, idx) => {
+        const isLast = idx === taskCurrentPath.length - 1;
+        if (isLast) return `<div class="bc-item bc-current">${node.name}</div>`;
+        return `<div class="bc-item"><span class="bc-link" onclick="navTaskTo(${idx})">${node.name}</span><span class="bc-sep">/</span></div>`;
+      }).join('');
+      document.getElementById('bcBar').innerHTML = bcHtml;
+
+      // 显示加载中
+      document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">⏳ 加载中...</div>';
+
+      try {
+        let url = '/api/categories?limit=500';
+        if (current.node_id === 'root') {
+          url += '&parent=root';
+        } else if (current.slug && !current.node_id) {
+          url += '&parent=' + current.slug;
+        } else {
+          url += '&parent=' + current.node_id;
+        }
+        if (taskSearchKeyword) {
+          url += '&q=' + encodeURIComponent(taskSearchKeyword);
+        }
+
+        const res = await fetch(url + '&t=' + Date.now());
+        currentTaskChildren = await res.json();
+
+        let listHtml = '';
+        if (currentTaskChildren && currentTaskChildren.length > 0) {
+          currentTaskChildren.forEach((child, idx) => {
+            const hasChild = child.child_count > 0;
+            const key = child.node_id ? '__node__' + child.node_id : child.slug;
+            const isSel = _selectedSlugs.has(key);
+            const d = child.depth || 1;
+            const metaText = child.node_id ? child.node_id : (child.child_count + ' 节点');
+
+            listHtml += `
+            <div class="drill-item ${isSel ? 'selected' : ''}" onclick="toggleSelect('${key}')">
+                <input type="checkbox" ${isSel ? 'checked' : ''} onclick="event.stopPropagation(); toggleSelect('${key}')">
+                <span class="badge-lvl">L${d}</span>
+                <span class="item-name" title="${child.name}">${child.name}</span>
+                <span class="item-meta">${metaText}</span>
+                ${hasChild ? `<div class="drill-btn" onclick="event.stopPropagation(); taskDiveIn(${idx})">进入下级 &gt;</div>` : ''}
+            </div>`;
+          });
+        } else {
+          listHtml = `<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>`;
+        }
+        document.getElementById('drillList').innerHTML = listHtml;
+        document.getElementById('selCount').innerText = _selectedSlugs.size + ' 个已选';
+      } catch (err) {
+        document.getElementById('drillList').innerHTML = `<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ${err}</div>`;
+      }
+    }
+
+    function navTaskTo(idx) {
+      taskCurrentPath = taskCurrentPath.slice(0, idx + 1);
+      loadTaskDrillDown();
+    }
+
+    function taskDiveIn(idx) {
+      taskCurrentPath.push(currentTaskChildren[idx]);
+      loadTaskDrillDown();
+    }
+
+    function toggleSelect(key) {
+      if (_selectedSlugs.has(key)) {
+        _selectedSlugs.delete(key);
+      } else {
+        _selectedSlugs.add(key);
+      }
+      loadTaskDrillDown();
+    }
+
+    function searchTask(kw) {
+      taskSearchKeyword = kw.trim();
+      loadTaskDrillDown();
+    }
+
+    // ── 6. 商品抓取控制 & 状态轮询 ─────────────────────────────────────
+    let _productPollTimer = null;
+
+    async function refreshProductStats() {
+      try {
+        const r = await fetch('/api/product_stats?t=' + Date.now());
+        const d = await r.json();
+        
+        // 头部统计
+        document.getElementById('p_total').textContent = d.total_asins || 0;
+        document.getElementById('p_multi').textContent = d.multi_list || 0;
+
+        const running = d.running;
+        document.getElementById('p_status').textContent = running ? '⚙ 抓取中...' : '就绪';
+        document.getElementById('p_status').style.color  = running ? 'var(--success)' : 'var(--gray)';
+      } catch(e) {}
+    }
+
+    async function loadLiveProducts() {
+      try {
+        const res = await fetch('/api/products?t=' + Date.now());
+        const products = await res.json();
+        let phtml = '';
+        if (products && products.length > 0) {
+          products.forEach((prod, i) => {
+            phtml += `<tr>
+                <td style="color:var(--gray); font-weight:600;">#${i + 1}</td>
+                <td>
+                  <div style="font-weight:500; font-size:13px; color:var(--primary); margin-bottom:4px; white-space:normal;">${prod.name || 'Unknown Product'}</div>
+                  <div style="font-size:11px; color:var(--gray);">${prod.asin || ''}</div>
+                </td>
+                <td style="font-weight:600;">$${typeof prod.price === 'number' ? prod.price.toFixed(2) : (prod.price || '—')}</td>
+                <td>${prod.review_count || 0}</td>
+            </tr>`;
+          });
+        } else {
+          phtml = `<tr><td colspan="4" style="text-align:center; padding: 40px; color:var(--gray);">暂无实时分析结果。请选择类目并启动抓取进程。</td></tr>`;
+        }
+        document.getElementById('demoProducts').innerHTML = phtml;
+      } catch (e) {
+        console.error('Failed to load live products:', e);
+      }
+    }
+
+    async function refreshProductProgress() {
+      try {
+        const r = await fetch('/api/product_progress?t=' + Date.now());
+        const d = await r.json();
+        if (d.running) {
+          // 模拟进度条加载动画
+          let p = parseFloat(document.getElementById('p_progress_text').innerText) || 0;
+          if (p < 95) {
+            p += Math.random() * 5;
+            p = Math.min(p, 98);
+            document.getElementById('p_bar').style.width = p + '%';
+            document.getElementById('p_progress_text').innerText = Math.round(p) + '%';
+          }
+        } else {
+          const pText = document.getElementById('p_progress_text').innerText;
+          if (pText !== '0%' && pText !== '100%') {
+            document.getElementById('p_bar').style.width = '100%';
+            document.getElementById('p_progress_text').innerText = '100%';
+            document.getElementById('p_status').textContent = '✓ 完成';
+          }
+        }
+      } catch(e) {}
+    }
+
+    function startProductPoll() {
+      if (_productPollTimer) return;
+      _productPollTimer = setInterval(() => {
+        refreshProductStats();
+        loadLiveProducts();
+        refreshProductProgress();
+      }, 3000);
+    }
+
+    async function startProducts() {
+      const allSelected = [..._selectedSlugs].filter(Boolean);
+      if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
+
+      const slugs = allSelected.filter(s => !s.startsWith('__node__'));
+      const roots = allSelected.filter(s => s.startsWith('__node__')).map(s => s.replace('__node__', ''));
+
+      const enabledLists = [];
+      if (document.getElementById('len_nr').checked) enabledLists.push('new-releases');
+      if (document.getElementById('len_bs').checked) enabledLists.push('bestsellers');
+      if (document.getElementById('len_mw').checked) enabledLists.push('most-wished-for');
+      if (!enabledLists.length) { alert('请至少启用一个榜单'); return; }
+
+      // 读取当前 Tab 的参数
+      const activeTab = document.querySelector('.config-tab.active').id.replace('ltab_', '');
+      const params = {
+        lists:      enabledLists,
+        review_max: +document.getElementById('rv_' + activeTab).value,
+        min_list:   +document.getElementById('ml_' + activeTab).value,
+        price_min:  +document.getElementById('pmin_' + activeTab).value,
+        price_max:  +document.getElementById('pmax_' + activeTab).value,
+      };
+      if (slugs.length) params.slugs = slugs;
+      if (roots.length) params.roots = roots;
+
+      document.getElementById('p_bar').style.width = '0%';
+      document.getElementById('p_progress_text').innerText = '0%';
+      document.getElementById('p_status').textContent = '⚙ 启动中...';
+
+      try {
+        const r = await fetch('/api/start_products', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(params)
+        });
+        const d = await r.json();
+        if (d.status === 'already_running') alert('抓取进程已在运行中');
+        else if (d.status === 'error') alert('启动失败: ' + d.msg);
+        else {
+          document.getElementById('p_status').textContent = `⚙ 抓取中...`;
+          document.getElementById('p_status').style.color = 'var(--success)';
+        }
+      } catch(e) { alert('启动失败: ' + e); }
+    }
+
+    async function stopProducts() {
+      try {
+        await fetch('/api/stop_products', {method: 'POST'});
+        document.getElementById('p_status').textContent = '已停止';
+        document.getElementById('p_status').style.color = 'var(--gray)';
+      } catch(e) { alert('停止失败: ' + e); }
+    }
+
+    async function exportExcel() {
+      document.getElementById('p_status').textContent = '导出中...';
+      try {
+        const r = await fetch('/api/export_excel', {method: 'POST'});
+        const d = await r.json();
+        if (d.status === 'ok') {
+          alert('✅ Excel 已成功导出到 data/products.xlsx');
+          document.getElementById('p_status').textContent = '就绪';
+        } else {
+          alert('❌ ' + (d.msg || '导出失败'));
+          document.getElementById('p_status').textContent = '就绪';
+        }
+      } catch(e) { alert('导出失败: ' + e); }
+    }
+
+    // ── 7. 页面载入 ──────────────────────────────────────────────────
+    // 初始化首屏
+    loadStats();
+    loadListDrillDown();
+    startProductPoll();
+    
+    // 定时刷新监控大盘
+    setInterval(loadStats, 2000);
+  </script>
 </body>
 </html>

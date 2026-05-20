@@ -158,6 +158,12 @@ def extract_node_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def extract_slug(url: str) -> str | None:
+    """从 URL 提取 L1 slug（如 amazon-devices、books），作为 L1 节点的标识。"""
+    m = re.search(r"/gp/new-releases/([a-z][a-z0-9-]+)", url)
+    return m.group(1) if m else None
+
+
 # 榜单验证（内嵌到 BFS 遍历中，省去 check_links.py 的二次遍历）
 LIST_PREFIXES = [
     ("nr_valid",  "new-releases"),
@@ -269,6 +275,71 @@ def parse_sidebar_links(html: str) -> list[dict]:
         })
 
     return results
+
+
+def _find_direct_sub_ul(li):
+    """找 li 下的直接子 ul，允许穿透一层 span，不再深入。"""
+    for child in li.children:
+        if hasattr(child, 'name') and child.name == 'ul':
+            return child
+    for child in li.children:
+        if hasattr(child, 'name') and child.name == 'span':
+            for grandchild in child.children:
+                if hasattr(grandchild, 'name') and grandchild.name == 'ul':
+                    return grandchild
+    return None
+
+
+def parse_sidebar_tree(html: str) -> list[tuple[str, str | None]]:
+    """
+    解析侧边栏完整导航树，提取所有可见的 (child_key, parent_key) 关系对。
+    child_key/parent_key 为 node_id（数字字符串）或 slug（L1）。
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    left = soup.select_one("#zg-left-col")
+    if not left:
+        left = soup.select_one("ul[class*='zg-browse-root']")
+    if not left:
+        return []
+
+    pairs = []        # [(child_key, parent_key), ...]
+    seen_keys = set() # 去重
+
+    def _walk(el, parent_key):
+        for li in el.find_all("li", recursive=False):
+            li_cls = " ".join(li.get("class", []))
+            if "browse-up" in li_cls:
+                continue
+            a = li.find("a")
+            sub = _find_direct_sub_ul(li)
+            if not a:
+                # 选中节点（span，无 href）→ 递归子 ul
+                if sub:
+                    _walk(sub, parent_key)
+                continue
+            name = a.get_text(strip=True)
+            href = a.get("href", "")
+            if not name or name.isdigit() or name in ("Any Department", "See More"):
+                if sub:
+                    _walk(sub, parent_key)
+                continue
+            href_clean = href.split("?")[0].split("/ref=")[0]
+            m_nid = re.search(r"/(\d+)", href_clean)
+            m_slug = re.search(r"/gp/new-releases/([a-z][a-z0-9-]+)/?$", href_clean)
+            nid = m_nid.group(1) if m_nid else None
+            slug = m_slug.group(1) if m_slug else None
+            key = nid or slug
+            if key and key not in seen_keys and key != parent_key:
+                seen_keys.add(key)
+                pairs.append((key, parent_key))
+            if sub:
+                _walk(sub, key or parent_key)
+
+    top_ul = left.find("ul") if left.name != "ul" else left
+    if top_ul:
+        _walk(top_ul, None)
+
+    return pairs
 
 
 def parse_asins(html: str, limit: int = 3) -> list[str]:
@@ -393,13 +464,22 @@ def phase1_sidebar_bfs() -> dict[str, list[str]]:
                 with visited_lock:
                     new_children = [c for c in children if normalize_url(c["url"]) not in visited]
 
+                # 修复：L1 无 node_id 时用 slug 兜底，确保 L2 的 parent 不为 NULL
+                parent_id = (node.get("node_id")
+                             or extract_node_id(node.get("url", ""))
+                             or extract_slug(node.get("url", "")))
                 for c in new_children:
                     c["depth"] = depth + 1
-                    c["parent_node_id"] = node.get("node_id") or extract_node_id(node.get("url", ""))
+                    c["parent_node_id"] = parent_id
 
                 # 新节点直接写入 SQLite（explored=0，即自动加入队列）
                 to_insert = [c for c in new_children if normalize_url(c["url"]) != root_url]
                 added = db_insert(to_insert, explored=0)
+
+                # 解析侧边栏完整树，批量补全所有可见节点的 parent_node_id
+                tree_pairs = parse_sidebar_tree(html)
+                if tree_pairs:
+                    _db_batch_update_parents(tree_pairs)
 
                 with visited_lock:
                     for c in new_children:
@@ -507,7 +587,13 @@ def phase2_breadcrumb_discovery(asin_cache: dict):
             if verify_node_has_new_releases(nid, slug=leaf_slug):
                 nr_url = f"https://www.amazon.com/gp/new-releases/{leaf_slug}/{nid}/"
                 # 面包屑链天然有序(L1→Ln)，crumbs[j-1] 是当前节点的父节点
-                parent_nid = crumbs[j-1]["node_id"] if j > 0 else leaf.get("node_id")
+                # 修复：面包屑 parent 也需要 slug 兜底
+                if j > 0:
+                    parent_nid = crumbs[j-1]["node_id"]
+                else:
+                    parent_nid = (leaf.get("node_id")
+                                  or extract_node_id(leaf.get("url", ""))
+                                  or extract_slug(leaf.get("url", "")))
                 bc_depth   = leaf.get("depth", 1) + j + 1
                 db_insert([{"name": crumb["name"], "url": nr_url,
                            "node_id": nid, "source": "breadcrumb",
@@ -580,6 +666,29 @@ def db_insert(nodes: list[dict], explored: int = 0) -> int:
         finally:
             conn.close()
         return added
+
+
+def _db_batch_update_parents(pairs: list[tuple[str, str | None]]):
+    """
+    批量更新 parent_node_id（先到先得：仅更新当前为 NULL 的节点）。
+    pairs: [(child_key, parent_key), ...]  key 为 node_id 或 slug
+    """
+    if not pairs:
+        return
+    with _db_lock:
+        conn = db_conn()
+        try:
+            for child_key, parent_key in pairs:
+                if not child_key or not parent_key:
+                    continue
+                conn.execute(
+                    "UPDATE categories SET parent_node_id = ? "
+                    "WHERE node_id = ? AND (parent_node_id IS NULL OR parent_node_id = '')",
+                    (parent_key, child_key)
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def db_mark_explored(url: str):
