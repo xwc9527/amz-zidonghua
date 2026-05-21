@@ -252,7 +252,7 @@ def update_parent_ids(records):
 
 
 def save_checkpoint(pass_num, remaining_queue, next_keys, visited,
-                    total_updated, total_pages, errors):
+                    total_updated, total_pages, errors, asin_cache=None):
     """将当前运行状态写入断点文件，供中断后续跑使用。"""
     state = {
         "pass_num": pass_num,
@@ -262,6 +262,7 @@ def save_checkpoint(pass_num, remaining_queue, next_keys, visited,
         "total_updated": total_updated,
         "total_pages": total_pages,
         "errors": errors,
+        "asin_cache": asin_cache or {},
     }
     with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False)
@@ -298,7 +299,7 @@ def _get_l1_urls():
 def _get_urls_for_keys(keys):
     """
     根据子节点 key（node_id 数字串）从数据库查询对应 URL。
-    过滤掉 depth >= 4 的叶子节点（无需继续探索）。
+    不限制深度——BFS 由"本轮无新增关系"条件自然终止。
     返回去重后的 URL 列表。
     """
     if not keys:
@@ -311,19 +312,169 @@ def _get_urls_for_keys(keys):
             if not key or not key.isdigit():
                 continue  # slug 是 L1 根，不需要再入队
             rows = conn.execute(
-                "SELECT url, depth FROM categories WHERE node_id = ?", (key,)
+                "SELECT url FROM categories WHERE node_id = ?", (key,)
             ).fetchall()
             for row in rows:
                 url = norm_for_fetch(row["url"])
                 if url in seen:
                     continue
-                if row["depth"] is not None and row["depth"] >= 4:
-                    continue  # 叶子节点，跳过
                 seen.add(url)
                 result.append(url)
     finally:
         conn.close()
     return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase 2：面包屑发现辅助函数
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _parse_asins(html, limit=3):
+    """从类目聚合页 HTML 顺手提取前 N 个 ASIN（零额外请求）。"""
+    asins = []
+    for m in re.finditer(r'/dp/([A-Z0-9]{10})', html):
+        a = m.group(1)
+        if a not in asins:
+            asins.append(a)
+        if len(asins) >= limit:
+            break
+    return asins
+
+
+def _parse_breadcrumb(html):
+    """
+    从商品详情页解析面包屑，返回 [{name, node_id}, ...]。
+    元素：#wayfinding-breadcrumbs_feature_div 内的 <a> 链接。
+    """
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, 'html.parser')
+    container = soup.select_one('#wayfinding-breadcrumbs_feature_div')
+    if not container:
+        return []
+    results = []
+    for a in container.select('a'):
+        name = a.get_text(strip=True)
+        m = re.search(r'node=(\d+)', a.get('href', ''))
+        if name and m:
+            results.append({'name': name, 'node_id': m.group(1)})
+    return results
+
+
+def _get_leaf_node_ids():
+    """
+    O(N) 叶子检测：node_id 没有被任何其他节点当作 parent_node_id 引用的节点。
+    返回 [(node_id, url, name, depth), ...]。
+    """
+    conn = get_conn()
+    try:
+        # 所有有 parent_node_id 的节点的 parent 集合
+        parent_set = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT parent_node_id FROM categories WHERE parent_node_id IS NOT NULL"
+            ).fetchall()
+        }
+        rows = conn.execute(
+            "SELECT node_id, url, name, depth FROM categories "
+            "WHERE node_id IS NOT NULL"
+        ).fetchall()
+        leaves = [r for r in rows if r[0] not in parent_set]
+        return leaves
+    finally:
+        conn.close()
+
+
+def _insert_breadcrumb_node(name, node_id, parent_node_id, slug, depth):
+    """将面包屑发现的新节点写入 DB（已存在则跳过）。"""
+    url = norm_for_fetch(
+        f"https://www.amazon.com/gp/new-releases/{slug}/{node_id}/"
+    )
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO categories "
+            "(name, url, node_id, depth, source, parent_node_id) "
+            "VALUES (?, ?, ?, ?, 'breadcrumb', ?)",
+            (name, url, node_id, depth, parent_node_id)
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    finally:
+        conn.close()
+
+
+def _phase2_breadcrumb(asin_cache):
+    """
+    Phase 2：叶子节点面包屑发现。
+    对每个叶子节点，用缓存的 ASIN 访问商品页，提取面包屑，
+    发现 DB 中没有的深层节点并写入。
+    """
+    print("\n" + "=" * 60, flush=True)
+    print("[Phase 2] 开始面包屑发现...", flush=True)
+
+    # 获取所有已知 node_id
+    conn = get_conn()
+    try:
+        known_ids = {
+            r[0] for r in conn.execute(
+                "SELECT node_id FROM categories WHERE node_id IS NOT NULL"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    leaves = _get_leaf_node_ids()
+    print(f"[Phase 2] 叶子节点: {len(leaves)} 个，有ASIN缓存: {len(asin_cache)} 个", flush=True)
+
+    found_total = 0
+    skipped = 0
+
+    for i, (node_id, url, name, depth) in enumerate(leaves, 1):
+        nurl = norm_for_fetch(url)
+        asins = asin_cache.get(nurl) or asin_cache.get(url.rstrip('/') + '/') or []
+        if not asins:
+            skipped += 1
+            continue
+
+        # 提取 slug（如 automotive、kitchen）
+        m_slug = re.search(r'/gp/new-releases/([^/]+)/', url)
+        slug = m_slug.group(1) if m_slug else 'home-garden'
+
+        prod_url = f"https://www.amazon.com/dp/{asins[0]}"
+        try:
+            r = session.get(prod_url, timeout=15)
+        except Exception as e:
+            print(f"  [Phase 2 网络异常] {e}", flush=True)
+            delay()
+            continue
+        if r.status_code != 200:
+            delay()
+            continue
+
+        crumbs = _parse_breadcrumb(r.text)
+        found = 0
+        for j, crumb in enumerate(crumbs):
+            nid = crumb['node_id']
+            if nid in known_ids:
+                continue
+            # 面包屑天然有序(L1→Ln)，前一项是当前节点的父节点
+            parent_nid = crumbs[j - 1]['node_id'] if j > 0 else node_id
+            bc_depth = (depth or 1) + j + 1
+            inserted = _insert_breadcrumb_node(
+                crumb['name'], nid, parent_nid, slug, bc_depth
+            )
+            if inserted:
+                known_ids.add(nid)
+                found += 1
+                found_total += 1
+                print(f"    [发现] {crumb['name']} ({nid}) depth={bc_depth}", flush=True)
+
+        if i % 50 == 0 or found > 0:
+            print(f"  [Phase 2 | {i}/{len(leaves)}] {name}  新发现:{found}  累计:{found_total}  跳过:{skipped}", flush=True)
+        delay()
+
+    print(f"\n[Phase 2 完成] 新增深层节点: {found_total} 个  无ASIN跳过: {skipped} 个", flush=True)
+    print("=" * 60, flush=True)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -351,29 +502,32 @@ def run():
             resume = (ans == "y")
         if resume:
             print("[断点] 从断点续跑，跳过清空 DB", flush=True)
-            pass_num      = checkpoint["pass_num"]
-            current_queue = checkpoint["remaining_queue"]
-            next_keys_carry = checkpoint["next_keys"]
-            visited       = set(checkpoint["visited"])
-            total_updated = checkpoint["total_updated"]
-            total_pages   = checkpoint["total_pages"]
-            errors        = checkpoint["errors"]
+            pass_num        = checkpoint["pass_num"] - 1  # while内会+1，对齐正确轮次
+            current_queue   = checkpoint["remaining_queue"]
+            _resume_carry   = checkpoint["next_keys"]      # 断点前已收集的key，第一轮必须合并
+            visited         = set(checkpoint["visited"])
+            total_updated   = checkpoint["total_updated"]
+            total_pages     = checkpoint["total_pages"]
+            errors          = checkpoint["errors"]
+            asin_cache      = checkpoint.get("asin_cache", {})
         else:
             print("[断点] 用户选择重头开始，清空 DB 及旧断点", flush=True)
             clear_all_parent_ids()
             os.remove(CHECKPOINT_FILE)
             pass_num = 0
             current_queue = _get_l1_urls()
-            next_keys_carry = []
+            _resume_carry = []
             visited = set()
             total_updated = total_pages = errors = 0
+            asin_cache = {}
     else:
         clear_all_parent_ids()
         pass_num = 0
         current_queue = _get_l1_urls()
-        next_keys_carry = []
+        _resume_carry = []
         visited = set()
         total_updated = total_pages = errors = 0
+        asin_cache = {}
 
     print(f"\n[启动] Pass{pass_num+1} 种子: {len(current_queue)} 个 URL", flush=True)
     t0 = time.time()
@@ -382,9 +536,9 @@ def run():
         pass_num += 1
         pass_updated = 0
         pass_pages = 0
-        # 续跑时第一轮保留断点中已收集的 key，之后各轮从空列表开始
-        next_keys = next_keys_carry if pass_num == checkpoint.get("pass_num") else [] if checkpoint else []
-        next_keys_carry = []  # 后续轮不再携带
+        # 首轮合并断点历史keys，之后清空
+        next_keys = list(_resume_carry)
+        _resume_carry = []
 
         print(f"\n[Pass {pass_num}] 开始，本轮队列: {len(current_queue)} 个 URL", flush=True)
 
@@ -429,6 +583,11 @@ def run():
                 total_updated += cnt
                 next_keys.extend(keys)
 
+            # 顺手提取 ASIN（零额外请求）
+            asins = _parse_asins(r.text)
+            if asins:
+                asin_cache[norm_for_fetch(url)] = asins
+
             pass_pages += 1
             total_pages += 1
 
@@ -444,8 +603,9 @@ def run():
             if total_pages % CHECKPOINT_INTERVAL == 0:
                 remaining = current_queue[pass_pages:]  # 本轮尚未访问的 URL
                 save_checkpoint(pass_num, remaining, next_keys,
-                                visited, total_updated, total_pages, errors)
-                print(f"  [断点] 已保存 (总页:{total_pages})", flush=True)
+                                visited, total_updated, total_pages, errors,
+                                asin_cache)
+                print(f"  [断点] 已保存 (总页:{total_pages}, ASIN缓存:{len(asin_cache)})", flush=True)
 
             delay()
 
@@ -513,7 +673,10 @@ def run():
     # 正常完成：删除断点文件
     if os.path.exists(CHECKPOINT_FILE):
         os.remove(CHECKPOINT_FILE)
-        print("[断点] 任务完成，断点文件已清除。", flush=True)
+        print("[断点] BFS 完成，断点文件已清除。", flush=True)
+
+    # ── Phase 2：面包屑发现深层节点 ──
+    _phase2_breadcrumb(asin_cache)
 
 
 if __name__ == "__main__":
