@@ -17,8 +17,10 @@
     * { box-sizing: border-box; }
 
     /* ── Sidebar ── */
-    .sidebar { width: 240px; background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); transition: width 0.2s, min-width 0.2s; }
-    .sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; border-right: none; }
+    .sidebar { width: 240px; background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); transition: width 0.2s, min-width 0.2s; position: relative; min-width: 160px; max-width: 400px; }
+    .sidebar.collapsed { width: 0 !important; min-width: 0 !important; overflow: hidden; border-right: none; }
+    .sidebar.resizing, .tree-panel.resizing { transition: none; }
+    .resize-handle { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 20; }
     .sidebar-logo { height: 64px; display: flex; align-items: center; padding: 0 20px; font-size: 16px; font-weight: 700; color: var(--fg); letter-spacing: -0.02em; border-bottom: 1px solid var(--border); }
     .nav-menu { padding: 20px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
     .nav-item { padding: 10px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 10px; }
@@ -45,8 +47,8 @@
     .bc-current { color: var(--fg); font-weight: 600; padding: 2px 4px; }
 
     /* ── Tree Panel ── */
-    .tree-panel { width: 380px; flex-shrink: 0; transition: width 0.2s, min-width 0.2s, opacity 0.2s; }
-    .tree-panel.collapsed { width: 0; min-width: 0; overflow: hidden; opacity: 0; border: none; }
+    .tree-panel { width: 380px; flex-shrink: 0; transition: width 0.2s, min-width 0.2s, opacity 0.2s; min-width: 240px; max-width: 600px; }
+    .tree-panel.collapsed { width: 0 !important; min-width: 0 !important; overflow: hidden; opacity: 0; border: none; }
     .tree-search { padding: 12px 16px; border-bottom: 1px solid var(--border); background: #FAFAFA; }
     .tree-search input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: #FFF; }
     .tree-search input:focus { border-color: var(--primary); }
@@ -96,7 +98,7 @@
     .progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary), #818CF8); transition: width 0.5s; }
 
     /* ── Filter Panel ── */
-    .filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; padding: 12px 16px; }
+    .filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px 16px; padding: 12px 16px; position: relative; overflow: hidden; }
     .filter-item { display: flex; flex-direction: column; gap: 3px; }
     .filter-label { font-size: 11px; font-weight: 600; color: var(--gray); }
     .filter-inputs { display: flex; align-items: center; gap: 4px; }
@@ -118,6 +120,7 @@
 <body>
 
   <aside class="sidebar" id="sidebarEl">
+    <div class="resize-handle" id="sidebarResizeHandle"></div>
     <div class="sidebar-logo">📦 Amazon Engine</div>
     <div class="nav-menu">
       <div class="nav-item active">🚀 商品定向抓取 (Tasks)</div>
@@ -134,8 +137,9 @@
     <div class="workspace">
       <!-- 树面板包装器（按钮在外部不被隐藏） -->
       <div style="position:relative; flex-shrink:0; display:flex;">
-        <div class="panel tree-panel" id="treePanelEl">
-          <div class="panel-header" style="gap:8px;">
+        <div class="panel tree-panel" id="treePanelEl" style="position:relative;">
+          <div class="resize-handle" id="treeResizeHandle"></div>
+          <div class="panel-header" style="gap:8px; flex-wrap:wrap;">
               <div style="position:relative; flex-shrink:0;">
                 <button class="btn btn-outline" style="padding:3px 10px; font-size:11px;" onclick="toggleDropdown('countryDrop')"><span id="countryFlag">🇺🇸</span> <span id="countryLabel">美国</span> ▾</button>
                 <div id="countryDrop" class="dropdown-menu" style="display:none;">
@@ -186,18 +190,6 @@
       <div class="right-area">
         <!-- 配置+筛选（合并单卡片） -->
         <div class="panel" style="flex-shrink:0;">
-          <div style="padding:10px 16px; border-bottom:1px solid var(--border);">
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:nowrap;">
-              <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
-                <div class="progress-wrap" style="width:100px;">
-                  <div id="p_bar" class="progress-bar-inner" style="width:0%;"></div>
-                </div>
-                <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; width:28px; text-align:right;">0%</span>
-                <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
-              </div>
-              <button class="btn btn-outline" id="btnFilterToggle" style="padding:4px 10px; font-size:12px; flex-shrink:0;" onclick="toggleFilterPanel(this)">筛选 ▲</button>
-            </div>
-          </div>
           <div class="filter-grid" id="filterGrid">
             <div class="filter-item">
               <span class="filter-label">现价 ($)</span>
@@ -304,6 +296,13 @@
                 <label><input type="checkbox" id="f_amazons_choice"> Amazon精选</label>
                 <label><input type="checkbox" id="f_bestseller"> 畅销标记</label>
               </div>
+            </div>
+            <div style="position:absolute; right:16px; bottom:12px; display:flex; align-items:center; gap:6px;">
+              <div class="progress-wrap" style="width:80px;">
+                <div id="p_bar" class="progress-bar-inner" style="width:0%;"></div>
+              </div>
+              <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600;">0%</span>
+              <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
             </div>
           </div>
         </div>
@@ -414,11 +413,11 @@
       const tree = document.getElementById('treePanelEl');
       const bar = document.getElementById('collapseBarB');
       if (_collapseState === 0) {
-        tree.classList.add('collapsed');
+        sidebar.classList.add('collapsed');
         bar.textContent = '◀';
         _collapseState = 1;
       } else if (_collapseState === 1) {
-        sidebar.classList.add('collapsed');
+        tree.classList.add('collapsed');
         bar.textContent = '▶';
         _collapseState = 2;
       } else {
@@ -429,13 +428,6 @@
       }
     }
 
-    // ── 筛选面板折叠 ──
-    function toggleFilterPanel(btn) {
-      const grid = document.getElementById('filterGrid');
-      const hidden = grid.style.display === 'none';
-      grid.style.display = hidden ? 'grid' : 'none';
-      btn.textContent = hidden ? '筛选 ▲' : '筛选 ▼';
-    }
 
     // ── 筛选值收集 ──
     function getFilterValues() {
@@ -505,14 +497,15 @@
             const hasChild = child.child_count > 0;
             const key = child.node_id;
             const isSel = _selectedNodes.has(key);
-            const d = child.depth || 1;
+            const d = child.depth != null ? child.depth : 1;
             const nrUrl = 'https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/';
+            const depthLabel = d > 0 ? 'L' + d : '';
             listHtml +=
             '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
                 '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
                 '<span class="item-name-wrap"><a class="item-name" href="' + nrUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()">' + child.name + '</a></span>' +
-                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">L' + d + '</span>' +
-                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
+                (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
+                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
             '</div>';
           });
         } else {
@@ -710,6 +703,39 @@
         else alert('❌ ' + (d.msg || '导出失败'));
       } catch(e) { alert('导出失败: ' + e); }
     }
+
+    // ── 拖拽调整宽度 ──
+    function initResize(handleId, panelId, storageKey) {
+      const handle = document.getElementById(handleId);
+      const panel = document.getElementById(panelId);
+      if (!handle || !panel) return;
+      const saved = localStorage.getItem(storageKey);
+      if (saved) panel.style.width = saved + 'px';
+
+      let startX, startW;
+      handle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        startX = e.clientX;
+        startW = panel.offsetWidth;
+        panel.classList.add('resizing');
+        handle.classList.add('active');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+      function onMove(e) {
+        const newW = Math.max(100, Math.min(600, startW + e.clientX - startX));
+        panel.style.width = newW + 'px';
+      }
+      function onUp() {
+        panel.classList.remove('resizing');
+        handle.classList.remove('active');
+        localStorage.setItem(storageKey, panel.offsetWidth);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+    }
+    initResize('sidebarResizeHandle', 'sidebarEl', 'amz_sidebar_w');
+    initResize('treeResizeHandle', 'treePanelEl', 'amz_tree_w');
 
     // ── 初始化 ──
     loadStats();
