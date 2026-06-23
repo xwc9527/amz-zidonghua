@@ -184,7 +184,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._json_response(_get_product_progress())
 
         elif path == "/api/products":
-            self._json_response(self._get_products())
+            self._json_response(self._get_products(qs))
 
         else:
             super().do_GET()
@@ -255,24 +255,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             for r in rows:
                 m = re.search(r"/gp/new-releases/([a-z][a-z0-9-]+)", r["url"])
                 slug = m.group(1) if m else ""
-                child_count = db_scalar(
-                    "SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL AND url LIKE ?",
-                    (f"%/gp/new-releases/{slug}/%",)
-                )
+                cc = db_scalar(
+                    "SELECT SUM(child_count) + COUNT(*) FROM categories WHERE node_id IS NOT NULL AND slug = ?",
+                    (slug,)
+                ) if slug else 0
                 result.append({
-                    "id": r["id"],
-                    "name": r["name"],
-                    "url": r["url"],
-                    "node_id": None,
-                    "slug": slug,
-                    "depth": r["depth"],
-                    "source": r["source"],
-                    "explored": r["explored"],
-                    "nr_valid": None,
-                    "bs_valid": None,
-                    "ms_valid": None,
-                    "mw_valid": None,
-                    "child_count": child_count
+                    "id": r["id"], "name": r["name"], "url": r["url"],
+                    "node_id": None, "slug": slug, "depth": r["depth"],
+                    "source": r["source"], "explored": r["explored"],
+                    "nr_valid": None, "bs_valid": None, "ms_valid": None, "mw_valid": None,
+                    "child_count": cc or 0
                 })
             return result[offset:offset+limit]
 
@@ -282,8 +274,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                    "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
                    "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
                    "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
-                   "COALESCE(NULLIF((SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id), 0), "
-                   "         (SELECT COUNT(*) - 1 FROM categories sub WHERE sub.node_id IS NOT NULL AND sub.url LIKE c.url || '%')) AS child_count "
+                   "c.child_count "
                    "FROM categories c "
                    "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
                    "WHERE c.node_id IS NOT NULL")
@@ -310,8 +301,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                    "COALESCE(c.bs_valid, lc.bs_valid) AS bs_valid, "
                    "COALESCE(c.ms_valid, lc.ms_valid) AS ms_valid, "
                    "COALESCE(c.mw_valid, lc.mw_valid) AS mw_valid, "
-                   "COALESCE(NULLIF((SELECT COUNT(*) FROM categories sub WHERE sub.parent_node_id = c.node_id), 0), "
-                   "         (SELECT COUNT(*) - 1 FROM categories sub WHERE sub.node_id IS NOT NULL AND sub.url LIKE c.url || '%')) AS child_count "
+                   "c.child_count "
                    "FROM categories c "
                    "LEFT JOIN link_cache lc ON lc.node_id = c.node_id "
                    "WHERE c.node_id IS NOT NULL")
@@ -333,12 +323,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             sql += f" LIMIT {limit} OFFSET {offset}"
             return db_query(sql, params)
 
-    def _get_products(self):
-        """返回最新的 50 个商品记录，供商品抓取任务面板实时展示。"""
+    def _get_products(self, qs=None):
+        """返回商品记录，支持分页。"""
         try:
+            limit = int((qs or {}).get("limit", ["50"])[0])
+            offset = int((qs or {}).get("offset", ["0"])[0])
+            limit = min(limit, 200)
             return db_query(
                 "SELECT name, asin, price, review_count, rank FROM product_sightings "
-                "ORDER BY scraped_at DESC LIMIT 50"
+                f"ORDER BY scraped_at DESC LIMIT {limit} OFFSET {offset}"
             )
         except Exception:
             return []
@@ -451,13 +444,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "child_count": total,
             }]
         elif parent == "home-garden":
-            sql = ("SELECT c.name, c.node_id, c.depth, c.slug, "
-                   "(WITH RECURSIVE descendants(nid) AS ("
-                   "  SELECT node_id FROM categories WHERE parent_node_id = c.node_id "
-                   "  UNION ALL "
-                   "  SELECT cat.node_id FROM categories cat JOIN descendants ON cat.parent_node_id = descendants.nid"
-                   ") SELECT COUNT(*) FROM descendants) AS child_count "
-                   "FROM categories c WHERE c.depth = 1")
+            sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.depth = 1"
             params = []
             if search:
                 sql += " AND c.name LIKE ?"
@@ -465,13 +452,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             sql += " ORDER BY c.name"
             return db_query(sql, params)
         else:
-            sql = ("SELECT c.name, c.node_id, c.depth, c.slug, "
-                   "(WITH RECURSIVE descendants(nid) AS ("
-                   "  SELECT node_id FROM categories WHERE parent_node_id = c.node_id "
-                   "  UNION ALL "
-                   "  SELECT cat.node_id FROM categories cat JOIN descendants ON cat.parent_node_id = descendants.nid"
-                   ") SELECT COUNT(*) FROM descendants) AS child_count "
-                   "FROM categories c WHERE c.parent_node_id = ?")
+            sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.parent_node_id = ?"
             params = [parent]
             if search:
                 sql += " AND c.name LIKE ?"

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS categories (
     ms_valid           INTEGER,
     mw_valid           INTEGER,
     breadcrumb_checked INTEGER DEFAULT 0,
-    slug               TEXT DEFAULT ''
+    slug               TEXT DEFAULT '',
+    child_count        INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_url        ON categories(url);
@@ -36,6 +37,18 @@ CREATE INDEX IF NOT EXISTS idx_node_id    ON categories(node_id);
 CREATE INDEX IF NOT EXISTS idx_depth      ON categories(depth);
 CREATE INDEX IF NOT EXISTS idx_explored   ON categories(explored);
 CREATE INDEX IF NOT EXISTS idx_parent_nid ON categories(parent_node_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_child_inc AFTER INSERT ON categories
+WHEN NEW.parent_node_id IS NOT NULL AND NEW.parent_node_id != ''
+BEGIN
+    UPDATE categories SET child_count = child_count + 1 WHERE node_id = NEW.parent_node_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_child_dec AFTER DELETE ON categories
+WHEN OLD.parent_node_id IS NOT NULL AND OLD.parent_node_id != ''
+BEGIN
+    UPDATE categories SET child_count = child_count - 1 WHERE node_id = OLD.parent_node_id;
+END;
 
 CREATE TABLE IF NOT EXISTS run_status (
     id         INTEGER PRIMARY KEY CHECK(id=1),
@@ -47,6 +60,19 @@ CREATE TABLE IF NOT EXISTS run_status (
 );
 
 INSERT OR IGNORE INTO run_status(id, phase, paused) VALUES(1, 'idle', 0);
+""")
+
+# 迁移：若 child_count 列不存在则添加
+cols = [r[1] for r in cur.execute("PRAGMA table_info(categories)").fetchall()]
+if "child_count" not in cols:
+    cur.execute("ALTER TABLE categories ADD COLUMN child_count INTEGER DEFAULT 0")
+
+# 一次性填充 child_count
+cur.execute("""
+    UPDATE categories SET child_count = (
+        SELECT COUNT(*) FROM categories c2
+        WHERE c2.parent_node_id = categories.node_id
+    ) WHERE node_id IS NOT NULL
 """)
 
 conn.commit()
