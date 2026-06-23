@@ -135,35 +135,9 @@
       <!-- 树面板包装器（按钮在外部不被隐藏） -->
       <div style="position:relative; flex-shrink:0; display:flex;">
         <div class="panel tree-panel" id="treePanelEl">
-          <div class="panel-header">
-            <span>1. 选择目标类目</span>
-            <span style="font-size:12px; font-weight:500; color:var(--primary); background:#EEF2FF; padding:2px 8px; border-radius:10px; cursor:pointer;" id="selCount" onclick="showSelectedModal()">0 个已选</span>
-          </div>
-          <div class="breadcrumb-bar" id="bcBar"></div>
-          <div class="tree-search"><input type="text" placeholder="在当前层级中搜索..." oninput="searchTask(this.value)"></div>
-          <div class="drill-content" id="drillList"></div>
-        </div>
-        <div class="collapse-bar" id="collapseBarB" onclick="toggleCollapse()" title="折叠/展开">◀</div>
-      </div>
-
-      <!-- 右侧区域 -->
-      <div class="right-area">
-        <!-- 配置+筛选（合并单卡片） -->
-        <div class="panel" style="flex-shrink:0;">
-          <div style="padding:10px 16px; border-bottom:1px solid var(--border);">
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:nowrap;">
+          <div class="panel-header" style="gap:8px;">
               <div style="position:relative; flex-shrink:0;">
-                <button class="btn btn-outline" style="padding:4px 12px; font-size:12px;" onclick="toggleDropdown('chartDrop')">📋 <span id="chartLabel">新品榜</span> ▾</button>
-                <div id="chartDrop" class="dropdown-menu" style="display:none;">
-                  <div class="dropdown-item active" data-key="nr" onclick="selectChart(this,'nr','新品榜')">📋 新品榜</div>
-                  <div class="dropdown-item" data-key="bs" onclick="selectChart(this,'bs','畅销榜')">📋 畅销榜</div>
-                  <div class="dropdown-item" data-key="ms" onclick="selectChart(this,'ms','飙升榜')">📋 飙升榜</div>
-                  <div class="dropdown-item" data-key="mw" onclick="selectChart(this,'mw','心愿单')">📋 心愿单</div>
-                  <div class="dropdown-item" data-key="mg" onclick="selectChart(this,'mg','礼品榜')">📋 礼品榜</div>
-                </div>
-              </div>
-              <div style="position:relative; flex-shrink:0;">
-                <button class="btn btn-outline" style="padding:4px 12px; font-size:12px;" onclick="toggleDropdown('countryDrop')"><span id="countryFlag">🇺🇸</span> <span id="countryLabel">美国</span> ▾</button>
+                <button class="btn btn-outline" style="padding:3px 10px; font-size:11px;" onclick="toggleDropdown('countryDrop')"><span id="countryFlag">🇺🇸</span> <span id="countryLabel">美国</span> ▾</button>
                 <div id="countryDrop" class="dropdown-menu" style="display:none;">
                   <div class="dropdown-item active" data-site="us" onclick="selectCountry(this,'us','🇺🇸','美国')">🇺🇸 美国 (amazon.com)</div>
                   <div class="dropdown-item" data-site="uk" onclick="selectCountry(this,'uk','🇬🇧','英国')">🇬🇧 英国 (amazon.co.uk)</div>
@@ -188,6 +162,32 @@
                   <div class="dropdown-item" data-site="eg" onclick="selectCountry(this,'eg','🇪🇬','埃及')">🇪🇬 埃及 (amazon.eg)</div>
                 </div>
               </div>
+              <div style="position:relative; flex-shrink:0;">
+                <button class="btn btn-outline" style="padding:3px 10px; font-size:11px;" onclick="toggleDropdown('chartDrop')">📋 <span id="chartLabel">新品榜</span> ▾</button>
+                <div id="chartDrop" class="dropdown-menu" style="display:none;">
+                  <div class="dropdown-item active" data-key="nr" onclick="selectChart(this,'nr','新品榜')">📋 新品榜</div>
+                  <div class="dropdown-item" data-key="bs" onclick="selectChart(this,'bs','畅销榜')">📋 畅销榜</div>
+                  <div class="dropdown-item" data-key="ms" onclick="selectChart(this,'ms','飙升榜')">📋 飙升榜</div>
+                  <div class="dropdown-item" data-key="mw" onclick="selectChart(this,'mw','心愿单')">📋 心愿单</div>
+                  <div class="dropdown-item" data-key="mg" onclick="selectChart(this,'mg','礼品榜')">📋 礼品榜</div>
+                  <div class="dropdown-item" data-key="la" id="chartItemLA" onclick="selectChart(this,'la','最新到货')">📋 最新到货</div>
+                </div>
+              </div>
+              <input type="text" placeholder="搜索类目..." oninput="searchTask(this.value)" style="flex:1; padding:5px 10px; border:1px solid var(--border); border-radius:6px; font-size:12px; outline:none; min-width:80px;">
+              <span style="font-size:11px; font-weight:600; color:#fff; background:var(--primary); min-width:22px; height:22px; line-height:22px; text-align:center; border-radius:11px; cursor:pointer; flex-shrink:0; padding:0 6px;" id="selCount" onclick="showSelectedModal()" title="已选类目">-</span>
+          </div>
+          <div class="breadcrumb-bar" id="bcBar"></div>
+          <div class="drill-content" id="drillList"></div>
+        </div>
+        <div class="collapse-bar" id="collapseBarB" onclick="toggleCollapse()" title="折叠/展开">◀</div>
+      </div>
+
+      <!-- 右侧区域 -->
+      <div class="right-area">
+        <!-- 配置+筛选（合并单卡片） -->
+        <div class="panel" style="flex-shrink:0;">
+          <div style="padding:10px 16px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:nowrap;">
               <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
                 <div class="progress-wrap" style="width:100px;">
                   <div id="p_bar" class="progress-bar-inner" style="width:0%;"></div>
@@ -366,11 +366,31 @@
       if (!wasOpen) el.style.display = 'block';
     }
     function selectChart(el, key, label) {
+      if (el.classList.contains('disabled')) return;
       document.getElementById('chartLabel').textContent = label;
       document.querySelectorAll('#chartDrop .dropdown-item').forEach(i => i.classList.remove('active'));
       el.classList.add('active');
       _currentChart = key;
       document.getElementById('chartDrop').style.display = 'none';
+    }
+    function updateChartAvailability() {
+      const la = document.getElementById('chartItemLA');
+      if (!la) return;
+      if (_currentSite === 'us') {
+        la.classList.add('disabled');
+        la.style.opacity = '0.4';
+        la.style.cursor = 'not-allowed';
+        la.title = 'US站不支持最新到货';
+        if (_currentChart === 'la') {
+          const nr = document.querySelector('#chartDrop .dropdown-item[data-key="nr"]');
+          selectChart(nr, 'nr', '新品榜');
+        }
+      } else {
+        la.classList.remove('disabled');
+        la.style.opacity = '';
+        la.style.cursor = '';
+        la.title = '';
+      }
     }
     function selectCountry(el, site, flag, label) {
       document.getElementById('countryFlag').textContent = flag;
@@ -379,6 +399,7 @@
       el.classList.add('active');
       _currentSite = site;
       document.getElementById('countryDrop').style.display = 'none';
+      updateChartAvailability();
     }
     document.addEventListener('click', function(e) {
       if (!e.target.closest('.dropdown-menu') && !e.target.closest('[onclick*="toggleDropdown"]')) {
@@ -498,7 +519,7 @@
           listHtml = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>';
         }
         document.getElementById('drillList').innerHTML = listHtml;
-        document.getElementById('selCount').innerText = _selectedNodes.size + ' 个已选';
+        document.getElementById('selCount').innerText = _selectedNodes.size || '-';
       } catch (err) {
         document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ' + err + '</div>';
       }
@@ -692,6 +713,7 @@
 
     // ── 初始化 ──
     loadStats();
+    updateChartAvailability();
     loadTaskDrillDown();
     refreshProductStats();
     loadLiveProducts();
