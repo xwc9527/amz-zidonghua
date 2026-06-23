@@ -1,7 +1,8 @@
-# api_server.py — FastAPI v2 API (阶段2: 读取同一 SQLite 库)
+# api_server.py — FastAPI v2 API (阶段4: asyncpg + PostgreSQL)
 # 启动: uvicorn api_server:app --host 0.0.0.0 --port 8081
-import os, sys, subprocess, threading, json
-import aiosqlite
+# 回退: DB_BACKEND=sqlite uvicorn api_server:app --port 8081
+import os, sys, subprocess, threading
+import asyncpg
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,14 +10,26 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_BACKEND = os.getenv("DB_BACKEND", "pg")
+
+# PG config
+from pg_config import PG_DSN
+
+# SQLite fallback
 DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
 
 _product_proc = None
 _product_lock = threading.Lock()
+_pool = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _pool
+    if DB_BACKEND == "pg":
+        _pool = await asyncpg.create_pool(PG_DSN, min_size=2, max_size=10)
     yield
+    if _pool:
+        await _pool.close()
     with _product_lock:
         global _product_proc
         if _product_proc and _product_proc.poll() is None:
@@ -26,13 +39,31 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-async def db_query(sql, params=()):
+# ── DB helpers ──
+
+async def pg_query(sql, *args):
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+        return [dict(r) for r in rows]
+
+async def pg_scalar(sql, *args):
+    async with _pool.acquire() as conn:
+        return await conn.fetchval(sql, *args) or 0
+
+async def pg_exec(sql, *args):
+    async with _pool.acquire() as conn:
+        await conn.execute(sql, *args)
+
+# SQLite fallback
+async def _sqlite_query(sql, params=()):
+    import aiosqlite
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
-async def db_scalar(sql, params=()):
+async def _sqlite_scalar(sql, params=()):
+    import aiosqlite
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
@@ -42,14 +73,22 @@ async def db_scalar(sql, params=()):
 
 @app.get("/api/v2/stats")
 async def stats():
-    total = await db_scalar("SELECT COUNT(*) FROM categories")
-    queue = await db_scalar("SELECT COUNT(*) FROM categories WHERE explored=0")
-    has_id = await db_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
-    bc = await db_scalar("SELECT COUNT(*) FROM categories WHERE source='breadcrumb'")
-    validated = await db_scalar("SELECT COUNT(*) FROM categories WHERE nr_valid IS NOT NULL")
-    depths = {}
-    for r in await db_query("SELECT depth, COUNT(*) as cnt FROM categories GROUP BY depth ORDER BY depth"):
-        depths[f"L{r['depth']}"] = r['cnt']
+    if DB_BACKEND == "pg":
+        total = await pg_scalar("SELECT COUNT(*) FROM categories")
+        queue = await pg_scalar("SELECT COUNT(*) FROM categories WHERE explored=0")
+        has_id = await pg_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
+        bc = await pg_scalar("SELECT COUNT(*) FROM categories WHERE source='breadcrumb'")
+        validated = await pg_scalar("SELECT COUNT(*) FROM categories WHERE nr_valid IS NOT NULL")
+        rows = await pg_query("SELECT depth, COUNT(*) as cnt FROM categories GROUP BY depth ORDER BY depth")
+        depths = {f"L{r['depth']}": r['cnt'] for r in rows}
+    else:
+        total = await _sqlite_scalar("SELECT COUNT(*) FROM categories")
+        queue = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE explored=0")
+        has_id = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
+        bc = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE source='breadcrumb'")
+        validated = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE nr_valid IS NOT NULL")
+        rows = await _sqlite_query("SELECT depth, COUNT(*) as cnt FROM categories GROUP BY depth ORDER BY depth")
+        depths = {f"L{r['depth']}": r['cnt'] for r in rows}
     return {"total": total, "queue": queue, "has_id": has_id,
             "breadcrumb": bc, "validated": validated, "depths": depths}
 
@@ -58,25 +97,60 @@ async def stats():
 @app.get("/api/v2/tree_children")
 async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: int = 0):
     limit = min(limit, 200)
+    if DB_BACKEND == "pg":
+        return await _tree_children_pg(parent, q, limit, offset)
+    else:
+        return await _tree_children_sqlite(parent, q, limit, offset)
+
+async def _tree_children_pg(parent, q, limit, offset):
     if parent == "root":
-        total = await db_scalar("SELECT COUNT(*) FROM categories")
+        total = await pg_scalar("SELECT COUNT(*) FROM categories")
+        return [{"name": "All Categories", "node_id": "home-garden", "depth": 0, "child_count": total}]
+    elif parent == "home-garden":
+        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 1"
+        args = []
+        if q:
+            sql += " AND (name ILIKE $" + str(len(args)+1) + " OR name % $" + str(len(args)+1) + ")"
+            args.append(f"%{q}%")
+            sql += " ORDER BY similarity(name, $" + str(len(args)) + ") DESC"
+        else:
+            sql += " ORDER BY name"
+        sql += " LIMIT $" + str(len(args)+1) + " OFFSET $" + str(len(args)+2)
+        args.extend([limit, offset])
+        return await pg_query(sql, *args)
+    else:
+        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE parent_node_id = $1"
+        args = [parent]
+        if q:
+            sql += " AND (name ILIKE $2 OR name % $2)"
+            args.append(f"%{q}%")
+            sql += " ORDER BY similarity(name, $2) DESC"
+        else:
+            sql += " ORDER BY name"
+        sql += f" LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
+        args.extend([limit, offset])
+        return await pg_query(sql, *args)
+
+async def _tree_children_sqlite(parent, q, limit, offset):
+    if parent == "root":
+        total = await _sqlite_scalar("SELECT COUNT(*) FROM categories")
         return [{"name": "Home & Kitchen", "node_id": "home-garden", "depth": 0, "child_count": total}]
     elif parent == "home-garden":
-        sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.depth = 1"
+        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 1"
         params = []
         if q:
-            sql += " AND c.name LIKE ?"
+            sql += " AND name LIKE ?"
             params.append(f"%{q}%")
-        sql += f" ORDER BY c.name LIMIT {limit} OFFSET {offset}"
-        return await db_query(sql, params)
+        sql += f" ORDER BY name LIMIT {limit} OFFSET {offset}"
+        return await _sqlite_query(sql, params)
     else:
-        sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.parent_node_id = ?"
+        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE parent_node_id = ?"
         params = [parent]
         if q:
-            sql += " AND c.name LIKE ?"
+            sql += " AND name LIKE ?"
             params.append(f"%{q}%")
-        sql += f" ORDER BY c.name LIMIT {limit} OFFSET {offset}"
-        return await db_query(sql, params)
+        sql += f" ORDER BY name LIMIT {limit} OFFSET {offset}"
+        return await _sqlite_query(sql, params)
 
 # ── 商品 ──
 
@@ -85,34 +159,59 @@ async def products(limit: int = Query(50, le=200), offset: int = 0,
                    price_min: float = None, price_max: float = None,
                    rating_min: float = None, rating_max: float = None,
                    review_min: int = None, review_max: int = None):
+    if DB_BACKEND == "pg":
+        return await _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
+    else:
+        return await _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
+
+async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max):
+    sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, scraped_at FROM product_sightings WHERE 1=1"
+    args = []
+    idx = 1
+    for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
+                          (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
+                          (review_min, ">=", "review_count"), (review_max, "<=", "review_count")]:
+        if val is not None:
+            sql += f" AND {col} {op} ${idx}"
+            args.append(val)
+            idx += 1
+    sql += f" ORDER BY scraped_at DESC LIMIT ${idx} OFFSET ${idx+1}"
+    args.extend([limit, offset])
+    try:
+        return await pg_query(sql, *args)
+    except Exception:
+        return []
+
+async def _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max):
     sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, scraped_at FROM product_sightings WHERE 1=1"
     params = []
-    if price_min is not None:
-        sql += " AND price >= ?"; params.append(price_min)
-    if price_max is not None:
-        sql += " AND price <= ?"; params.append(price_max)
-    if rating_min is not None:
-        sql += " AND rating >= ?"; params.append(rating_min)
-    if rating_max is not None:
-        sql += " AND rating <= ?"; params.append(rating_max)
-    if review_min is not None:
-        sql += " AND review_count >= ?"; params.append(review_min)
-    if review_max is not None:
-        sql += " AND review_count <= ?"; params.append(review_max)
+    for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
+                          (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
+                          (review_min, ">=", "review_count"), (review_max, "<=", "review_count")]:
+        if val is not None:
+            sql += f" AND {col} {op} ?"
+            params.append(val)
     sql += f" ORDER BY scraped_at DESC LIMIT {limit} OFFSET {offset}"
     try:
-        return await db_query(sql, params)
+        return await _sqlite_query(sql, params)
     except Exception:
         return []
 
 @app.get("/api/v2/product_stats")
 async def product_stats():
     try:
-        total = await db_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
-        by_list = await db_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
-        multi = await db_scalar(
-            "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
-        )
+        if DB_BACKEND == "pg":
+            total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            by_list = await pg_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
+            multi = await pg_scalar(
+                "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t"
+            )
+        else:
+            total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            by_list = await _sqlite_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
+            multi = await _sqlite_scalar(
+                "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
+            )
         running = _product_proc is not None and _product_proc.poll() is None
         return {"total_asins": total, "by_list": by_list, "multi_list": multi, "running": running}
     except Exception:
@@ -122,7 +221,10 @@ async def product_stats():
 async def product_progress():
     running = _product_proc is not None and _product_proc.poll() is None
     try:
-        total = await db_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+        if DB_BACKEND == "pg":
+            total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+        else:
+            total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
     except Exception:
         total = 0
     return {"running": running, "total_products": total}

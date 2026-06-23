@@ -460,10 +460,13 @@
       };
     }
 
+    // ── API 基址 ──
+    const API = location.port === '8081' ? '' : 'http://localhost:8081';
+
     // ── 大盘监控 ──
     async function loadStats() {
       try {
-        const sr = await fetch('/api/stats?t=' + Date.now());
+        const sr = await fetch(API + '/api/v2/stats?t=' + Date.now());
         const stats = await sr.json();
         document.getElementById('total').textContent = stats.total || '—';
       } catch(e) {}
@@ -474,6 +477,32 @@
     let taskSearchKeyword = '';
     const _selectedNodes = new Map();
     let currentTaskChildren = [];
+    let _treeOffset = 0;
+    let _treeLoading = false;
+    let _treeHasMore = true;
+    const TREE_PAGE = 50;
+
+    function _renderDrillItem(child, idx) {
+      const hasChild = child.child_count > 0;
+      const key = child.node_id;
+      const isSel = _selectedNodes.has(key);
+      const d = child.depth != null ? child.depth : 1;
+      const nrUrl = 'https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/';
+      const depthLabel = d > 0 ? 'L' + d : '';
+      return '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
+          '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
+          '<span class="item-name-wrap"><a class="item-name" href="' + nrUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()">' + child.name + '</a></span>' +
+          (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
+          '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
+      '</div>';
+    }
+
+    async function _fetchTreePage(parentId, q, limit, offset) {
+      let url = API + '/api/v2/tree_children?parent=' + parentId + '&limit=' + limit + '&offset=' + offset;
+      if (q) url += '&q=' + encodeURIComponent(q);
+      const res = await fetch(url + '&t=' + Date.now());
+      return await res.json();
+    }
 
     async function loadTaskDrillDown() {
       const current = taskCurrentPath[taskCurrentPath.length - 1];
@@ -485,37 +514,61 @@
       document.getElementById('bcBar').innerHTML = bcHtml;
       document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">⏳ 加载中...</div>';
 
-      try {
-        let url = '/api/tree_children?parent=' + (current.node_id === 'root' ? 'root' : current.node_id);
-        if (taskSearchKeyword) url += '&q=' + encodeURIComponent(taskSearchKeyword);
-        const res = await fetch(url + '&t=' + Date.now());
-        currentTaskChildren = await res.json();
+      _treeOffset = 0;
+      _treeHasMore = true;
+      currentTaskChildren = [];
 
-        let listHtml = '';
-        if (currentTaskChildren && currentTaskChildren.length > 0) {
-          currentTaskChildren.forEach((child, idx) => {
-            const hasChild = child.child_count > 0;
-            const key = child.node_id;
-            const isSel = _selectedNodes.has(key);
-            const d = child.depth != null ? child.depth : 1;
-            const nrUrl = 'https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/';
-            const depthLabel = d > 0 ? 'L' + d : '';
-            listHtml +=
-            '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
-                '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
-                '<span class="item-name-wrap"><a class="item-name" href="' + nrUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()">' + child.name + '</a></span>' +
-                (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
-                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
-            '</div>';
-          });
+      try {
+        const parentId = current.node_id === 'root' ? 'root' : current.node_id;
+        const items = await _fetchTreePage(parentId, taskSearchKeyword, TREE_PAGE, 0);
+        currentTaskChildren = items;
+        _treeOffset = items.length;
+        _treeHasMore = items.length >= TREE_PAGE;
+
+        if (items.length > 0) {
+          let listHtml = '';
+          items.forEach((child, idx) => { listHtml += _renderDrillItem(child, idx); });
+          if (_treeHasMore) listHtml += '<div id="treeScrollSentinel" style="height:1px;"></div>';
+          document.getElementById('drillList').innerHTML = listHtml;
+          _setupTreeObserver();
         } else {
-          listHtml = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>';
+          document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>';
         }
-        document.getElementById('drillList').innerHTML = listHtml;
         document.getElementById('selCount').innerText = _selectedNodes.size || '-';
       } catch (err) {
         document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ' + err + '</div>';
       }
+    }
+
+    let _treeObserver = null;
+    function _setupTreeObserver() {
+      if (_treeObserver) _treeObserver.disconnect();
+      const sentinel = document.getElementById('treeScrollSentinel');
+      if (!sentinel) return;
+      _treeObserver = new IntersectionObserver(async (entries) => {
+        if (!entries[0].isIntersecting || _treeLoading || !_treeHasMore) return;
+        _treeLoading = true;
+        const current = taskCurrentPath[taskCurrentPath.length - 1];
+        const parentId = current.node_id === 'root' ? 'root' : current.node_id;
+        try {
+          const items = await _fetchTreePage(parentId, taskSearchKeyword, TREE_PAGE, _treeOffset);
+          if (items.length > 0) {
+            const baseIdx = currentTaskChildren.length;
+            currentTaskChildren = currentTaskChildren.concat(items);
+            _treeOffset += items.length;
+            _treeHasMore = items.length >= TREE_PAGE;
+            let html = '';
+            items.forEach((child, i) => { html += _renderDrillItem(child, baseIdx + i); });
+            sentinel.insertAdjacentHTML('beforebegin', html);
+            if (!_treeHasMore) sentinel.remove();
+          } else {
+            _treeHasMore = false;
+            sentinel.remove();
+          }
+        } catch(e) {}
+        _treeLoading = false;
+      }, { root: document.getElementById('drillList'), rootMargin: '200px' });
+      _treeObserver.observe(sentinel);
     }
 
     function navTaskTo(idx) {
@@ -592,7 +645,7 @@
 
     async function refreshProductStats() {
       try {
-        const r = await fetch('/api/product_stats?t=' + Date.now());
+        const r = await fetch(API + '/api/v2/product_stats?t=' + Date.now());
         const d = await r.json();
         document.getElementById('p_total_side').textContent = d.total_asins || 0;
         document.getElementById('p_multi_side').textContent = d.multi_list || 0;
@@ -608,7 +661,7 @@
         for (const [k, v] of Object.entries(filters)) {
           if (v !== 0 && v !== '' && v !== false) qs += '&' + k + '=' + encodeURIComponent(v);
         }
-        const res = await fetch('/api/products' + qs);
+        const res = await fetch(API + '/api/v2/products' + qs);
         const products = await res.json();
         let phtml = '';
         if (products && products.length > 0) {
@@ -639,7 +692,7 @@
     async function toggleRun() {
       if (_isRunning) {
         try {
-          await fetch('/api/stop_products', {method: 'POST'});
+          await fetch(API + '/api/v2/stop_products', {method: 'POST'});
           _isRunning = false;
           updateRunBtn();
         } catch(e) { alert('停止失败: ' + e); }
@@ -660,7 +713,7 @@
         document.getElementById('p_progress_text').innerText = '0%';
 
         try {
-          const r = await fetch('/api/start_products', {
+          const r = await fetch(API + '/api/v2/start_products', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(params)
@@ -675,7 +728,7 @@
 
     async function refreshProductProgress() {
       try {
-        const r = await fetch('/api/product_progress?t=' + Date.now());
+        const r = await fetch(API + '/api/v2/product_progress?t=' + Date.now());
         const d = await r.json();
         if (d.running) {
           let p = parseFloat(document.getElementById('p_progress_text').innerText) || 0;
@@ -697,7 +750,7 @@
 
     async function exportExcel() {
       try {
-        const r = await fetch('/api/export_excel', {method: 'POST'});
+        const r = await fetch(API + '/api/v2/export_excel', {method: 'POST'});
         const d = await r.json();
         if (d.status === 'ok') alert('✅ Excel 已成功导出到 data/products.xlsx');
         else alert('❌ ' + (d.msg || '导出失败'));

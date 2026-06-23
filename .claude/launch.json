@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["dashboard_server.py", "9090"],
+      "port": 9090
+    },
+    {
+      "name": "api_v2",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "api_server:app", "--host", "0.0.0.0", "--port", "9091"],
+      "port": 9091
+    }
+  ]
+}
