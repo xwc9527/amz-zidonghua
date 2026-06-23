@@ -130,26 +130,30 @@ async def _tree_children_pg(parent, q, limit, offset):
         total = await pg_scalar("SELECT COUNT(*) FROM categories")
         return [{"name": "All Categories", "node_id": "home-garden", "depth": 0, "child_count": total}]
     elif parent == "home-garden":
-        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 1"
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+                 (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
+                 FROM categories c WHERE c.depth = 1"""
         args = []
         if q:
-            sql += " AND (name ILIKE $" + str(len(args)+1) + " OR name % $" + str(len(args)+1) + ")"
+            sql += " AND (c.name ILIKE $" + str(len(args)+1) + " OR c.name % $" + str(len(args)+1) + ")"
             args.append(f"%{q}%")
-            sql += " ORDER BY similarity(name, $" + str(len(args)) + ") DESC"
+            sql += " ORDER BY similarity(c.name, $" + str(len(args)) + ") DESC"
         else:
-            sql += " ORDER BY name"
+            sql += " ORDER BY c.name"
         sql += " LIMIT $" + str(len(args)+1) + " OFFSET $" + str(len(args)+2)
         args.extend([limit, offset])
         return await pg_query(sql, *args)
     else:
-        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE parent_node_id = $1"
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+                 (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
+                 FROM categories c WHERE c.parent_node_id = $1"""
         args = [parent]
         if q:
-            sql += " AND (name ILIKE $2 OR name % $2)"
+            sql += " AND (c.name ILIKE $2 OR c.name % $2)"
             args.append(f"%{q}%")
-            sql += " ORDER BY similarity(name, $2) DESC"
+            sql += " ORDER BY similarity(c.name, $2) DESC"
         else:
-            sql += " ORDER BY name"
+            sql += " ORDER BY c.name"
         sql += f" LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
         args.extend([limit, offset])
         return await pg_query(sql, *args)

@@ -98,7 +98,8 @@
     .progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary), #818CF8); transition: width 0.5s; }
 
     /* ── Filter Panel ── */
-    .filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px 16px; padding: 12px 16px; position: relative; overflow: hidden; }
+    .filter-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px 16px; padding: 14px 18px; position: relative; overflow: hidden; }
+    .filter-item.span2 { grid-column: span 2; }
     .filter-item { display: flex; flex-direction: column; gap: 3px; }
     .filter-label { font-size: 11px; font-weight: 600; color: var(--gray); }
     .filter-inputs { display: flex; align-items: center; gap: 4px; }
@@ -256,12 +257,14 @@
                 <span class="filter-unit">lb</span>
               </div>
             </div>
-            <div class="filter-item">
-              <span class="filter-label">商品尺寸 (长边 inch)</span>
+            <div class="filter-item span2">
+              <span class="filter-label">商品尺寸 (inch)</span>
               <div class="filter-inputs">
-                <input type="number" id="f_dim_min" placeholder="最小" min="0" step="0.1">
-                <span class="filter-sep">~</span>
-                <input type="number" id="f_dim_max" placeholder="最大" min="0" step="0.1">
+                <input type="number" id="f_dim_l" placeholder="长" min="0" step="0.1">
+                <span class="filter-sep">×</span>
+                <input type="number" id="f_dim_w" placeholder="宽" min="0" step="0.1">
+                <span class="filter-sep">×</span>
+                <input type="number" id="f_dim_h" placeholder="高" min="0" step="0.1">
               </div>
             </div>
             <div class="filter-item">
@@ -448,8 +451,9 @@
         sellers_max: +document.getElementById('f_sellers_max').value || 0,
         weight_min: +document.getElementById('f_weight_min').value || 0,
         weight_max: +document.getElementById('f_weight_max').value || 0,
-        dim_min: +document.getElementById('f_dim_min').value || 0,
-        dim_max: +document.getElementById('f_dim_max').value || 0,
+        dim_l: +document.getElementById('f_dim_l').value || 0,
+        dim_w: +document.getElementById('f_dim_w').value || 0,
+        dim_h: +document.getElementById('f_dim_h').value || 0,
         list_total_min: +document.getElementById('f_list_total_min').value || 0,
         list_total_max: +document.getElementById('f_list_total_max').value || 0,
         date_range: document.getElementById('f_date_range').value || '',
@@ -519,7 +523,8 @@
 
     async function loadTaskDrillDown() {
       const current = taskCurrentPath[taskCurrentPath.length - 1];
-      const bcHtml = taskCurrentPath.map((node, idx) => {
+      const bcHtml = (taskCurrentPath.length > 1 ? '<span class="bc-link" onclick="navTaskTo(' + (taskCurrentPath.length - 2) + ')" style="margin-right:6px; font-size:14px; cursor:pointer;" title="返回上一级">←</span>' : '') +
+        taskCurrentPath.map((node, idx) => {
         const isLast = idx === taskCurrentPath.length - 1;
         if (isLast) return '<div class="bc-item bc-current">' + node.name + '</div>';
         return '<div class="bc-item"><span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span></div>';
