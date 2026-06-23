@@ -1,13 +1,15 @@
-# api_server.py — FastAPI v2 API (阶段4: asyncpg + PostgreSQL)
+# api_server.py — FastAPI v2 API (asyncpg + PostgreSQL)
 # 启动: uvicorn api_server:app --host 0.0.0.0 --port 8081
 # 回退: DB_BACKEND=sqlite uvicorn api_server:app --port 8081
-import os, sys, subprocess, threading
+import os, sys, subprocess, threading, logging, time
 import asyncpg
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
@@ -38,6 +40,27 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        t0 = time.time()
+        response = await call_next(request)
+        ms = (time.time() - t0) * 1000
+        logging.info(f"{request.method} {request.url.path} {response.status_code} {ms:.0f}ms")
+        return response
+    return await call_next(request)
+
+@app.get("/api/v2/health")
+async def health():
+    if DB_BACKEND == "pg" and _pool:
+        try:
+            async with _pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return {"status": "ok", "backend": "pg", "pool_size": _pool.get_size()}
+        except Exception as e:
+            return JSONResponse({"status": "error", "msg": str(e)}, status_code=503)
+    return {"status": "ok", "backend": DB_BACKEND}
 
 # ── DB helpers ──
 

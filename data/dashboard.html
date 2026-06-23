@@ -461,12 +461,25 @@
     }
 
     // ── API 基址 ──
-    const API = location.port === '8081' ? '' : 'http://localhost:8081';
+    const API = ['8081','9091'].includes(location.port) ? '' : 'http://localhost:8081';
+
+    async function fetchRetry(url, opts, retries=2) {
+      for (let i = 0; i <= retries; i++) {
+        try {
+          const r = await fetch(url, opts);
+          if (r.ok) return r;
+          if (i === retries) return r;
+        } catch(e) {
+          if (i === retries) throw e;
+        }
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      }
+    }
 
     // ── 大盘监控 ──
     async function loadStats() {
       try {
-        const sr = await fetch(API + '/api/v2/stats?t=' + Date.now());
+        const sr = await fetchRetry(API + '/api/v2/stats?t=' + Date.now());
         const stats = await sr.json();
         document.getElementById('total').textContent = stats.total || '—';
       } catch(e) {}
@@ -500,7 +513,7 @@
     async function _fetchTreePage(parentId, q, limit, offset) {
       let url = API + '/api/v2/tree_children?parent=' + parentId + '&limit=' + limit + '&offset=' + offset;
       if (q) url += '&q=' + encodeURIComponent(q);
-      const res = await fetch(url + '&t=' + Date.now());
+      const res = await fetchRetry(url + '&t=' + Date.now());
       return await res.json();
     }
 
