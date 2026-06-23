@@ -274,5 +274,48 @@ async def export_excel():
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 
+# ── 选品清单 ──
+
+@app.get("/api/v2/watchlist")
+async def get_watchlist():
+    if DB_BACKEND == "pg":
+        return await pg_query("SELECT id, asin, name, notes, added_at FROM watchlist ORDER BY added_at DESC")
+    return []
+
+@app.post("/api/v2/watchlist")
+async def add_to_watchlist(body: dict):
+    asin = body.get("asin", "").strip()
+    name = body.get("name", "")
+    notes = body.get("notes", "")
+    if not asin:
+        return {"status": "error", "msg": "asin required"}
+    if DB_BACKEND == "pg":
+        try:
+            await pg_exec(
+                "INSERT INTO watchlist (asin, name, notes) VALUES ($1, $2, $3) ON CONFLICT(asin) DO UPDATE SET name=$2, notes=$3",
+                asin, name, notes
+            )
+            return {"status": "ok"}
+        except Exception as e:
+            return {"status": "error", "msg": str(e)}
+    return {"status": "error", "msg": "pg only"}
+
+@app.delete("/api/v2/watchlist/{asin}")
+async def remove_from_watchlist(asin: str):
+    if DB_BACKEND == "pg":
+        await pg_exec("DELETE FROM watchlist WHERE asin=$1", asin)
+    return {"status": "ok"}
+
+# ── 追踪数据 ──
+
+@app.get("/api/v2/tracking/{asin}")
+async def get_tracking(asin: str):
+    if DB_BACKEND == "pg":
+        return await pg_query(
+            "SELECT price, rank, rating, review_count, snapshot_date FROM tracking WHERE asin=$1 ORDER BY snapshot_date",
+            asin
+        )
+    return []
+
 # ── 静态文件 ──
 app.mount("/", StaticFiles(directory=os.path.join(BASE_DIR, "data"), html=True), name="static")
