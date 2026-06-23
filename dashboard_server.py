@@ -22,13 +22,12 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR    = os.path.join(BASE_DIR, "data")
 DB_FILE     = os.path.join(DATA_DIR, "categories.db")
-SCRAPER     = os.path.join(BASE_DIR, "fetch_categories.py")
+SCRAPER     = os.path.join(BASE_DIR, "fetch_subtree.py")
 
 # 爬虫子进程状态
 _proc         = None          # subprocess.Popen 实例
 _proc_lock    = threading.Lock()
-_check_proc   = None          # check_links.py 子进程
-_check_lock   = threading.Lock()
+
 _product_proc = None          # fetch_products.py 子进程
 _product_lock = threading.Lock()
 
@@ -171,6 +170,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             self._json_response(self._get_slug_children(qs))
 
+        elif path == "/api/tree_children":
+            qs = urllib.parse.parse_qs(parsed.query)
+            self._json_response(self._get_tree_children(qs))
+
         elif path == "/api/check_progress":
             self._json_response(self._get_check_progress())
 
@@ -205,11 +208,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._json_response(_start_scraper())
         elif path == "/api/stop":
             self._json_response(_stop_scraper())
-        elif path == "/api/check_all":
-            self._json_response(_start_check_links())
-        elif path == "/api/check_node":
-            node_id = qs.get("node_id", [""])[0]
-            self._json_response(_check_single_node(node_id))
+
         elif path == "/api/start_products":
             # 从 POST body 读参数
             length = int(self.headers.get("Content-Length", 0))
@@ -440,43 +439,56 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             (f"%/gp/new-releases/{slug}/%",)
         )
 
+    def _get_tree_children(self, qs):
+        parent = qs.get("parent", [""])[0]
+        search = qs.get("q", [""])[0]
+        if parent == "root":
+            total = db_scalar("SELECT COUNT(*) FROM categories")
+            return [{
+                "name": "Home & Kitchen",
+                "node_id": "home-garden",
+                "depth": 0,
+                "child_count": total,
+            }]
+        elif parent == "home-garden":
+            sql = ("SELECT c.name, c.node_id, c.depth, c.slug, "
+                   "(WITH RECURSIVE descendants(nid) AS ("
+                   "  SELECT node_id FROM categories WHERE parent_node_id = c.node_id "
+                   "  UNION ALL "
+                   "  SELECT cat.node_id FROM categories cat JOIN descendants ON cat.parent_node_id = descendants.nid"
+                   ") SELECT COUNT(*) FROM descendants) AS child_count "
+                   "FROM categories c WHERE c.depth = 1")
+            params = []
+            if search:
+                sql += " AND c.name LIKE ?"
+                params.append(f"%{search}%")
+            sql += " ORDER BY c.name"
+            return db_query(sql, params)
+        else:
+            sql = ("SELECT c.name, c.node_id, c.depth, c.slug, "
+                   "(WITH RECURSIVE descendants(nid) AS ("
+                   "  SELECT node_id FROM categories WHERE parent_node_id = c.node_id "
+                   "  UNION ALL "
+                   "  SELECT cat.node_id FROM categories cat JOIN descendants ON cat.parent_node_id = descendants.nid"
+                   ") SELECT COUNT(*) FROM descendants) AS child_count "
+                   "FROM categories c WHERE c.parent_node_id = ?")
+            params = [parent]
+            if search:
+                sql += " AND c.name LIKE ?"
+                params.append(f"%{search}%")
+            sql += " ORDER BY c.name"
+            return db_query(sql, params)
+
     def _get_check_progress(self):
         total   = db_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL")
         checked = db_scalar("SELECT COUNT(*) FROM categories WHERE node_id IS NOT NULL AND nr_valid IS NOT NULL")
         valid   = {}
         for col, label in [("nr_valid","新品榜"),("bs_valid","畅销榜"),("ms_valid","飙升榜"),("mw_valid","心愿单")]:
             valid[label] = db_scalar(f"SELECT COUNT(*) FROM categories WHERE {col}=1")
-        global _check_proc
-        running = _check_proc is not None and _check_proc.poll() is None
+        running = _product_proc is not None and _product_proc.poll() is None
         return {"total": total, "checked": checked, "valid_counts": valid, "running": running}
 
 
-# ── check_links 进程管理 ───────────────────────────────────────────
-
-def _start_check_links():
-    global _check_proc
-    with _check_lock:
-        if _check_proc is not None and _check_proc.poll() is None:
-            return {"status": "already_running"}
-        _check_proc = subprocess.Popen(
-            [sys.executable, "-u", os.path.join(BASE_DIR, "check_links.py"),
-             "--workers", "10"],
-            cwd=BASE_DIR
-        )
-    print(f"[check_links] 已启动 PID={_check_proc.pid}", flush=True)
-    return {"status": "started", "pid": _check_proc.pid}
-
-
-def _check_single_node(node_id: str):
-    """启动 check_links.py --node_id 子进程检测单节点，不阻塞服务器。"""
-    if not node_id:
-        return {"error": "node_id required"}
-    subprocess.Popen(
-        [sys.executable, "-u", os.path.join(BASE_DIR, "check_links.py"),
-         "--node_id", node_id, "--workers", "1", "--delay", "0.2"],
-        cwd=BASE_DIR
-    )
-    return {"status": "checking", "node_id": node_id}
 
 
 # ── 进程管理函数 ──────────────────────────────────────────────────
@@ -664,11 +676,8 @@ def main():
                 
                 if not restarted:
                     code = p.returncode
-                    if code == 0:
-                        break
-                    else:
-                        print(f"[守护进程] 后端服务异常崩溃 (退出码: {code})。自修复机制将在 2 秒后自动重启服务...", flush=True)
-                        time.sleep(2)
+                    print(f"[守护进程] 后端服务已退出 (退出码: {code})。自修复机制将在 2 秒后自动重启服务...", flush=True)
+                    time.sleep(2)
         except KeyboardInterrupt:
             print("\n[守护进程] 正在停止守护与后端服务...", flush=True)
             if p and p.poll() is None:

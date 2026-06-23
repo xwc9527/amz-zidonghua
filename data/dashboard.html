@@ -2,48 +2,41 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-  <title>Amazon 类目抓取看板</title>
+  <title>Amazon 选品看板</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --sidebar-bg: #FFFFFF; 
-      --sidebar-fg: #4B5563; 
+      --sidebar-bg: #FFFFFF;
+      --sidebar-fg: #4B5563;
       --sidebar-hover: #F3F4F6;
-      
       --bg: #F3F4F6; --panel: #FFFFFF; --fg: #1F2937; --gray: #6B7280; --border: #E5E7EB;
       --primary: #4F46E5; --primary-hover: #4338CA; --success: #10B981; --danger: #EF4444; --warning: #F59E0B;
       --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05); --radius: 8px;
     }
     body { margin: 0; padding: 0; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden; display: flex; }
     * { box-sizing: border-box; }
-    
+
     /* ── Sidebar ── */
-    .sidebar { width: 240px; background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); }
+    .sidebar { width: 240px; background: var(--sidebar-bg); color: var(--sidebar-fg); display: flex; flex-direction: column; flex-shrink: 0; border-right: 1px solid var(--border); transition: width 0.2s, min-width 0.2s; }
+    .sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; border-right: none; }
     .sidebar-logo { height: 64px; display: flex; align-items: center; padding: 0 20px; font-size: 16px; font-weight: 700; color: var(--fg); letter-spacing: -0.02em; border-bottom: 1px solid var(--border); }
     .nav-menu { padding: 20px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
     .nav-item { padding: 10px 16px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 10px; }
     .nav-item:hover { background: var(--sidebar-hover); color: var(--fg); }
-    .nav-item.active { background: rgba(79, 70, 229, 0.10); color: var(--primary); font-weight: 600;}
-    
+    .nav-item.active { background: rgba(79, 70, 229, 0.10); color: var(--primary); font-weight: 600; }
+
     .sidebar-bottom { padding: 20px; border-top: 1px solid var(--border); background: var(--sidebar-bg); }
     .mini-stat-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; color: var(--gray); font-weight: 600; }
-    .mini-stat-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; font-weight: 500;}
+    .mini-stat-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; font-weight: 500; }
     .mini-stat-row span:last-child { color: var(--fg); font-variant-numeric: tabular-nums; }
-    .sidebar-ctrl { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-    
+
     /* ── Main Layout ── */
     .main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-    .topbar { height: 64px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; }
-    .topbar-title { font-size: 18px; font-weight: 600; margin: 0; color: var(--fg); }
-    .topbar-stats { display: flex; gap: 12px; }
-    .stat-badge { background: var(--bg); border: 1px solid var(--border); padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; color: var(--gray); display: flex; align-items: center; gap: 6px; }
-    .stat-badge span { color: var(--fg); font-weight: 600; }
-
-    .workspace { flex: 1; display: flex; gap: 20px; padding: 24px; min-height: 0; }
-    .panel { background: var(--panel); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: hidden; }
+    .workspace { flex: 1; display: flex; gap: 20px; padding: 20px; min-height: 0; }
+    .panel { background: var(--panel); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: visible; }
     .panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: #FAFAFA; font-size: 14px; font-weight: 600; color: var(--fg); display: flex; justify-content: space-between; align-items: center; }
 
-    /* ── Drill-down Components ── */
+    /* ── Breadcrumb ── */
     .breadcrumb-bar { padding: 12px 16px; background: #FFFFFF; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 500; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 44px; }
     .bc-item { display: flex; align-items: center; gap: 4px; }
     .bc-link { color: var(--primary); cursor: pointer; transition: color 0.1s; padding: 2px 4px; border-radius: 4px; }
@@ -51,87 +44,71 @@
     .bc-sep { color: #D1D5DB; font-size: 12px; }
     .bc-current { color: var(--fg); font-weight: 600; padding: 2px 4px; }
 
-    .tree-panel { width: 380px; flex-shrink: 0; }
+    /* ── Tree Panel ── */
+    .tree-panel { width: 380px; flex-shrink: 0; transition: width 0.2s, min-width 0.2s, opacity 0.2s; }
+    .tree-panel.collapsed { width: 0; min-width: 0; overflow: hidden; opacity: 0; border: none; }
     .tree-search { padding: 12px 16px; border-bottom: 1px solid var(--border); background: #FAFAFA; }
     .tree-search input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; outline: none; background: #FFF; }
     .tree-search input:focus { border-color: var(--primary); }
-    
+
     .drill-content { flex: 1; overflow-y: auto; padding: 8px; }
     .drill-item { display: flex; align-items: center; gap: 8px; padding: 8px; margin-bottom: 2px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--fg); border: 1px solid transparent; transition: all 0.1s; }
     .drill-item:hover { background: #F9FAFB; border-color: var(--border); }
     .drill-item.selected { background: #EEF2FF; border-color: #C7D2FE; }
-    
-    .item-name { flex: 1; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-name-wrap { flex: 1; overflow: hidden; }
+    .item-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--primary); text-decoration: none; cursor: pointer; }
+    .item-name:hover { text-decoration: underline; }
     .item-meta { font-size: 11px; color: var(--gray); background: var(--bg); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); font-family: monospace; }
-    
-    .drill-btn { padding: 4px 8px; font-size: 11px; font-weight: 600; color: var(--primary); background: #EEF2FF; border-radius: 4px; display: flex; align-items: center; gap: 4px; transition: background 0.1s; }
-    .drill-btn:hover { background: #E0E7FF; }
-    
-    input[type="checkbox"] { accent-color: var(--primary); cursor: pointer; width: 16px; height: 16px; margin: 0; }
-    .badge-lvl { background: #F3F4F6; color: #4B5563; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; border: 1px solid #E5E7EB; }
 
-    .right-area { flex: 1; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
-    .config-panel { flex-shrink: 0; }
-    .config-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--panel); }
-    .config-tab { padding: 12px 24px; font-size: 13px; font-weight: 500; color: var(--gray); cursor: pointer; border-bottom: 2px solid transparent; }
-    .config-tab.active { color: var(--primary); border-bottom-color: var(--primary); background: #F9FAFB; }
-    .config-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
-    .form-row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
-    .form-group { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--gray); font-weight: 500;}
-    .form-group input[type="number"] { width: 70px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; outline: none; font-size: 13px; background: #FFF; }
-    .btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s;}
+    /* ── Collapse Bar ── */
+    .collapse-bar { position: absolute; top: 50%; transform: translateY(-50%); right: -10px; width: 10px; height: 48px; border-radius: 0 4px 4px 0; border: 1px solid var(--border); border-left: none; background: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; color: var(--gray); z-index: 10; transition: all 0.15s; }
+    .collapse-bar:hover { background: var(--bg); color: var(--fg); width: 14px; }
+
+    /* ── Dropdown ── */
+    .dropdown-menu { position: absolute; top: 100%; left: 0; margin-top: 4px; background: #fff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); z-index: 100; min-width: 180px; max-height: 320px; overflow-y: auto; padding: 4px 0; }
+    .dropdown-item { padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .dropdown-item:hover { background: #F3F4F6; }
+    .dropdown-item.active { color: var(--primary); font-weight: 600; background: #EEF2FF; }
+
+    /* ── Buttons ── */
+    input[type="checkbox"] { accent-color: var(--primary); cursor: pointer; width: 16px; height: 16px; margin: 0; }
+    .btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid transparent; display: inline-flex; align-items: center; gap: 6px; transition: all 0.2s; }
     .btn-primary { background: var(--primary); color: #fff; }
     .btn-primary:hover { filter: brightness(1.1); }
     .btn-danger { background: #fff; border-color: #FECACA; color: var(--danger); border: 1px solid; }
     .btn-danger:hover { background: #FEF2F2; }
-    .btn-outline { background: #fff; border-color: var(--border); color: var(--fg); border: 1px solid;}
-    .btn-outline:hover { background: var(--hover); }
-    
+    .btn-outline { background: #fff; border-color: var(--border); color: var(--fg); border: 1px solid; }
+    .btn-outline:hover { background: var(--bg); }
+
+    .right-area { flex: 1; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
     .results-panel { flex: 1; min-height: 0; }
     .table-container { flex: 1; overflow-y: auto; }
-    
-    /* ── Tables ── */
+
+    /* ── Table ── */
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-    th { background: #FAFAFA; padding: 14px 16px; color: var(--gray); font-weight: 500; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1;}
+    th { background: #FAFAFA; padding: 14px 16px; color: var(--gray); font-weight: 500; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1; white-space: nowrap; }
     td { padding: 14px 16px; border-bottom: 1px solid var(--border); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: #F9FAFB; }
 
-    /* ── List Buttons (4 榜单) ── */
-    .list-btns { display: flex; gap: 4px; flex-wrap: nowrap; }
-    .list-btn { 
-      padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; 
-      text-decoration: none; transition: all 0.2s; border: 1px solid transparent; 
-      display: inline-flex; justify-content: center; align-items: center; white-space: nowrap;
-    }
-    .list-btn.active { background: #EEF2FF; color: var(--primary); border-color: #C7D2FE; }
-    .list-btn.active:hover { background: #E0E7FF; transform: translateY(-1px); box-shadow: 0 2px 4px rgba(79,70,229,0.1); }
-    .list-btn.disabled { background: #F3F4F6; color: #9CA3AF; cursor: not-allowed; border-color: #E5E7EB; }
-    .list-btn.checking { background: #FFFBEB; color: var(--warning); cursor: default; border-color: #FDE68A; animation: pulse 1s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
-
-    /* 极简图标按钮 (用于刷新) */
-    .icon-btn {
-      background: transparent; border: 1px solid var(--border); border-radius: 6px;
-      width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
-      cursor: pointer; color: var(--gray); transition: all 0.2s; padding: 0;
-    }
-    .icon-btn:hover { background: var(--hover); color: var(--fg); border-color: #D1D5DB; }
-    .icon-btn:active { transform: scale(0.95); }
-
-    /* progress */
+    /* ── Progress ── */
     .progress-wrap { background: var(--bg); border-radius: 4px; overflow: hidden; height: 6px; }
     .progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary), #818CF8); transition: width 0.5s; }
-    .progress-text { font-size: 12px; color: var(--gray); display: flex; justify-content: space-between; margin-bottom: 8px; }
 
-    /* ctrl button (爬虫启停) */
-    .ctrl-btn { width: 100%; padding: 8px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; font-family: inherit; transition: all 0.2s; }
-    .ctrl-btn.paused { background: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; }
-    .ctrl-btn.running { background: #FEF2F2; color: var(--danger); border: 1px solid #FECACA; }
-    .status-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--gray); margin-top: 6px; justify-content: center; }
-    .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-    .status-dot.running { background: var(--success); }
-    .status-dot.paused  { background: var(--warning); }
+    /* ── Filter Panel ── */
+    .filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 16px; padding: 12px 16px; }
+    .filter-item { display: flex; flex-direction: column; gap: 3px; }
+    .filter-label { font-size: 11px; font-weight: 600; color: var(--gray); }
+    .filter-inputs { display: flex; align-items: center; gap: 4px; }
+    .filter-inputs input[type="number"], .filter-inputs input[type="date"] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; outline: none; background: #fff; }
+    .filter-inputs input:focus { border-color: var(--primary); }
+    .filter-inputs select { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; outline: none; background: #fff; }
+    .filter-inputs select:focus { border-color: var(--primary); }
+    .filter-sep { color: var(--gray); font-size: 11px; flex-shrink: 0; }
+    .filter-unit { font-size: 10px; color: var(--gray); flex-shrink: 0; }
+    .filter-check { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
+    .filter-check label { font-size: 12px; color: var(--fg); cursor: pointer; display: flex; align-items: center; gap: 5px; }
+    .filter-check input[type="checkbox"] { width: 14px; height: 14px; }
 
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
@@ -139,163 +116,222 @@
   </style>
 </head>
 <body>
-  
-  <!-- ══════════════════ SIDEBAR ══════════════════ -->
-  <aside class="sidebar">
+
+  <aside class="sidebar" id="sidebarEl">
     <div class="sidebar-logo">📦 Amazon Engine</div>
     <div class="nav-menu">
-      <div class="nav-item active" id="nav-list" onclick="switchView('list')">🗂️ 类目全量发现 (List)</div>
-      <div class="nav-item" id="nav-tasks" onclick="switchView('tasks')">🚀 商品定向抓取 (Tasks)</div>
+      <div class="nav-item active">🚀 商品定向抓取 (Tasks)</div>
     </div>
     <div class="sidebar-bottom">
       <div class="mini-stat-title">大盘监控</div>
-      <div class="mini-stat-row"><span>总节点</span><span id="total">—</span></div>
-      <div class="mini-stat-row"><span>待处理</span><span id="queue" style="color:var(--warning)">—</span></div>
-      <div class="mini-stat-row"><span>已验证</span><span id="validated" style="color: var(--success)">—</span></div>
-      <div class="mini-stat-row"><span>阶段</span><span id="phase">—</span></div>
-      <div class="sidebar-ctrl">
-        <button class="ctrl-btn paused" id="ctrlBtn" onclick="togglePause()">▶ 启动抓取</button>
-        <div class="status-row">
-          <span class="status-dot paused" id="statusDot"></span>
-          <span id="statusText">爬虫未运行</span>
-        </div>
-      </div>
+      <div class="mini-stat-row"><span>总类目</span><span id="total">—</span></div>
+      <div class="mini-stat-row"><span>总商品</span><span id="p_total_side" style="color:var(--warning)">—</span></div>
+      <div class="mini-stat-row"><span>多榜出现</span><span id="p_multi_side" style="color:var(--success)">—</span></div>
     </div>
   </aside>
 
-  <!-- ══════════════════ MAIN ══════════════════ -->
   <main class="main-content">
-    <header class="topbar">
-      <h2 class="topbar-title" id="mainTitle">🗂️ 类目全量发现 (List)</h2>
-      <div class="topbar-stats" id="taskStats" style="display: none;">
-        <div class="stat-badge">去重商品: <span id="p_total">0</span></div>
-        <div class="stat-badge">多榜出现: <span id="p_multi" style="color: var(--warning)">0</span></div>
-      </div>
-    </header>
-
-    <!-- 视图 1：类目全量发现 (List) -->
-    <div id="viewList" class="workspace" style="display: flex; flex-direction: column;">
-        <div class="panel" style="flex: 1;">
-            <div class="panel-header" style="padding: 0; display: flex; align-items: stretch;">
-               <div id="listBcBar" class="breadcrumb-bar" style="flex: 1; border-bottom: none;"></div>
-               <div class="tree-search" style="border-bottom: none; border-left: 1px solid var(--border); width: 260px;">
-                  <input type="text" placeholder="搜索当前层级类目..." oninput="searchList(this.value)">
-               </div>
-            </div>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>类目名称 (点击下钻)</th>
-                            <th style="width: 60px; text-align: center;">L级</th>
-                            <th style="width: 140px;">节点 ID</th>
-                            <th style="width: 100px; text-align: right; padding-right: 32px;">子节点</th>
-                            <th style="width: 240px; text-align: right; padding-right: 32px;">榜单状态</th>
-                            <th style="width: 60px; text-align: right;">操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="listTbody">
-                        <!-- JS 动态加载 -->
-                    </tbody>
-                </table>
-            </div>
+    <div class="workspace">
+      <!-- 树面板包装器（按钮在外部不被隐藏） -->
+      <div style="position:relative; flex-shrink:0; display:flex;">
+        <div class="panel tree-panel" id="treePanelEl">
+          <div class="panel-header">
+            <span>1. 选择目标类目</span>
+            <span style="font-size:12px; font-weight:500; color:var(--primary); background:#EEF2FF; padding:2px 8px; border-radius:10px; cursor:pointer;" id="selCount" onclick="showSelectedModal()">0 个已选</span>
+          </div>
+          <div class="breadcrumb-bar" id="bcBar"></div>
+          <div class="tree-search"><input type="text" placeholder="在当前层级中搜索..." oninput="searchTask(this.value)"></div>
+          <div class="drill-content" id="drillList"></div>
         </div>
-    </div>
-
-    <!-- 视图 2：商品定向抓取 (Tasks) -->
-    <div id="viewTasks" class="workspace" style="display: none;">
-      <!-- 左：下钻类目选择器 -->
-      <div class="panel tree-panel">
-        <div class="panel-header">
-          <span>1. 选择目标类目</span>
-          <span style="font-size: 12px; font-weight: 500; color: var(--primary); background: #EEF2FF; padding: 2px 8px; border-radius: 10px; cursor: pointer;" id="selCount">0 个已选</span>
-        </div>
-        <div class="breadcrumb-bar" id="bcBar"></div>
-        <div class="tree-search"><input type="text" placeholder="在当前层级中搜索..." oninput="searchTask(this.value)"></div>
-        <div class="drill-content" id="drillList"></div>
+        <div class="collapse-bar" id="collapseBarB" onclick="toggleCollapse()" title="折叠/展开">◀</div>
       </div>
 
-      <!-- 右：抓取配置 + 进度 + 实时商品 -->
+      <!-- 右侧区域 -->
       <div class="right-area">
-        <!-- 配置面板 -->
-        <div class="panel config-panel">
-          <div class="panel-header" style="background: #FFFFFF; cursor: pointer;" onclick="toggleConfig()" title="点击折叠/展开面板">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span id="configToggleIcon" style="transition: transform 0.2s; color: var(--gray); font-size: 12px;">▼</span>
-              <span>2. 抓取规则配置</span>
-            </div>
-            <div style="display: flex; gap: 8px;" onclick="event.stopPropagation()">
-              <button class="btn btn-primary" id="btnStartProducts" onclick="startProducts()">▶ 运行抓取</button>
-              <button class="btn btn-danger" onclick="stopProducts()">⏹ 停止</button>
+        <!-- 配置+筛选（合并单卡片） -->
+        <div class="panel" style="flex-shrink:0;">
+          <div style="padding:10px 16px; border-bottom:1px solid var(--border);">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:nowrap;">
+              <div style="position:relative; flex-shrink:0;">
+                <button class="btn btn-outline" style="padding:4px 12px; font-size:12px;" onclick="toggleDropdown('chartDrop')">📋 <span id="chartLabel">新品榜</span> ▾</button>
+                <div id="chartDrop" class="dropdown-menu" style="display:none;">
+                  <div class="dropdown-item active" data-key="nr" onclick="selectChart(this,'nr','新品榜')">📋 新品榜</div>
+                  <div class="dropdown-item" data-key="bs" onclick="selectChart(this,'bs','畅销榜')">📋 畅销榜</div>
+                  <div class="dropdown-item" data-key="ms" onclick="selectChart(this,'ms','飙升榜')">📋 飙升榜</div>
+                  <div class="dropdown-item" data-key="mw" onclick="selectChart(this,'mw','心愿单')">📋 心愿单</div>
+                  <div class="dropdown-item" data-key="mg" onclick="selectChart(this,'mg','礼品榜')">📋 礼品榜</div>
+                </div>
+              </div>
+              <div style="position:relative; flex-shrink:0;">
+                <button class="btn btn-outline" style="padding:4px 12px; font-size:12px;" onclick="toggleDropdown('countryDrop')"><span id="countryFlag">🇺🇸</span> <span id="countryLabel">美国</span> ▾</button>
+                <div id="countryDrop" class="dropdown-menu" style="display:none;">
+                  <div class="dropdown-item active" data-site="us" onclick="selectCountry(this,'us','🇺🇸','美国')">🇺🇸 美国 (amazon.com)</div>
+                  <div class="dropdown-item" data-site="uk" onclick="selectCountry(this,'uk','🇬🇧','英国')">🇬🇧 英国 (amazon.co.uk)</div>
+                  <div class="dropdown-item" data-site="de" onclick="selectCountry(this,'de','🇩🇪','德国')">🇩🇪 德国 (amazon.de)</div>
+                  <div class="dropdown-item" data-site="fr" onclick="selectCountry(this,'fr','🇫🇷','法国')">🇫🇷 法国 (amazon.fr)</div>
+                  <div class="dropdown-item" data-site="it" onclick="selectCountry(this,'it','🇮🇹','意大利')">🇮🇹 意大利 (amazon.it)</div>
+                  <div class="dropdown-item" data-site="es" onclick="selectCountry(this,'es','🇪🇸','西班牙')">🇪🇸 西班牙 (amazon.es)</div>
+                  <div class="dropdown-item" data-site="jp" onclick="selectCountry(this,'jp','🇯🇵','日本')">🇯🇵 日本 (amazon.co.jp)</div>
+                  <div class="dropdown-item" data-site="ca" onclick="selectCountry(this,'ca','🇨🇦','加拿大')">🇨🇦 加拿大 (amazon.ca)</div>
+                  <div class="dropdown-item" data-site="au" onclick="selectCountry(this,'au','🇦🇺','澳大利亚')">🇦🇺 澳大利亚 (amazon.com.au)</div>
+                  <div class="dropdown-item" data-site="in" onclick="selectCountry(this,'in','🇮🇳','印度')">🇮🇳 印度 (amazon.in)</div>
+                  <div class="dropdown-item" data-site="mx" onclick="selectCountry(this,'mx','🇲🇽','墨西哥')">🇲🇽 墨西哥 (amazon.com.mx)</div>
+                  <div class="dropdown-item" data-site="br" onclick="selectCountry(this,'br','🇧🇷','巴西')">🇧🇷 巴西 (amazon.com.br)</div>
+                  <div class="dropdown-item" data-site="sg" onclick="selectCountry(this,'sg','🇸🇬','新加坡')">🇸🇬 新加坡 (amazon.sg)</div>
+                  <div class="dropdown-item" data-site="nl" onclick="selectCountry(this,'nl','🇳🇱','荷兰')">🇳🇱 荷兰 (amazon.nl)</div>
+                  <div class="dropdown-item" data-site="sa" onclick="selectCountry(this,'sa','🇸🇦','沙特')">🇸🇦 沙特 (amazon.sa)</div>
+                  <div class="dropdown-item" data-site="ae" onclick="selectCountry(this,'ae','🇦🇪','阿联酋')">🇦🇪 阿联酋 (amazon.ae)</div>
+                  <div class="dropdown-item" data-site="se" onclick="selectCountry(this,'se','🇸🇪','瑞典')">🇸🇪 瑞典 (amazon.se)</div>
+                  <div class="dropdown-item" data-site="pl" onclick="selectCountry(this,'pl','🇵🇱','波兰')">🇵🇱 波兰 (amazon.pl)</div>
+                  <div class="dropdown-item" data-site="be" onclick="selectCountry(this,'be','🇧🇪','比利时')">🇧🇪 比利时 (amazon.com.be)</div>
+                  <div class="dropdown-item" data-site="tr" onclick="selectCountry(this,'tr','🇹🇷','土耳其')">🇹🇷 土耳其 (amazon.com.tr)</div>
+                  <div class="dropdown-item" data-site="eg" onclick="selectCountry(this,'eg','🇪🇬','埃及')">🇪🇬 埃及 (amazon.eg)</div>
+                </div>
+              </div>
+              <div style="display:flex; align-items:center; gap:6px; margin-left:auto;">
+                <div class="progress-wrap" style="width:100px;">
+                  <div id="p_bar" class="progress-bar-inner" style="width:0%;"></div>
+                </div>
+                <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; width:28px; text-align:right;">0%</span>
+                <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
+              </div>
+              <button class="btn btn-outline" id="btnFilterToggle" style="padding:4px 10px; font-size:12px; flex-shrink:0;" onclick="toggleFilterPanel(this)">筛选 ▲</button>
             </div>
           </div>
-          <div id="configContent">
-              <div class="config-tabs">
-                <div class="config-tab active" id="ltab_nr" onclick="switchListTab('nr')">📋 新品榜</div>
-                <div class="config-tab" id="ltab_bs" onclick="switchListTab('bs')">📋 畅销榜</div>
-                <div class="config-tab" id="ltab_mw" onclick="switchListTab('mw')">📋 心愿单</div>
+          <div class="filter-grid" id="filterGrid">
+            <div class="filter-item">
+              <span class="filter-label">现价 ($)</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_price_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_price_max" placeholder="最大" min="0">
               </div>
-              <div class="config-body">
-                <!-- 新品榜 -->
-                <div id="lp_nr" class="form-row">
-                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
-                    <input type="checkbox" id="len_nr" checked> 启用抓取
-                  </label>
-                  <div class="form-group">评论数 ≤ <input type="number" id="rv_nr" value="10" min="0"></div>
-                  <div class="form-group">活体率 ≥ <input type="number" id="ml_nr" value="100" min="0" max="100">%</div>
-                  <div class="form-group">价格 $ <input type="number" id="pmin_nr" value="0" min="0"> — <input type="number" id="pmax_nr" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
-                </div>
-                <!-- 畅销榜 -->
-                <div id="lp_bs" class="form-row" style="display:none">
-                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
-                    <input type="checkbox" id="len_bs" checked> 启用抓取
-                  </label>
-                  <div class="form-group">评论数 ≤ <input type="number" id="rv_bs" value="10" min="0"></div>
-                  <div class="form-group">活体率 ≥ <input type="number" id="ml_bs" value="100" min="0" max="100">%</div>
-                  <div class="form-group">价格 $ <input type="number" id="pmin_bs" value="0" min="0"> — <input type="number" id="pmax_bs" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
-                </div>
-                <!-- 心愿单 -->
-                <div id="lp_mw" class="form-row" style="display:none">
-                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; cursor:pointer;">
-                    <input type="checkbox" id="len_mw" checked> 启用抓取
-                  </label>
-                  <div class="form-group">评论数 ≤ <input type="number" id="rv_mw" value="10" min="0"></div>
-                  <div class="form-group">活体率 ≥ <input type="number" id="ml_mw" value="100" min="0" max="100">%</div>
-                  <div class="form-group">价格 $ <input type="number" id="pmin_mw" value="0" min="0"> — <input type="number" id="pmax_mw" value="0" min="0"> <span style="font-size:11px;color:var(--gray)">0=不限</span></div>
-                </div>
-
-                <!-- 进度条 -->
-                <div style="background: #F9FAFB; padding: 12px 16px; border-radius: 6px; border: 1px solid var(--border);">
-                  <div class="progress-text">
-                    <span id="p_status">就绪</span><span id="p_progress_text" style="color: var(--primary); font-weight: 600;">0%</span>
-                  </div>
-                  <div class="progress-wrap">
-                    <div id="p_bar" class="progress-bar-inner" style="width: 0%;"></div>
-                  </div>
-                </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">评分</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_rating_min" placeholder="最小" min="0" max="5" step="0.1">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_rating_max" placeholder="最大" min="0" max="5" step="0.1">
               </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">评论数</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_review_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_review_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">BSR大类排名</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_bsr_main_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_bsr_main_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">BSR子类排名</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_bsr_sub_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_bsr_sub_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">变体选项数</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_variant_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_variant_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">其他卖家数</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_sellers_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_sellers_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">商品重量</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_weight_min" placeholder="最小" min="0" step="0.1">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_weight_max" placeholder="最大" min="0" step="0.1">
+                <span class="filter-unit">lb</span>
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">商品尺寸 (长边 inch)</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_dim_min" placeholder="最小" min="0" step="0.1">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_dim_max" placeholder="最大" min="0" step="0.1">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">榜单商品总数</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_list_total_min" placeholder="最小" min="0">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_list_total_max" placeholder="最大" min="0">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">上架日期</span>
+              <div class="filter-inputs">
+                <select id="f_date_range" onchange="document.getElementById('f_date_custom').style.display=this.value==='custom'?'flex':'none';">
+                  <option value="">不限</option>
+                  <option value="30">近30天</option>
+                  <option value="90">近90天</option>
+                  <option value="180">近半年</option>
+                  <option value="365">近1年</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </div>
+              <div id="f_date_custom" class="filter-inputs" style="display:none; margin-top:3px;">
+                <input type="date" id="f_date_from">
+                <span class="filter-sep">~</span>
+                <input type="date" id="f_date_to">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">标记</span>
+              <div class="filter-check">
+                <label><input type="checkbox" id="f_amazons_choice"> Amazon精选</label>
+                <label><input type="checkbox" id="f_bestseller"> 畅销标记</label>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 实时结果面板 -->
+        <!-- 结果表格 -->
         <div class="panel results-panel">
           <div class="panel-header">
             <span>3. 实时分析结果</span>
-            <button class="btn btn-outline" style="padding: 6px 12px; font-size: 12px;" onclick="exportExcel()">📥 导出 Excel</button>
+            <button class="btn btn-outline" style="padding:6px 12px; font-size:12px;" onclick="exportExcel()">📥 导出 Excel</button>
           </div>
           <div class="table-container">
             <table>
               <thead>
                 <tr>
-                  <th style="width: 60px;">排名</th>
-                  <th>商品信息</th>
-                  <th style="width: 120px;">价格</th>
-                  <th style="width: 100px;">评论数</th>
+                  <th style="width:40px;">#</th>
+                  <th style="min-width:180px;">商品信息</th>
+                  <th style="width:70px;">现价</th>
+                  <th style="width:50px;">评分</th>
+                  <th style="width:65px;">评论数</th>
+                  <th style="width:70px;">BSR大类</th>
+                  <th style="width:70px;">BSR子类</th>
+                  <th style="width:50px;">变体</th>
+                  <th style="width:50px;">卖家</th>
+                  <th style="width:60px;">重量</th>
+                  <th style="width:70px;">上架日期</th>
                 </tr>
               </thead>
-              <tbody id="demoProducts">
-                <!-- JS 动态注入 -->
-              </tbody>
+              <tbody id="demoProducts"></tbody>
             </table>
           </div>
         </div>
@@ -303,251 +339,142 @@
     </div>
   </main>
 
+  <!-- 已选类目弹窗 -->
+  <div id="selModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:1000; align-items:center; justify-content:center;">
+    <div style="background:#fff; border-radius:10px; width:420px; max-height:70vh; display:flex; flex-direction:column; box-shadow:0 8px 30px rgba(0,0,0,0.15);">
+      <div style="padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-weight:600; font-size:14px;">已选类目 (<span id="selModalCount">0</span>)</span>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn btn-outline" style="padding:3px 10px; font-size:11px;" onclick="selModalSelectAll()">全选当页</button>
+          <button class="btn btn-danger" style="padding:3px 10px; font-size:11px;" onclick="selModalClearAll()">清空全部</button>
+          <span style="cursor:pointer; font-size:18px; color:var(--gray); line-height:1;" onclick="closeSelectedModal()">✕</span>
+        </div>
+      </div>
+      <div id="selModalList" style="flex:1; overflow-y:auto; padding:8px 12px; min-height:120px; max-height:55vh;"></div>
+    </div>
+  </div>
+
   <script>
-    // ── 1. 视图切换 ────────────────────────────────────────────────
-    function switchView(view) {
-      const isList = view === 'list';
-      document.getElementById('viewList').style.display  = isList ? 'flex' : 'none';
-      document.getElementById('viewTasks').style.display = isList ? 'none' : 'flex';
-      document.getElementById('nav-list').classList.toggle('active', isList);
-      document.getElementById('nav-tasks').classList.toggle('active', !isList);
-      
-      document.getElementById('mainTitle').textContent = isList ? '🗂️ 类目全量发现 (List)' : '🚀 商品定向抓取 (Tasks)';
-      document.getElementById('taskStats').style.display = isList ? 'none' : 'flex';
-      
-      if (isList) {
-        loadListDrillDown();
+    let _currentChart = 'nr';
+    let _currentSite = 'us';
+
+    // ── 下拉菜单 ──
+    function toggleDropdown(id) {
+      const el = document.getElementById(id);
+      const wasOpen = el.style.display !== 'none';
+      document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+      if (!wasOpen) el.style.display = 'block';
+    }
+    function selectChart(el, key, label) {
+      document.getElementById('chartLabel').textContent = label;
+      document.querySelectorAll('#chartDrop .dropdown-item').forEach(i => i.classList.remove('active'));
+      el.classList.add('active');
+      _currentChart = key;
+      document.getElementById('chartDrop').style.display = 'none';
+    }
+    function selectCountry(el, site, flag, label) {
+      document.getElementById('countryFlag').textContent = flag;
+      document.getElementById('countryLabel').textContent = label;
+      document.querySelectorAll('#countryDrop .dropdown-item').forEach(i => i.classList.remove('active'));
+      el.classList.add('active');
+      _currentSite = site;
+      document.getElementById('countryDrop').style.display = 'none';
+    }
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest('.dropdown-menu') && !e.target.closest('[onclick*="toggleDropdown"]')) {
+        document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
+      }
+    });
+
+    // ── 三档折叠 ──
+    let _collapseState = 0;
+    function toggleCollapse() {
+      const sidebar = document.getElementById('sidebarEl');
+      const tree = document.getElementById('treePanelEl');
+      const bar = document.getElementById('collapseBarB');
+      if (_collapseState === 0) {
+        tree.classList.add('collapsed');
+        bar.textContent = '◀';
+        _collapseState = 1;
+      } else if (_collapseState === 1) {
+        sidebar.classList.add('collapsed');
+        bar.textContent = '▶';
+        _collapseState = 2;
       } else {
-        loadTaskDrillDown();
-        loadLiveProducts();
+        sidebar.classList.remove('collapsed');
+        tree.classList.remove('collapsed');
+        bar.textContent = '◀';
+        _collapseState = 0;
       }
     }
 
-    // ── 2. 配置面板折叠 ──────────────────────────────────────────────
-    function toggleConfig() {
-      const content = document.getElementById('configContent');
-      const icon = document.getElementById('configToggleIcon');
-      const isHidden = content.style.display === 'none';
-      content.style.display = isHidden ? 'block' : 'none';
-      icon.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(-90deg)';
+    // ── 筛选面板折叠 ──
+    function toggleFilterPanel(btn) {
+      const grid = document.getElementById('filterGrid');
+      const hidden = grid.style.display === 'none';
+      grid.style.display = hidden ? 'grid' : 'none';
+      btn.textContent = hidden ? '筛选 ▲' : '筛选 ▼';
     }
 
-    // ── 3. 榜单配置 Sub-tab 切换 ─────────────────────────────────────
-    function switchListTab(key) {
-      ['nr','bs','mw'].forEach(k => {
-        document.getElementById('lp_'+k).style.display = k === key ? 'flex' : 'none';
-        const btn = document.getElementById('ltab_'+k);
-        if (k === key) btn.classList.add('active'); else btn.classList.remove('active');
-      });
+    // ── 筛选值收集 ──
+    function getFilterValues() {
+      return {
+        price_min: +document.getElementById('f_price_min').value || 0,
+        price_max: +document.getElementById('f_price_max').value || 0,
+        rating_min: +document.getElementById('f_rating_min').value || 0,
+        rating_max: +document.getElementById('f_rating_max').value || 0,
+        review_min: +document.getElementById('f_review_min').value || 0,
+        review_max: +document.getElementById('f_review_max').value || 0,
+        bsr_main_min: +document.getElementById('f_bsr_main_min').value || 0,
+        bsr_main_max: +document.getElementById('f_bsr_main_max').value || 0,
+        bsr_sub_min: +document.getElementById('f_bsr_sub_min').value || 0,
+        bsr_sub_max: +document.getElementById('f_bsr_sub_max').value || 0,
+        variant_min: +document.getElementById('f_variant_min').value || 0,
+        variant_max: +document.getElementById('f_variant_max').value || 0,
+        sellers_min: +document.getElementById('f_sellers_min').value || 0,
+        sellers_max: +document.getElementById('f_sellers_max').value || 0,
+        weight_min: +document.getElementById('f_weight_min').value || 0,
+        weight_max: +document.getElementById('f_weight_max').value || 0,
+        dim_min: +document.getElementById('f_dim_min').value || 0,
+        dim_max: +document.getElementById('f_dim_max').value || 0,
+        list_total_min: +document.getElementById('f_list_total_min').value || 0,
+        list_total_max: +document.getElementById('f_list_total_max').value || 0,
+        date_range: document.getElementById('f_date_range').value || '',
+        date_from: document.getElementById('f_date_from').value || '',
+        date_to: document.getElementById('f_date_to').value || '',
+        amazons_choice: document.getElementById('f_amazons_choice').checked,
+        bestseller: document.getElementById('f_bestseller').checked,
+      };
     }
 
-    // ── 4. 大盘监控与全局状态更新 ──────────────────────────────────────
+    // ── 大盘监控 ──
     async function loadStats() {
       try {
         const sr = await fetch('/api/stats?t=' + Date.now());
-        if (!sr.ok) throw new Error('HTTP ' + sr.status);
         const stats = await sr.json();
-        document.getElementById('total').textContent     = stats.total || '—';
-        document.getElementById('queue').textContent     = stats.queue ?? '—';
-        document.getElementById('validated').textContent = stats.validated || 0;
-
-        try {
-          const str = await fetch('/api/status?t=' + Date.now());
-          const st = await str.json();
-          document.getElementById('phase').textContent =
-            st.phase === 'sidebar_bfs' ? '侧边栏BFS' :
-            st.phase === 'breadcrumb'  ? '面包屑' :
-            st.phase === 'validating'  ? '补验榜单' :
-            st.phase === 'done'        ? '已完成' : (st.phase || '—');
-          updateScraperBtn(st.scraper_running);
-        } catch(e) { updateScraperBtn(false); }
+        document.getElementById('total').textContent = stats.total || '—';
       } catch(e) {}
     }
 
-    function updateScraperBtn(running) {
-      const btn = document.getElementById('ctrlBtn');
-      const dot = document.getElementById('statusDot');
-      const txt = document.getElementById('statusText');
-      if (running) {
-        btn.className = 'ctrl-btn running';
-        btn.textContent = '⏹ 停止抓取';
-        dot.className = 'status-dot running';
-        txt.textContent = '运行中';
-      } else {
-        btn.className = 'ctrl-btn paused';
-        btn.textContent = '▶ 启动抓取';
-        dot.className = 'status-dot paused';
-        txt.textContent = '爬虫未运行';
-      }
-    }
-
-    async function togglePause() {
-      const btn = document.getElementById('ctrlBtn');
-      const url = btn.textContent.includes('启动') ? '/api/start' : '/api/stop';
-      try {
-        const r = await fetch(url, { method: 'POST' });
-        const d = await r.json();
-        if (d.status === 'error') alert('操作失败: ' + d.msg);
-        else loadStats();
-      } catch(e) { alert('连接失败，检查 dashboard_server.py 是否在运行'); }
-    }
-
-    // ── 5. 榜单校验状态 HTML 渲染 ─────────────────────────────────────
-    function listBtn(label, url, valid, nodeId) {
-      if (!url || !nodeId) return `<span class="list-btn disabled">${label}</span>`;
-      const cls = valid === 1 ? 'active' : valid === 0 ? 'disabled' : 'checking';
-      const href = valid === 1 ? `href="${url}" target="_blank"` : 'javascript:void(0)';
-      return `<a class="list-btn ${cls}" ${href}>${label}</a>`;
-    }
-
-    function buildListBtns(n) {
-      if (!n.node_id) return '<span style="color:#ccc;font-size:11px">—</span>';
-      const parts = (n.url || '').replace(/\/$/, '').split('/');
-      const gpIdx = parts.indexOf('gp');
-      const slug  = gpIdx >= 0 ? parts[gpIdx + 2] : '';
-      const nid   = n.node_id;
-      const base  = `https://www.amazon.com/gp`;
-      return `<div class="list-btns">
-        ${listBtn('新品', `${base}/new-releases/${slug}/${nid}/`,       n.nr_valid, nid)}
-        ${listBtn('畅销', `${base}/bestsellers/${slug}/${nid}/`,        n.bs_valid, nid)}
-        ${listBtn('飙升', `${base}/movers-and-shakers/${slug}/${nid}/`, n.ms_valid, nid)}
-        ${listBtn('心愿', `${base}/most-wished-for/${slug}/${nid}/`,    n.mw_valid, nid)}
-      </div>`;
-    }
-
-    async function refreshRow(nodeId, btn) {
-      btn.disabled = true;
-      try {
-        await fetch(`/api/check_node?node_id=${nodeId}`, {method:'POST'});
-        setTimeout(() => { loadListDrillDown(); btn.disabled = false; }, 4000);
-      } catch(e) { btn.disabled = false; }
-    }
-
-
-    // ════ VIEW 1: 类目全量发现 (List View) 下钻 ════
-    let listCurrentPath = [{ node_id: 'root', name: '🏠 全部分类', slug: 'root' }];
-    let listSearchKeyword = '';
-    let currentListChildren = [];
-
-    async function loadListDrillDown() {
-      const current = listCurrentPath[listCurrentPath.length - 1];
-      
-      // 渲染面包屑
-      const bcHtml = listCurrentPath.map((node, idx) => {
-        const isLast = idx === listCurrentPath.length - 1;
-        if (isLast) return `<div class="bc-item bc-current">${node.name}</div>`;
-        return `<div class="bc-item"><span class="bc-link" onclick="navListTo(${idx})">${node.name}</span><span class="bc-sep">/</span></div>`;
-      }).join('');
-      document.getElementById('listBcBar').innerHTML = bcHtml;
-
-      // 显示加载中
-      document.getElementById('listTbody').innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--gray);">⏳ 加载中...</td></tr>';
-
-      try {
-        let url = '/api/categories?limit=500';
-        if (current.node_id === 'root') {
-          url += '&parent=root';
-        } else if (current.slug && !current.node_id) {
-          url += '&parent=' + current.slug;
-        } else {
-          url += '&parent=' + current.node_id;
-        }
-        if (listSearchKeyword) {
-          url += '&q=' + encodeURIComponent(listSearchKeyword);
-        }
-
-        const res = await fetch(url + '&t=' + Date.now());
-        currentListChildren = await res.json();
-
-        let listHtml = '';
-        if (currentListChildren && currentListChildren.length > 0) {
-          currentListChildren.forEach((child, idx) => {
-            const hasChild = child.child_count > 0;
-            const d = child.depth || 1;
-            const dc = d>=5?'d5':d>=4?'d4':d>=3?'d3':d>=2?'d2':'d1';
-            const btns = buildListBtns(child);
-            const refreshBtn = child.node_id
-              ? `<button class="icon-btn" onclick="event.stopPropagation(); refreshRow('${child.node_id}', this)" title="刷新榜单校验状态">
-                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path></svg>
-                 </button>`
-              : '';
-
-            const rowStyle = hasChild ? 'cursor: pointer; transition: background 0.15s;' : '';
-            const onClickAttr = hasChild ? `onclick="listDiveIn(${idx})"` : '';
-
-            listHtml += `
-            <tr style="${rowStyle}" ${onClickAttr} title="${hasChild ? '点击进入下级类目' : ''}">
-                <td style="font-weight: 500;">
-                   <div style="display:flex; align-items:center; gap:8px;">
-                       ${hasChild ? '<span style="color:var(--warning); font-size:16px; flex-shrink:0;">📁</span>' : '<span style="color:var(--gray); font-size:16px; flex-shrink:0;">📄</span>'}
-                       <span style="color: var(--fg); border-bottom: 1px dashed ${hasChild ? 'var(--gray)' : 'transparent'}; padding-bottom:1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${child.name}</span>
-                   </div>
-                </td>
-                <td style="text-align: center;"><span class="badge-lvl">L${d}</span></td>
-                <td><span class="item-meta">${child.node_id || '—'}</span></td>
-                <td style="color:var(--gray); font-size:12px; text-align: right; padding-right: 32px;">${hasChild ? child.child_count + ' 个' : '0 个'}</td>
-                <td style="text-align: right; padding-right: 32px;" onclick="event.stopPropagation()">${btns}</td>
-                <td style="text-align: right;" onclick="event.stopPropagation()">${refreshBtn}</td>
-            </tr>`;
-          });
-        } else {
-          listHtml = `<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--gray);">该类目下没有子节点数据</td></tr>`;
-        }
-        document.getElementById('listTbody').innerHTML = listHtml;
-      } catch (err) {
-        document.getElementById('listTbody').innerHTML = `<tr><td colspan="6" style="text-align:center; padding: 40px; color:var(--danger);">加载失败: ${err}</td></tr>`;
-      }
-    }
-
-    function navListTo(idx) {
-      listCurrentPath = listCurrentPath.slice(0, idx + 1);
-      loadListDrillDown();
-    }
-
-    function listDiveIn(idx) {
-      listCurrentPath.push(currentListChildren[idx]);
-      loadListDrillDown();
-    }
-
-    function searchList(kw) {
-      listSearchKeyword = kw.trim();
-      loadListDrillDown();
-    }
-
-
-    // ════ VIEW 2: 商品定向抓取 (Tasks View) 下钻 ════
-    let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类', slug: 'root' }];
+    // ── 类目树下钻 ──
+    let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
     let taskSearchKeyword = '';
-    const _selectedSlugs = new Set(); 
+    const _selectedNodes = new Map();
     let currentTaskChildren = [];
 
     async function loadTaskDrillDown() {
       const current = taskCurrentPath[taskCurrentPath.length - 1];
-
-      // 渲染面包屑
       const bcHtml = taskCurrentPath.map((node, idx) => {
         const isLast = idx === taskCurrentPath.length - 1;
-        if (isLast) return `<div class="bc-item bc-current">${node.name}</div>`;
-        return `<div class="bc-item"><span class="bc-link" onclick="navTaskTo(${idx})">${node.name}</span><span class="bc-sep">/</span></div>`;
+        if (isLast) return '<div class="bc-item bc-current">' + node.name + '</div>';
+        return '<div class="bc-item"><span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span></div>';
       }).join('');
       document.getElementById('bcBar').innerHTML = bcHtml;
-
-      // 显示加载中
       document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">⏳ 加载中...</div>';
 
       try {
-        let url = '/api/categories?limit=500';
-        if (current.node_id === 'root') {
-          url += '&parent=root';
-        } else if (current.slug && !current.node_id) {
-          url += '&parent=' + current.slug;
-        } else {
-          url += '&parent=' + current.node_id;
-        }
-        if (taskSearchKeyword) {
-          url += '&q=' + encodeURIComponent(taskSearchKeyword);
-        }
-
+        let url = '/api/tree_children?parent=' + (current.node_id === 'root' ? 'root' : current.node_id);
+        if (taskSearchKeyword) url += '&q=' + encodeURIComponent(taskSearchKeyword);
         const res = await fetch(url + '&t=' + Date.now());
         currentTaskChildren = await res.json();
 
@@ -555,27 +482,25 @@
         if (currentTaskChildren && currentTaskChildren.length > 0) {
           currentTaskChildren.forEach((child, idx) => {
             const hasChild = child.child_count > 0;
-            const key = child.node_id ? '__node__' + child.node_id : child.slug;
-            const isSel = _selectedSlugs.has(key);
+            const key = child.node_id;
+            const isSel = _selectedNodes.has(key);
             const d = child.depth || 1;
-            const metaText = child.node_id ? child.node_id : (child.child_count + ' 节点');
-
-            listHtml += `
-            <div class="drill-item ${isSel ? 'selected' : ''}" onclick="toggleSelect('${key}')">
-                <input type="checkbox" ${isSel ? 'checked' : ''} onclick="event.stopPropagation(); toggleSelect('${key}')">
-                <span class="badge-lvl">L${d}</span>
-                <span class="item-name" title="${child.name}">${child.name}</span>
-                <span class="item-meta">${metaText}</span>
-                ${hasChild ? `<div class="drill-btn" onclick="event.stopPropagation(); taskDiveIn(${idx})">进入下级 &gt;</div>` : ''}
-            </div>`;
+            const nrUrl = 'https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/';
+            listHtml +=
+            '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
+                '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
+                '<span class="item-name-wrap"><a class="item-name" href="' + nrUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()">' + child.name + '</a></span>' +
+                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">L' + d + '</span>' +
+                '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
+            '</div>';
           });
         } else {
-          listHtml = `<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>`;
+          listHtml = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>';
         }
         document.getElementById('drillList').innerHTML = listHtml;
-        document.getElementById('selCount').innerText = _selectedSlugs.size + ' 个已选';
+        document.getElementById('selCount').innerText = _selectedNodes.size + ' 个已选';
       } catch (err) {
-        document.getElementById('drillList').innerHTML = `<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ${err}</div>`;
+        document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ' + err + '</div>';
       }
     }
 
@@ -583,67 +508,154 @@
       taskCurrentPath = taskCurrentPath.slice(0, idx + 1);
       loadTaskDrillDown();
     }
-
     function taskDiveIn(idx) {
       taskCurrentPath.push(currentTaskChildren[idx]);
       loadTaskDrillDown();
     }
-
-    function toggleSelect(key) {
-      if (_selectedSlugs.has(key)) {
-        _selectedSlugs.delete(key);
-      } else {
-        _selectedSlugs.add(key);
-      }
+    function toggleSelect(key, name) {
+      if (_selectedNodes.has(key)) _selectedNodes.delete(key);
+      else _selectedNodes.set(key, name || key);
       loadTaskDrillDown();
     }
-
     function searchTask(kw) {
       taskSearchKeyword = kw.trim();
       loadTaskDrillDown();
     }
 
-    // ── 6. 商品抓取控制 & 状态轮询 ─────────────────────────────────────
-    let _productPollTimer = null;
+    // ── 已选类目弹窗 ──
+    function showSelectedModal() {
+      document.getElementById('selModal').style.display = 'flex';
+      renderSelectedModal();
+    }
+    function closeSelectedModal() {
+      document.getElementById('selModal').style.display = 'none';
+    }
+    function renderSelectedModal() {
+      const list = document.getElementById('selModalList');
+      document.getElementById('selModalCount').textContent = _selectedNodes.size;
+      if (_selectedNodes.size === 0) {
+        list.innerHTML = '<div style="padding:30px; text-align:center; color:var(--gray); font-size:13px;">暂无已选类目</div>';
+        return;
+      }
+      let html = '';
+      _selectedNodes.forEach((name, nid) => {
+        html += '<div style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--border); font-size:13px;">' +
+          '<input type="checkbox" checked onclick="toggleSelect(\'' + nid + '\'); renderSelectedModal(); loadTaskDrillDown();">' +
+          '<span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="' + name + '">' + name + '</span>' +
+          '<span style="font-size:11px; color:var(--gray); font-family:monospace;">' + nid + '</span>' +
+        '</div>';
+      });
+      list.innerHTML = html;
+    }
+    function selModalSelectAll() {
+      currentTaskChildren.forEach(c => {
+        if (!_selectedNodes.has(c.node_id)) _selectedNodes.set(c.node_id, c.name);
+      });
+      renderSelectedModal();
+      loadTaskDrillDown();
+    }
+    function selModalClearAll() {
+      _selectedNodes.clear();
+      renderSelectedModal();
+      loadTaskDrillDown();
+    }
+    document.getElementById('selModal').addEventListener('click', function(e) {
+      if (e.target === this) closeSelectedModal();
+    });
+
+    // ── 商品抓取控制 ──
+    let _isRunning = false;
+    function updateRunBtn() {
+      const btn = document.getElementById('btnToggleRun');
+      if (_isRunning) {
+        btn.textContent = '⏹ 停止';
+        btn.className = 'btn btn-danger';
+      } else {
+        btn.textContent = '▶ 开始';
+        btn.className = 'btn btn-primary';
+      }
+    }
 
     async function refreshProductStats() {
       try {
         const r = await fetch('/api/product_stats?t=' + Date.now());
         const d = await r.json();
-        
-        // 头部统计
-        document.getElementById('p_total').textContent = d.total_asins || 0;
-        document.getElementById('p_multi').textContent = d.multi_list || 0;
-
-        const running = d.running;
-        document.getElementById('p_status').textContent = running ? '⚙ 抓取中...' : '就绪';
-        document.getElementById('p_status').style.color  = running ? 'var(--success)' : 'var(--gray)';
+        document.getElementById('p_total_side').textContent = d.total_asins || 0;
+        document.getElementById('p_multi_side').textContent = d.multi_list || 0;
+        _isRunning = !!d.running;
+        updateRunBtn();
       } catch(e) {}
     }
 
     async function loadLiveProducts() {
       try {
-        const res = await fetch('/api/products?t=' + Date.now());
+        const filters = getFilterValues();
+        let qs = '?t=' + Date.now();
+        for (const [k, v] of Object.entries(filters)) {
+          if (v !== 0 && v !== '' && v !== false) qs += '&' + k + '=' + encodeURIComponent(v);
+        }
+        const res = await fetch('/api/products' + qs);
         const products = await res.json();
         let phtml = '';
         if (products && products.length > 0) {
           products.forEach((prod, i) => {
-            phtml += `<tr>
-                <td style="color:var(--gray); font-weight:600;">#${i + 1}</td>
-                <td>
-                  <div style="font-weight:500; font-size:13px; color:var(--primary); margin-bottom:4px; white-space:normal;">${prod.name || 'Unknown Product'}</div>
-                  <div style="font-size:11px; color:var(--gray);">${prod.asin || ''}</div>
-                </td>
-                <td style="font-weight:600;">$${typeof prod.price === 'number' ? prod.price.toFixed(2) : (prod.price || '—')}</td>
-                <td>${prod.review_count || 0}</td>
-            </tr>`;
+            const price = typeof prod.price === 'number' ? '$' + prod.price.toFixed(2) : (prod.price_raw || '—');
+            phtml += '<tr>' +
+                '<td style="color:var(--gray); font-weight:600;">' + (i + 1) + '</td>' +
+                '<td><div style="font-weight:500; font-size:12px; color:var(--primary); white-space:normal; max-width:260px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;" title="' + (prod.name || '') + '">' + (prod.name || '—') + '</div>' +
+                '<div style="font-size:10px; color:var(--gray);">' + (prod.asin || '') + '</div></td>' +
+                '<td style="font-weight:600;">' + price + '</td>' +
+                '<td>' + (prod.rating != null ? prod.rating : '—') + '</td>' +
+                '<td>' + (prod.review_count != null ? prod.review_count.toLocaleString() : '—') + '</td>' +
+                '<td>' + (prod.bsr_main_rank || '—') + '</td>' +
+                '<td>' + (prod.bsr_sub_rank || '—') + '</td>' +
+                '<td>' + (prod.variant_option_count != null ? prod.variant_option_count : '—') + '</td>' +
+                '<td>' + (prod.other_sellers_count != null ? prod.other_sellers_count : '—') + '</td>' +
+                '<td>' + (prod.item_weight || '—') + '</td>' +
+                '<td style="font-size:11px;">' + (prod.date_first_available || '—') + '</td>' +
+            '</tr>';
           });
         } else {
-          phtml = `<tr><td colspan="4" style="text-align:center; padding: 40px; color:var(--gray);">暂无实时分析结果。请选择类目并启动抓取进程。</td></tr>`;
+          phtml = '<tr><td colspan="11" style="text-align:center; padding:40px; color:var(--gray);">暂无实时分析结果。请选择类目并启动抓取进程。</td></tr>';
         }
         document.getElementById('demoProducts').innerHTML = phtml;
-      } catch (e) {
-        console.error('Failed to load live products:', e);
+      } catch (e) {}
+    }
+
+    async function toggleRun() {
+      if (_isRunning) {
+        try {
+          await fetch('/api/stop_products', {method: 'POST'});
+          _isRunning = false;
+          updateRunBtn();
+        } catch(e) { alert('停止失败: ' + e); }
+      } else {
+        const allSelected = [..._selectedNodes.keys()].filter(Boolean);
+        if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
+
+        const chartMap = {nr:'new-releases', bs:'bestsellers', ms:'movers-and-shakers', mw:'most-wished-for', mg:'most-gifted'};
+        const enabledLists = [chartMap[_currentChart]];
+        const filters = getFilterValues();
+        const params = {
+          roots: allSelected,
+          lists: enabledLists,
+          filters: filters,
+        };
+
+        document.getElementById('p_bar').style.width = '0%';
+        document.getElementById('p_progress_text').innerText = '0%';
+
+        try {
+          const r = await fetch('/api/start_products', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(params)
+          });
+          const d = await r.json();
+          if (d.status === 'already_running') alert('抓取进程已在运行中');
+          else if (d.status === 'error') alert('启动失败: ' + d.msg);
+          else { _isRunning = true; updateRunBtn(); }
+        } catch(e) { alert('启动失败: ' + e); }
       }
     }
 
@@ -652,7 +664,6 @@
         const r = await fetch('/api/product_progress?t=' + Date.now());
         const d = await r.json();
         if (d.running) {
-          // 模拟进度条加载动画
           let p = parseFloat(document.getElementById('p_progress_text').innerText) || 0;
           if (p < 95) {
             p += Math.random() * 5;
@@ -665,97 +676,27 @@
           if (pText !== '0%' && pText !== '100%') {
             document.getElementById('p_bar').style.width = '100%';
             document.getElementById('p_progress_text').innerText = '100%';
-            document.getElementById('p_status').textContent = '✓ 完成';
           }
         }
       } catch(e) {}
     }
 
-    function startProductPoll() {
-      if (_productPollTimer) return;
-      _productPollTimer = setInterval(() => {
-        refreshProductStats();
-        loadLiveProducts();
-        refreshProductProgress();
-      }, 3000);
-    }
-
-    async function startProducts() {
-      const allSelected = [..._selectedSlugs].filter(Boolean);
-      if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
-
-      const slugs = allSelected.filter(s => !s.startsWith('__node__'));
-      const roots = allSelected.filter(s => s.startsWith('__node__')).map(s => s.replace('__node__', ''));
-
-      const enabledLists = [];
-      if (document.getElementById('len_nr').checked) enabledLists.push('new-releases');
-      if (document.getElementById('len_bs').checked) enabledLists.push('bestsellers');
-      if (document.getElementById('len_mw').checked) enabledLists.push('most-wished-for');
-      if (!enabledLists.length) { alert('请至少启用一个榜单'); return; }
-
-      // 读取当前 Tab 的参数
-      const activeTab = document.querySelector('.config-tab.active').id.replace('ltab_', '');
-      const params = {
-        lists:      enabledLists,
-        review_max: +document.getElementById('rv_' + activeTab).value,
-        min_list:   +document.getElementById('ml_' + activeTab).value,
-        price_min:  +document.getElementById('pmin_' + activeTab).value,
-        price_max:  +document.getElementById('pmax_' + activeTab).value,
-      };
-      if (slugs.length) params.slugs = slugs;
-      if (roots.length) params.roots = roots;
-
-      document.getElementById('p_bar').style.width = '0%';
-      document.getElementById('p_progress_text').innerText = '0%';
-      document.getElementById('p_status').textContent = '⚙ 启动中...';
-
-      try {
-        const r = await fetch('/api/start_products', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(params)
-        });
-        const d = await r.json();
-        if (d.status === 'already_running') alert('抓取进程已在运行中');
-        else if (d.status === 'error') alert('启动失败: ' + d.msg);
-        else {
-          document.getElementById('p_status').textContent = `⚙ 抓取中...`;
-          document.getElementById('p_status').style.color = 'var(--success)';
-        }
-      } catch(e) { alert('启动失败: ' + e); }
-    }
-
-    async function stopProducts() {
-      try {
-        await fetch('/api/stop_products', {method: 'POST'});
-        document.getElementById('p_status').textContent = '已停止';
-        document.getElementById('p_status').style.color = 'var(--gray)';
-      } catch(e) { alert('停止失败: ' + e); }
-    }
-
     async function exportExcel() {
-      document.getElementById('p_status').textContent = '导出中...';
       try {
         const r = await fetch('/api/export_excel', {method: 'POST'});
         const d = await r.json();
-        if (d.status === 'ok') {
-          alert('✅ Excel 已成功导出到 data/products.xlsx');
-          document.getElementById('p_status').textContent = '就绪';
-        } else {
-          alert('❌ ' + (d.msg || '导出失败'));
-          document.getElementById('p_status').textContent = '就绪';
-        }
+        if (d.status === 'ok') alert('✅ Excel 已成功导出到 data/products.xlsx');
+        else alert('❌ ' + (d.msg || '导出失败'));
       } catch(e) { alert('导出失败: ' + e); }
     }
 
-    // ── 7. 页面载入 ──────────────────────────────────────────────────
-    // 初始化首屏
+    // ── 初始化 ──
     loadStats();
-    loadListDrillDown();
-    startProductPoll();
-    
-    // 定时刷新监控大盘
-    setInterval(loadStats, 2000);
+    loadTaskDrillDown();
+    refreshProductStats();
+    loadLiveProducts();
+    setInterval(() => { refreshProductStats(); loadLiveProducts(); refreshProductProgress(); }, 3000);
+    setInterval(loadStats, 5000);
   </script>
 </body>
 </html>

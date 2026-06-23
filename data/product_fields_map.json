@@ -1,0 +1,97 @@
+{
+  "_说明": "Amazon 商品详情页实际可提取字段（2个样品验证）",
+  "_样品": [
+    "B0GWFN7Y8T - Pocket Hose Ballistic (Patio/Garden)",
+    "B0GTMYN73B - Owala SmoothSip Coffee Tumbler (Kitchen)"
+  ],
+  "字段映射": {
+    "核心商品信息": {
+      "asin":             { "中文": "商品编号",     "来源": "input#ASIN",                    "示例": "B0GWFN7Y8T" },
+      "title":            { "中文": "商品标题",     "来源": "#productTitle",                  "示例": "Pocket Hose Ballistic 50 FT..." },
+      "brand":            { "中文": "品牌",         "来源": "#bylineInfo",                    "示例": "Visit the Pocket Hose Store" },
+      "brand_url":        { "中文": "品牌店铺链接", "来源": "#bylineInfo[href]",               "示例": "/stores/PocketHose/page/..." },
+      "has_brand_store":  { "中文": "有品牌旗舰店", "来源": "#bylineInfo[href*=/stores/]",     "示例": true }
+    },
+    "价格": {
+      "price":            { "中文": "现价",         "来源": ".a-price .a-offscreen",           "示例": "$59.99" },
+      "original_price":   { "中文": "原价",         "来源": ".a-text-price .a-offscreen",      "示例": "$69.99" },
+      "discount_pct":     { "中文": "折扣比例",     "来源": ".savingsPercentage",              "示例": "-14%" },
+      "has_coupon":       { "中文": "有优惠券",     "来源": "#couponBadgeRegularVpc",          "示例": false },
+      "coupon_text":      { "中文": "优惠券内容",   "来源": "同上 .get_text()",                "示例": "Save 5% with coupon" }
+    },
+    "评价与排名": {
+      "rating":           { "中文": "评分",         "来源": "#acrPopover .a-icon-alt",         "示例": "4.2 out of 5 stars" },
+      "review_count":     { "中文": "评论数",       "来源": "#acrCustomerReviewText",          "示例": "15,195" },
+      "bsr":              { "中文": "BSR排名",      "来源": "prodDetTable Best Sellers Rank",  "示例_多级": [{"rank": 19, "category": "Patio, Lawn & Garden"}, {"rank": 2, "category": "Garden Hoses"}] },
+      "is_amazons_choice":{ "中文": "Amazon精选",   "来源": ".ac-badge-wrapper",               "示例": false },
+      "is_bestseller":    { "中文": "畅销标记",     "来源": "#zeitgeistBadge_feature_div",     "示例": true },
+      "qa_count":         { "中文": "问答数",       "来源": "#askATFLink span",                "示例": "42 answered questions" }
+    },
+    "媒体": {
+      "main_image":       { "中文": "主图URL",      "来源": "#landingImage data-old-hires",    "示例": "https://m.media-amazon.com/images/I/71xkge21xzL._AC_SL1500_.jpg" },
+      "image_count":      { "中文": "图片数量",     "来源": "#altImages img count",            "示例": 7 },
+      "has_video":        { "中文": "有视频",       "来源": ".vse-player-container",           "示例": true }
+    },
+    "类目归属": {
+      "breadcrumbs":      { "中文": "面包屑路径",   "来源": "#wayfinding-breadcrumbs_feature_div a", "示例": ["Patio, Lawn & Garden", "Gardening & Lawn Care", "Watering Equipment", "Garden Hoses"] }
+    },
+    "卖点描述": {
+      "bullet_points":    { "中文": "五点描述",     "来源": "#feature-bullets .a-list-item",   "示例": "5条" },
+      "has_aplus":        { "中文": "有A+页面",     "来源": "#aplus_feature_div",              "示例": true },
+      "has_description":  { "中文": "有商品描述",   "来源": "#productDescription",             "示例": true }
+    },
+    "商品属性_prodDetTable": {
+      "_说明": "以下字段因品类动态变化，统一存为JSON对象",
+      "Brand Name":                     { "中文": "品牌名",       "出现频率": "通用" },
+      "Manufacturer":                   { "中文": "制造商",       "出现频率": "通用" },
+      "UPC":                            { "中文": "通用产品代码", "出现频率": "通用" },
+      "Model Number":                   { "中文": "型号",         "出现频率": "部分" },
+      "Manufacturer Part Number":       { "中文": "制造商零件号", "出现频率": "部分" },
+      "Item Dimensions L x W":          { "中文": "商品尺寸",     "出现频率": "常见" },
+      "Item Dimensions W x H":          { "中文": "商品尺寸",     "出现频率": "常见" },
+      "Package Dimensions":             { "中文": "包装尺寸",     "出现频率": "常见" },
+      "Item Weight":                    { "中文": "商品重量",     "出现频率": "常见" },
+      "Material Type":                  { "中文": "材质",         "出现频率": "常见" },
+      "Color":                          { "中文": "颜色",         "出现频率": "常见" },
+      "Capacity":                       { "中文": "容量",         "出现频率": "部分" },
+      "Size":                           { "中文": "尺寸规格",     "出现频率": "部分" },
+      "Unit Count":                     { "中文": "件数",         "出现频率": "常见" },
+      "Number of Items":                { "中文": "包含数量",     "出现频率": "部分" },
+      "Included Components":            { "中文": "包含组件",     "出现频率": "常见" },
+      "Recommended Uses For Product":   { "中文": "推荐用途",     "出现频率": "部分" },
+      "Age Range Description":          { "中文": "适用年龄",     "出现频率": "部分" },
+      "Item Type Name":                 { "中文": "商品类型",     "出现频率": "部分" },
+      "Product Style":                  { "中文": "产品风格",     "出现频率": "部分" },
+      "Shape":                          { "中文": "形状",         "出现频率": "部分" },
+      "Product Care Instructions":      { "中文": "护理说明",     "出现频率": "部分" },
+      "Material Features":              { "中文": "材质特性",     "出现频率": "部分" },
+      "Reusability":                    { "中文": "可重复使用",   "出现频率": "部分" },
+      "Is the item dishwasher safe?":   { "中文": "可否洗碗机清洗","出现频率": "部分" },
+      "Other Special Features of the Product": { "中文": "其他特色功能", "出现频率": "部分" },
+      "Outside Diameter":               { "中文": "外径",         "出现频率": "特定品类" },
+      "Country of Origin":              { "中文": "产地",         "出现频率": "部分" },
+      "Date First Available":           { "中文": "上架日期",     "出现频率": "部分" }
+    },
+    "变体": {
+      "variant_types":        { "中文": "变体维度",   "来源": "#twisterContainer .a-form-label",  "示例": ["Color", "Size"] },
+      "variant_option_count": { "中文": "变体选项数", "来源": "#twisterContainer li[data-defaultasin]", "示例": 5 }
+    },
+    "购买与配送": {
+      "seller_name":      { "中文": "卖家名称",     "来源": "#sellerProfileTriggerId",         "示例": "BulbHead The Home Of Bright Ideas" },
+      "buybox_info":      { "中文": "购买框信息",   "来源": "#tabular-buybox",                "示例": ["Ships from Amazon", "Sold by BulbHead"] },
+      "availability":     { "中文": "库存状态",     "来源": "#availability span",              "示例": "In Stock" },
+      "delivery_info":    { "中文": "配送信息",     "来源": "#mir-layout-DELIVERY_BLOCK-block","示例": "FREE delivery Monday, June 23" },
+      "has_subscribe_save":{ "中文": "有订阅省",    "来源": "#snsDetailPageFeature",           "示例": false },
+      "other_sellers_count":{ "中文": "其他卖家数", "来源": "#aod-offer count",                "示例": 0 },
+      "new_used_offers":  { "中文": "新旧报价",     "来源": "#olp_feature_div",                "示例": "3 new from $55.99" }
+    },
+    "营销标记": {
+      "has_promotion":    { "中文": "有促销",       "来源": "#promoPriceBlockMessage_feature_div", "示例": true },
+      "has_fbt":          { "中文": "有经常一起买", "来源": "#sims-fbt",                       "示例": false },
+      "has_comparison_table":{ "中文": "有对比表",  "来源": "#HLCXComparisonTable",            "示例": false },
+      "has_gift_option":  { "中文": "有礼品选项",   "来源": "#giftwrap_feature_div",           "示例": true },
+      "climate_pledge":   { "中文": "气候友好认证", "来源": "#climatePledgeFriendly",          "示例": false },
+      "has_sponsored_section":{ "中文": "有赞助推荐","来源": "#sp_detail",                     "示例": false }
+    }
+  }
+}

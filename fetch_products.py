@@ -19,7 +19,7 @@ DEFAULT_MIN_LIST_SIZE = 100
 DEFAULT_PRICE_MIN     = 0.0
 DEFAULT_PRICE_MAX     = 0.0
 DEFAULT_DELAY         = 2.0   # 请求间隔（秒）
-DEFAULT_LISTS         = ["new-releases", "bestsellers", "most-wished-for"]
+DEFAULT_LISTS         = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for"]
 
 HEADERS = {
     "User-Agent": (
@@ -33,9 +33,18 @@ HEADERS = {
 }
 
 LIST_LABELS = {
-    "new-releases": "新品榜",
-    "bestsellers": "畅销榜",
-    "most-wished-for": "心愿单",
+    "new-releases":       "新品榜",
+    "bestsellers":        "畅销榜",
+    "movers-and-shakers": "飙升榜",
+    "most-wished-for":    "心愿单",
+}
+
+# 榜单名 → categories 表列名（用于写入验证结果）
+LIST_COL_MAP = {
+    "new-releases":       "nr_valid",
+    "bestsellers":        "bs_valid",
+    "movers-and-shakers": "ms_valid",
+    "most-wished-for":    "mw_valid",
 }
 
 _db_lock = threading.Lock()
@@ -122,6 +131,26 @@ def extract_slug(url: str) -> str:
         return parts[gp_idx + 2]
     except (ValueError, IndexError):
         return ""
+
+
+def save_link_validity(node_id: str, list_type: str, is_valid: int):
+    """将单个榜单的有效性写入 categories 和 link_cache（合并自 check_links.py）。"""
+    col = LIST_COL_MAP.get(list_type)
+    if not col:
+        return
+    with _db_lock:
+        conn = db_conn()
+        try:
+            conn.execute(f"UPDATE categories SET {col}=? WHERE node_id=?", (is_valid, node_id))
+            conn.execute(
+                f"INSERT INTO link_cache (node_id, {col}, checked_at) "
+                f"VALUES (?, ?, datetime('now')) "
+                f"ON CONFLICT(node_id) DO UPDATE SET {col}=excluded.{col}, checked_at=datetime('now')",
+                (node_id, is_valid)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def save_products(products: list):
@@ -315,6 +344,9 @@ def process_node(node: dict, lists: list, review_max: int,
             with _stats_lock:
                 _stats["errors"] += 1
             continue
+
+        # 顺手写入榜单有效性（合并 check_links 逻辑）
+        save_link_validity(node_id, list_type, 1 if r.status_code == 200 else 0)
 
         if r.status_code != 200:
             continue

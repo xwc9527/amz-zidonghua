@@ -26,9 +26,10 @@ DELAY_PRODUCT_MIN = 2.5   # 产品详情页最小延迟（风险更高）
 DELAY_PRODUCT_MAX = 4.5   # 产品详情页最大延迟
 
 # ── 阶段1：类目树 ─────────────────────────────────────────────────
-CATEGORIES_FILE    = os.path.join(DATA_DIR, "categories.json")   # 旧，保留兼容
-DB_FILE            = os.path.join(DATA_DIR, "categories.db")      # 新，主存储
+DB_FILE            = os.path.join(DATA_DIR, "categories.db")
 NEW_RELEASES_ROOT  = "https://www.amazon.com/gp/new-releases/"
+AMAZON_DOMAIN      = "https://www.amazon.com"   # 换站时只改这一处
+
 
 # ── 阶段2：新品榜扫描 ─────────────────────────────────────────────
 RAW_PRODUCTS_FILE  = os.path.join(DATA_DIR, "raw_products.json")
@@ -47,6 +48,11 @@ EXCEL_FILE         = os.path.join(OUTPUT_DIR, "候选品.xlsx")
 # 精细过滤条件
 FILTER_COMPETITION_MAX = 5000
 FILTER_REVIEWS_FINAL   = 50
+
+# ── 代理池（start_lb_proxy.py 生成的 proxy_pool.json）────────────────
+PROXY_ENABLED   = True
+PROXY_POOL_FILE = os.path.join(DATA_DIR, "proxy_pool.json")
+PROXY_VERIFY    = False
 
 # ── 阶段5：商品抓取（榜单批量扫描）─────────────────────────────────
 # 目标 L1 类目 slug（对应 URL 中 /gp/xxx/{slug}/ 部分）
