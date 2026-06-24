@@ -25,10 +25,63 @@ DELAY_MAX = 4.0   # 类目页最大延迟
 DELAY_PRODUCT_MIN = 2.5   # 产品详情页最小延迟（风险更高）
 DELAY_PRODUCT_MAX = 4.5   # 产品详情页最大延迟
 
+# ── 多站点配置 ────────────────────────────────────────────────────
+MARKETPLACES = {
+    "US": {
+        "domain": "https://www.amazon.com",
+        "lang":   "en-US,en;q=0.9",
+        "name":   "美国站",
+        "currency": "$",
+        "decimal_sep": ".",
+        "rating_pattern": r"([\d.]+)\s+out",
+        "results_pattern": r"of\s+([\d,]+)\s+results?",
+    },
+    "DE": {
+        "domain": "https://www.amazon.de",
+        "lang":   "de-DE,de;q=0.9,en;q=0.5",
+        "name":   "德国站",
+        "currency": "€",
+        "decimal_sep": ",",
+        "rating_pattern": r"([\d,]+)\s+von",
+        "results_pattern": r"([\d.]+)\s+Ergebnisse",
+    },
+    "JP": {
+        "domain": "https://www.amazon.co.jp",
+        "lang":   "ja-JP,ja;q=0.9,en;q=0.5",
+        "name":   "日本站",
+        "currency": "¥",
+        "decimal_sep": ".",
+        "rating_pattern": r"5つ星のうち([\d.]+)",
+        "results_pattern": r"([\d,]+)\s*件中",
+    },
+    "UK": {
+        "domain": "https://www.amazon.co.uk",
+        "lang":   "en-GB,en;q=0.9",
+        "name":   "英国站",
+        "currency": "£",
+        "decimal_sep": ".",
+        "rating_pattern": r"([\d.]+)\s+out",
+        "results_pattern": r"of\s+([\d,]+)\s+results?",
+    },
+    "FR": {
+        "domain": "https://www.amazon.fr",
+        "lang":   "fr-FR,fr;q=0.9,en;q=0.5",
+        "name":   "法国站",
+        "currency": "€",
+        "decimal_sep": ",",
+        "rating_pattern": r"([\d,]+)\s+sur",
+        "results_pattern": r"([\d\s]+)\s+résultats?",
+    },
+}
+
+def get_marketplace(site: str = "US") -> dict:
+    site = site.upper()
+    if site not in MARKETPLACES:
+        raise ValueError(f"未知站点: {site}，可选: {', '.join(MARKETPLACES)}")
+    return MARKETPLACES[site]
+
 # ── 阶段1：类目树 ─────────────────────────────────────────────────
 DB_FILE            = os.path.join(DATA_DIR, "categories.db")
-NEW_RELEASES_ROOT  = "https://www.amazon.com/gp/new-releases/"
-AMAZON_DOMAIN      = "https://www.amazon.com"   # 换站时只改这一处
 
 
 # ── 阶段2：新品榜扫描 ─────────────────────────────────────────────
@@ -55,9 +108,6 @@ PROXY_POOL_FILE = os.path.join(DATA_DIR, "proxy_pool.json")
 PROXY_VERIFY    = False
 
 # ── 阶段5：商品抓取（榜单批量扫描）─────────────────────────────────
-# 目标 L1 类目 slug（对应 URL 中 /gp/xxx/{slug}/ 部分）
-PRODUCT_TARGET_L1 = ["home-garden", "kitchen"]
-
 # 通用筛选条件（看板 UI 可覆盖）
 PRODUCT_REVIEW_MAX    = 10    # 评论数上限（< 此值才录入）
 PRODUCT_MIN_LIST_SIZE = 100   # 榜单最少商品数（活体检测）

@@ -118,22 +118,26 @@ async def stats():
 # ── 类目树 ──
 
 @app.get("/api/v2/tree_children")
-async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: int = 0):
+async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: int = 0, site: str = "US"):
     limit = min(limit, 200)
+    site = site.upper()
     if DB_BACKEND == "pg":
-        return await _tree_children_pg(parent, q, limit, offset)
+        return await _tree_children_pg(parent, q, limit, offset, site)
     else:
         return await _tree_children_sqlite(parent, q, limit, offset)
 
-async def _tree_children_pg(parent, q, limit, offset):
+async def _tree_children_pg(parent, q, limit, offset, site="US"):
     if parent == "root":
-        total = await pg_scalar("SELECT COUNT(*) FROM categories")
-        return [{"name": "All Categories", "node_id": "home-garden", "depth": 0, "child_count": total}]
-    elif parent == "home-garden":
+        total = await pg_scalar("SELECT COUNT(*) FROM categories WHERE site = $1", site)
+        root_rows = await pg_query("SELECT node_id, name FROM categories WHERE depth = 0 AND site = $1", site)
+        if root_rows:
+            return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in root_rows]
+        return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
+    elif (await pg_scalar("SELECT COUNT(*) FROM categories WHERE node_id=$1 AND depth=0 AND site=$2", parent, site)) > 0:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug,
                  (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
-                 FROM categories c WHERE c.depth = 1"""
-        args = []
+                 FROM categories c WHERE c.depth = 1 AND c.site = $1"""
+        args = [site]
         if q:
             sql += " AND (c.name ILIKE $" + str(len(args)+1) + " OR c.name % $" + str(len(args)+1) + ")"
             args.append(f"%{q}%")
@@ -146,12 +150,12 @@ async def _tree_children_pg(parent, q, limit, offset):
     else:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug,
                  (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
-                 FROM categories c WHERE c.parent_node_id = $1"""
-        args = [parent]
+                 FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
+        args = [parent, site]
         if q:
-            sql += " AND (c.name ILIKE $2 OR c.name % $2)"
+            sql += " AND (c.name ILIKE $3 OR c.name % $3)"
             args.append(f"%{q}%")
-            sql += " ORDER BY similarity(c.name, $2) DESC"
+            sql += " ORDER BY similarity(c.name, $3) DESC"
         else:
             sql += " ORDER BY c.name"
         sql += f" LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
@@ -161,8 +165,11 @@ async def _tree_children_pg(parent, q, limit, offset):
 async def _tree_children_sqlite(parent, q, limit, offset):
     if parent == "root":
         total = await _sqlite_scalar("SELECT COUNT(*) FROM categories")
-        return [{"name": "Home & Kitchen", "node_id": "home-garden", "depth": 0, "child_count": total}]
-    elif parent == "home-garden":
+        roots = await _sqlite_query("SELECT name, node_id FROM categories WHERE depth = 0 LIMIT 10")
+        if roots:
+            return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in roots]
+        return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
+    elif (await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE node_id = ? AND depth = 0", (parent,))) > 0:
         sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 1"
         params = []
         if q:
@@ -185,16 +192,21 @@ async def _tree_children_sqlite(parent, q, limit, offset):
 async def products(limit: int = Query(50, le=200), offset: int = 0,
                    price_min: float = None, price_max: float = None,
                    rating_min: float = None, rating_max: float = None,
-                   review_min: int = None, review_max: int = None):
+                   review_min: int = None, review_max: int = None,
+                   site: str = None):
     if DB_BACKEND == "pg":
-        return await _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
+        return await _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max, site)
     else:
         return await _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
 
-async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max):
-    sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, scraped_at FROM product_sightings WHERE 1=1"
+async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max, site=None):
+    sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, site, scraped_at FROM product_sightings WHERE 1=1"
     args = []
     idx = 1
+    if site:
+        sql += f" AND site = ${idx}"
+        args.append(site.upper())
+        idx += 1
     for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
                           (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
                           (review_min, ">=", "review_count"), (review_max, "<=", "review_count")]:
@@ -273,6 +285,8 @@ async def start_products(body: dict):
             return {"status": "error", "msg": "no slugs or roots specified"}
         if body.get("lists"):
             cmd += ["--lists"] + body["lists"]
+        if body.get("site"):
+            cmd += ["--site", body["site"]]
         for key, flag in [("review_max", "--review-max"), ("min_list", "--min-list"),
                           ("price_min", "--price-min"), ("price_max", "--price-max"),
                           ("delay", "--delay")]:

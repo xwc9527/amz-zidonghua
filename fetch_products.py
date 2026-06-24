@@ -14,6 +14,16 @@ BASE    = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "data", "categories.db")
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
+from config import get_marketplace
+_mp     = get_marketplace("US")
+_SITE   = "US"
+_DOMAIN = _mp["domain"]
+_LANG   = _mp["lang"]
+_CURRENCY     = _mp["currency"]
+_DECIMAL_SEP  = _mp["decimal_sep"]
+_RATING_PAT   = _mp["rating_pattern"]
+_RESULTS_PAT  = _mp["results_pattern"]
+
 # PG support
 _pg_conn = None
 def _get_pg():
@@ -174,10 +184,10 @@ def _get_nodes_by_slugs_pg(slugs):
         return []
     sql = f"""
         SELECT DISTINCT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL AND ({" OR ".join(like_clauses)})
+        WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(like_clauses)})
         ORDER BY depth, name
     """
-    result = _pg_fetchall(sql)
+    result = _pg_fetchall(sql, (_SITE,))
     print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点")
     return result
 
@@ -264,8 +274,8 @@ def _save_products_pg(products):
     sql = """
         INSERT INTO product_sightings
         (asin, name, price, review_count, rank, rating,
-         image_url, product_url, list_type, category_name)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         image_url, product_url, list_type, category_name, site)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
     saved = 0
     with _db_lock:
@@ -277,7 +287,7 @@ def _save_products_pg(products):
                     p["asin"], p.get("name"), p.get("price"),
                     p.get("review_count"), p.get("rank"), p.get("rating"),
                     p.get("image_url"), p.get("product_url"),
-                    p["list_type"], p.get("category_name"),
+                    p["list_type"], p.get("category_name"), _SITE,
                 ))
                 saved += 1
             except Exception:
@@ -288,11 +298,9 @@ def _save_products_pg(products):
 # ── HTML 解析 ───────────────────────────────────────────────────────
 
 def extract_list_total(html: str) -> int:
-    """从页面提取榜单商品总数。匹配 '1-50 of 87 results' 或 'of 100'。"""
-    m = re.search(r'of\s+([\d,]+)\s+results?', html, re.IGNORECASE)
+    m = re.search(_RESULTS_PAT, html, re.IGNORECASE)
     if m:
-        return int(m.group(1).replace(",", ""))
-    # 备选：找 zg 标题区域的数字
+        return int(m.group(1).replace(",", "").replace(".", "").replace(" ", ""))
     m2 = re.search(r'showing\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)', html, re.IGNORECASE)
     if m2:
         return int(m2.group(1).replace(",", ""))
@@ -324,7 +332,7 @@ def parse_products(html: str, node_id: str, category_name: str,
         if not m:
             continue
         p["asin"] = m.group(1)
-        p["product_url"] = ("https://www.amazon.com" + href) if href.startswith("/") else href
+        p["product_url"] = (_DOMAIN + href) if href.startswith("/") else href
 
         # 商品名
         name_el = (item.select_one("div._cDEzb_p13n-sc-css-line-clamp-3_g3dy1")
@@ -346,7 +354,15 @@ def parse_products(html: str, node_id: str, category_name: str,
             p["price_raw"] = raw
             m_price = re.search(r"[\d,.]+", raw)
             if m_price:
-                p["price"] = float(m_price.group().replace(",", ""))
+                price_str = m_price.group()
+                if _DECIMAL_SEP == ",":
+                    price_str = price_str.replace(".", "").replace(",", ".")
+                else:
+                    price_str = price_str.replace(",", "")
+                try:
+                    p["price"] = float(price_str)
+                except ValueError:
+                    pass
 
         # 原价
         orig_el = item.select_one(".a-text-price .a-offscreen")
@@ -362,9 +378,13 @@ def parse_products(html: str, node_id: str, category_name: str,
         rating_el = item.select_one(".a-icon-alt")
         if rating_el:
             rt = rating_el.get_text(strip=True)
-            m_rt = re.search(r"([\d.]+)\s+out", rt)
+            m_rt = re.search(_RATING_PAT, rt)
             if m_rt:
-                p["rating"] = float(m_rt.group(1))
+                raw_rating = m_rt.group(1).replace(",", ".")
+                try:
+                    p["rating"] = float(raw_rating)
+                except ValueError:
+                    pass
 
         # 评论数
         review_el = item.select_one("a.a-size-small span, span.a-size-small")
@@ -429,7 +449,7 @@ def process_node(node: dict, lists: list, review_max: int,
 
     for list_type in lists:
         # 检查该节点对应榜单是否有效（从 URL 前缀构建）
-        url_p1 = f"https://www.amazon.com/gp/{list_type}/{slug}/{node_id}/"
+        url_p1 = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
 
         try:
             r = session.get(url_p1, timeout=15)
@@ -504,12 +524,13 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         return
 
     session = requests.Session()
-    session.headers.update(HEADERS)
+    session.headers.update({**HEADERS, "Accept-Language": _LANG})
 
     t0 = time.time()
     price_info = ""
     if price_min > 0 or price_max > 0:
-        price_info = f" 价格${price_min:.0f}-${price_max:.0f}" if price_max > 0 else f" 价格>${price_min:.0f}"
+        c = _CURRENCY
+        price_info = f" 价格{c}{price_min:.0f}-{c}{price_max:.0f}" if price_max > 0 else f" 价格>{c}{price_min:.0f}"
     print(f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单, "
           f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s",
           flush=True)
@@ -607,6 +628,7 @@ if __name__ == "__main__":
                        help="根节点 node_id 列表")
     group.add_argument("--slugs", nargs="+",
                        help="L1 类目 slug 列表 (如 automotive baby-products)")
+    parser.add_argument("--site", default="US", help="站点代码: US, DE, JP, UK, FR")
     parser.add_argument("--review-max", type=int, default=DEFAULT_REVIEW_MAX)
     parser.add_argument("--min-list",   type=int, default=DEFAULT_MIN_LIST_SIZE)
     parser.add_argument("--price-min",  type=float, default=DEFAULT_PRICE_MIN)
@@ -614,6 +636,16 @@ if __name__ == "__main__":
     parser.add_argument("--delay",      type=float, default=DEFAULT_DELAY)
     parser.add_argument("--lists", nargs="+", default=DEFAULT_LISTS)
     args = parser.parse_args()
+
+    mp = get_marketplace(args.site)
+    _SITE   = args.site.upper()
+    _DOMAIN = mp["domain"]
+    _LANG   = mp["lang"]
+    _CURRENCY    = mp["currency"]
+    _DECIMAL_SEP = mp["decimal_sep"]
+    _RATING_PAT  = mp["rating_pattern"]
+    _RESULTS_PAT = mp["results_pattern"]
+    print(f"[站点] {mp['name']} ({_SITE}) → {_DOMAIN}")
 
     run_batch(
         root_ids=args.roots or [],

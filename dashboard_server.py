@@ -437,13 +437,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         search = qs.get("q", [""])[0]
         if parent == "root":
             total = db_scalar("SELECT COUNT(*) FROM categories")
-            return [{
-                "name": "Home & Kitchen",
-                "node_id": "home-garden",
-                "depth": 0,
-                "child_count": total,
-            }]
-        elif parent == "home-garden":
+            roots = db_query("SELECT name, node_id FROM categories WHERE depth = 0 LIMIT 10")
+            if roots:
+                return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in roots]
+            return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
+        elif db_scalar("SELECT COUNT(*) FROM categories WHERE node_id = ? AND depth = 0", (parent,)) > 0:
             sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.depth = 1"
             params = []
             if search:
@@ -555,6 +553,8 @@ def _start_product_scraper(params: dict):
             cmd += ["--roots"] + params["roots"]
         else:
             return {"status": "error", "msg": "no slugs or roots specified"}
+        if params.get("site"):
+            cmd += ["--site", params["site"]]
         if params.get("lists"):
             cmd += ["--lists"] + params["lists"]
         if params.get("review_max"):

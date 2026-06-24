@@ -17,9 +17,15 @@ urllib3.disable_warnings()
 from bs4 import BeautifulSoup
 
 from config import (
-    HEADERS, DATA_DIR, DB_FILE, AMAZON_DOMAIN, PROXY_POOL_FILE,
-    PROXY_ENABLED, PROXY_VERIFY,
+    HEADERS, DATA_DIR, DB_FILE, PROXY_POOL_FILE,
+    PROXY_ENABLED, PROXY_VERIFY, get_marketplace,
 )
+
+# 运行时站点配置（由 CLI --site 设置）
+_mp     = get_marketplace("US")
+_SITE   = "US"
+_DOMAIN = _mp["domain"]
+_LANG   = _mp["lang"]
 
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -97,15 +103,19 @@ def _db_batch_insert(nodes: list[dict]) -> int:
     with _db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("ALTER TABLE categories ADD COLUMN site TEXT DEFAULT 'US'")
+        except sqlite3.OperationalError:
+            pass
         added = 0
         for n in nodes:
             cur = conn.execute(
                 "INSERT OR IGNORE INTO categories "
-                "(name, url, node_id, depth, source, explored, parent_node_id, slug) "
-                "VALUES(?, ?, ?, ?, ?, 1, ?, ?)",
+                "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
+                "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)",
                 (n["name"], normalize_url(n["url"]), n.get("node_id"),
                  n.get("depth", 0), n.get("source", "subtree"),
-                 n.get("parent_node_id"), n.get("slug", ""))
+                 n.get("parent_node_id"), n.get("slug", ""), _SITE)
             )
             added += cur.rowcount
         conn.commit()
@@ -206,7 +216,7 @@ def parse_sidebar_children(html: str, page_url: str, **_kwargs) -> list[dict]:
         if not name or not href or name.isdigit():
             continue
         if href.startswith("/"):
-            href = AMAZON_DOMAIN + href
+            href = _DOMAIN + href
         href = normalize_url(href)
         url_slug = extract_slug(href)
         if href in seen:
@@ -277,16 +287,21 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     """多 worker 并发 BFS 抓取一个 L1 大类子树，每 100 条写入 DB。"""
     num_workers = len(proxy_entries) if proxy_entries else 1
 
-    # 从 DB 加载已有节点（支持续跑 + 补全）
+    # 从 DB 加载已有节点（支持续跑 + 补全，按站点过滤）
     conn = sqlite3.connect(DB_FILE, timeout=10)
+    try:
+        conn.execute("ALTER TABLE categories ADD COLUMN site TEXT DEFAULT 'US'")
+    except sqlite3.OperationalError:
+        pass
     existing = conn.execute(
-        "SELECT url, node_id, name, depth FROM categories WHERE node_id IS NOT NULL"
+        "SELECT url, node_id, name, depth FROM categories WHERE node_id IS NOT NULL AND site = ?",
+        (_SITE,)
     ).fetchall()
     conn.close()
     visited_urls = set()
     visited_ids  = {r[1] for r in existing if r[1]}
 
-    root_url = normalize_url(f"{AMAZON_DOMAIN}/gp/new-releases/{slug}/")
+    root_url = normalize_url(f"{_DOMAIN}/gp/new-releases/{slug}/")
     task_q = Queue()
 
     if existing:
@@ -324,7 +339,7 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     def bfs_worker(proxy_entry, worker_id):
         session = requests.Session()
         ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
-        session.headers.update({**HEADERS, "User-Agent": ua})
+        session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": _LANG})
         if proxy_entry:
             session.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
 
@@ -352,7 +367,7 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                 node_slug = extract_slug(url) or slug
                 node_req_count = 0
                 for prefix in CHART_PREFIXES:
-                    chart_url = normalize_url(f"{AMAZON_DOMAIN}{prefix}{node_slug}/{node_nid}/") if node_nid else url
+                    chart_url = normalize_url(f"{_DOMAIN}{prefix}{node_slug}/{node_nid}/") if node_nid else url
                     node_req_count += 1
                     html = _safe_get(session, chart_url)
                     with lock:
@@ -475,7 +490,8 @@ def run_breadcrumb():
     conn.row_factory = sqlite3.Row
     all_nodes = [dict(r) for r in conn.execute(
         "SELECT name, url, node_id, depth, slug, parent_node_id, breadcrumb_checked "
-        "FROM categories WHERE node_id IS NOT NULL"
+        "FROM categories WHERE node_id IS NOT NULL AND site = ?",
+        (_SITE,)
     ).fetchall()]
     conn.close()
 
@@ -537,7 +553,7 @@ def run_breadcrumb():
                 parent_slug = parent_node.get("slug", "") if parent_node else ""
                 new_node = {
                     "name": crumb["name"],
-                    "url": normalize_url(f"{AMAZON_DOMAIN}/gp/new-releases/{parent_slug}/{nid}/"),
+                    "url": normalize_url(f"{_DOMAIN}/gp/new-releases/{parent_slug}/{nid}/"),
                     "node_id": nid,
                     "slug": parent_slug,
                     "depth": depth,
@@ -554,7 +570,7 @@ def run_breadcrumb():
     def collect_worker(proxy_entry, worker_id):
         session = requests.Session()
         ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
-        session.headers.update({**HEADERS, "User-Agent": ua})
+        session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": _LANG})
         session.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
 
         while True:
@@ -569,7 +585,7 @@ def run_breadcrumb():
                 node_asins = []
 
                 for prefix in CHART_PREFIXES:
-                    chart_url = normalize_url(f"{AMAZON_DOMAIN}{prefix}{leaf_slug}/{leaf_nid}/")
+                    chart_url = normalize_url(f"{_DOMAIN}{prefix}{leaf_slug}/{leaf_nid}/")
                     html = _safe_get(session, chart_url)
                     with lock:
                         if html:
@@ -606,7 +622,7 @@ def run_breadcrumb():
     def asin_worker(proxy_entry, worker_id):
         session = requests.Session()
         ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
-        session.headers.update({**HEADERS, "User-Agent": ua})
+        session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": _LANG})
         session.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
 
         node_crumbs = {}  # leaf_nid -> [crumbs_list]
@@ -620,7 +636,7 @@ def run_breadcrumb():
                 continue
 
             try:
-                prod_html = _safe_get(session, f"{AMAZON_DOMAIN}/dp/{asin}")
+                prod_html = _safe_get(session, f"{_DOMAIN}/dp/{asin}")
                 with lock:
                     bc_proxy_stats[worker_id]["asins"] += 1
                     if prod_html:
@@ -729,9 +745,13 @@ def run_breadcrumb():
 # 主入口
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False):
-    pool = ProxyPool()
-    entries = pool.all_entries()
+def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False, no_proxy: bool = False):
+    if no_proxy:
+        entries = []
+        print("[pool] 代理已禁用，使用直连 (1 worker)")
+    else:
+        pool = ProxyPool()
+        entries = pool.all_entries()
 
     for slug in slugs:
         print(f"\n{'='*50}")
@@ -752,43 +772,107 @@ def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False):
     print(f"\n完成! DB 总计: {total} 个节点")
 
 
-ALL_L1_SLUGS = [
-    "amazon-devices", "appliances", "arts-crafts", "automotive",
-    "baby-products", "beauty", "books", "camera-photo",
-    "cell-phones-accessories", "clothing-shoes-jewelry", "collectible-coins",
-    "computers-accessories", "digital-music", "electronics",
-    "entertainment-collectibles", "gift-cards", "grocery",
-    "handmade-products", "health-personal-care", "home-garden",
-    "industrial-scientific", "kindle-store", "kitchen",
-    "movies-tv", "musical-instruments", "office-products",
-    "patio-lawn-garden", "pet-supplies", "software",
-    "sports-outdoors", "tools-home-improvement", "toys-games",
-    "unique-finds", "video-games",
-]
+SKIP_SLUG_KEYWORDS = {
+    "books", "book", "buch", "fremdsprachig", "lesen",
+    "digital", "kindle", "audible", "ebook", "e-book", "digital-text",
+    "dmusic", "music-artist", "music",
+    "movie", "movies", "film", "dvd", "blu-ray", "prime-video", "instant-video",
+    "videogames", "video-games", "videospiele", "game-download",
+    "software", "mobile-apps",
+    "gift-card", "gift-cards", "geschenkgut",
+    "amazon-devices", "amazon-renewed", "amazon-warehouse",
+    "collectible-coins", "entertainment-collectibles", "unique-finds",
+    "handmade",
+    "boost",
+}
+
+KEEP_SLUG_KEYWORDS = {
+    "musical-instruments", "musikinstrumente",
+    "appliances", "elektro-grossgerate",
+}
+
+
+def _is_skip_slug(slug: str) -> bool:
+    slug_lower = slug.lower()
+    for kw in KEEP_SLUG_KEYWORDS:
+        if kw in slug_lower:
+            return False
+    for kw in SKIP_SLUG_KEYWORDS:
+        if kw in slug_lower:
+            return True
+    return False
+
+
+def discover_l1_slugs(domain: str, lang: str) -> list[str]:
+    session = requests.Session()
+    ua = USER_AGENTS[0]
+    session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": lang})
+    url = f"{domain}/gp/new-releases/"
+    html = _safe_get(session, url)
+    if not html:
+        print(f"[discover] 无法访问 {url}，尝试 bestsellers 入口", flush=True)
+        html = _safe_get(session, f"{domain}/gp/bestsellers/")
+    if not html:
+        print("[discover] 无法获取根页面", flush=True)
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    root_ul = soup.select_one("ul[class*='zg-browse-root']")
+    if not root_ul:
+        root_ul = soup.select_one("#zg_browseRoot")
+    if not root_ul:
+        print("[discover] 未找到侧边栏类目列表", flush=True)
+        return []
+    slugs = []
+    for a in root_ul.select("a[href]"):
+        href = a.get("href", "")
+        slug = extract_slug(href)
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    print(f"[discover] 从页面发现 {len(slugs)} 个 L1 类目", flush=True)
+    filtered = [s for s in slugs if not _is_skip_slug(s)]
+    skipped = [s for s in slugs if _is_skip_slug(s)]
+    if skipped:
+        print(f"[discover] 过滤掉 {len(skipped)} 个非标类目: {', '.join(skipped)}", flush=True)
+    print(f"[discover] 保留 {len(filtered)} 个实体商品类目: {', '.join(filtered)}", flush=True)
+    return filtered
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="按需抓取 Amazon 类目子树")
     parser.add_argument("slugs", nargs="*", help="L1 大类 slug")
-    parser.add_argument("--all", action="store_true", help="抓取所有 L1 大类")
+    parser.add_argument("--site", default="US", help="站点代码: US, DE, JP, UK, FR")
+    parser.add_argument("--all", action="store_true", help="抓取所有 L1 大类（仅 US）")
     parser.add_argument("--max-depth", type=int, default=99)
     parser.add_argument("--skip-breadcrumb", action="store_true",
                         help="仅 BFS，跳过面包屑")
     parser.add_argument("--breadcrumb-only", action="store_true",
                         help="仅面包屑补全（多 worker 并发）")
+    parser.add_argument("--no-proxy", action="store_true",
+                        help="禁用代理池，直连")
     args = parser.parse_args()
+
+    mp = get_marketplace(args.site)
+    _SITE   = args.site.upper()
+    _DOMAIN = mp["domain"]
+    _LANG   = mp["lang"]
+    print(f"[站点] {mp['name']} ({_SITE}) → {_DOMAIN}")
 
     if args.breadcrumb_only:
         run_breadcrumb()
         sys.exit(0)
 
     if args.all:
-        slugs = ALL_L1_SLUGS
+        slugs = discover_l1_slugs(_DOMAIN, _LANG)
+        if not slugs:
+            print(f"[{_SITE}] 自动发现失败，请手动指定 slug")
+            sys.exit(1)
     elif args.slugs:
         slugs = args.slugs
     else:
-        print("用法: python fetch_subtree.py home-garden")
-        print("      python fetch_subtree.py --breadcrumb-only")
+        print("用法: python fetch_subtree.py home-garden --site US")
+        print("      python fetch_subtree.py kuche-haushalt-wohnen --site DE")
+        print("      python fetch_subtree.py --breadcrumb-only --site JP")
         print("      python fetch_subtree.py --all")
         sys.exit(1)
 
-    run(slugs, max_depth=args.max_depth, skip_breadcrumb=args.skip_breadcrumb)
+    run(slugs, max_depth=args.max_depth, skip_breadcrumb=args.skip_breadcrumb,
+        no_proxy=args.no_proxy)
