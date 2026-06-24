@@ -9,6 +9,7 @@ fetch_subtree.py — 按需抓取类目子树（多 worker 并发 + 端口池）
 """
 import json, os, re, sys, time, random, sqlite3, threading, argparse
 from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -287,15 +288,18 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     """多 worker 并发 BFS 抓取一个 L1 大类子树，每 100 条写入 DB。"""
     num_workers = len(proxy_entries) if proxy_entries else 1
 
-    # 从 DB 加载已有节点（支持续跑 + 补全，按站点过滤）
+    # 从 DB 加载当前 slug 子树的已有节点（支持续跑 + 补全）
     conn = sqlite3.connect(DB_FILE, timeout=10)
     try:
         conn.execute("ALTER TABLE categories ADD COLUMN site TEXT DEFAULT 'US'")
     except sqlite3.OperationalError:
         pass
+    slug_patterns = [f"%/gp/{p.strip('/')}/{slug}/%" for p in CHART_PREFIXES]
+    like_clauses = " OR ".join(["url LIKE ?"] * len(slug_patterns))
     existing = conn.execute(
-        "SELECT url, node_id, name, depth FROM categories WHERE node_id IS NOT NULL AND site = ?",
-        (_SITE,)
+        f"SELECT url, node_id, name, depth FROM categories "
+        f"WHERE node_id IS NOT NULL AND site = ? AND ({like_clauses})",
+        [_SITE] + slug_patterns
     ).fetchall()
     conn.close()
     visited_urls = set()
@@ -305,10 +309,24 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     task_q = Queue()
 
     if existing:
-        # 已有节点：重新入队展开子节点，但子节点去重靠 visited_ids
+        existing_ids = {r[1] for r in existing if r[1]}
+        child_parent_ids = set()
+        conn2 = sqlite3.connect(DB_FILE, timeout=10)
+        for r in conn2.execute(
+            f"SELECT DISTINCT parent_node_id FROM categories "
+            f"WHERE parent_node_id IS NOT NULL AND site = ? AND ({like_clauses})",
+            [_SITE] + slug_patterns
+        ).fetchall():
+            child_parent_ids.add(r[0])
+        conn2.close()
+        enqueued = 0
         for url, node_id, name, depth in existing:
-            task_q.put({"url": url, "name": name, "node_id": node_id, "depth": depth, "parent_node_id": None})
-        print(f"  [{slug}] 从 DB 加载 {len(existing)} 个节点重新展开", flush=True)
+            is_parent = node_id in child_parent_ids
+            if not is_parent:
+                task_q.put({"url": url, "name": name, "node_id": node_id, "depth": depth, "parent_node_id": None})
+                enqueued += 1
+        skipped = len(existing) - enqueued
+        print(f"  [{slug}] DB {len(existing)} 节点, 跳过 {skipped} 个已展开父节点, 入队 {enqueued} 个待探索", flush=True)
     else:
         task_q.put({"url": root_url, "name": slug, "node_id": None, "depth": 0, "parent_node_id": None})
     visited_urls.add(root_url)
@@ -366,27 +384,36 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                 node_nid = node.get("node_id")
                 node_slug = extract_slug(url) or slug
                 node_req_count = 0
-                for prefix in CHART_PREFIXES:
-                    chart_url = normalize_url(f"{_DOMAIN}{prefix}{node_slug}/{node_nid}/") if node_nid else url
-                    node_req_count += 1
-                    html = _safe_get(session, chart_url)
-                    with lock:
-                        bfs_stats["requests_made"] += 1
-                        if html:
-                            bfs_stats["requests_ok"] += 1
-                            proxy_stats[worker_id]["ok"] += 1
-                        else:
-                            bfs_stats["requests_fail"] += 1
-                            proxy_stats[worker_id]["fail"] += 1
-                    if not html:
-                        continue
-                    found = parse_sidebar_children(html, chart_url)
-                    for c in found:
-                        cid = c.get("node_id")
-                        if cid and cid not in seen_child_ids:
-                            seen_child_ids.add(cid)
-                            all_children.append(c)
-                    time.sleep(random.uniform(0.3, 0.6))
+
+                if node_nid:
+                    chart_urls = [normalize_url(f"{_DOMAIN}{p}{node_slug}/{node_nid}/") for p in CHART_PREFIXES]
+                else:
+                    chart_urls = [url]
+
+                def _fetch_one(u):
+                    return u, _safe_get(session, u)
+
+                with ThreadPoolExecutor(max_workers=len(chart_urls)) as pool_ex:
+                    futures = {pool_ex.submit(_fetch_one, u): u for u in chart_urls}
+                    for fut in as_completed(futures):
+                        chart_url, html = fut.result()
+                        node_req_count += 1
+                        with lock:
+                            bfs_stats["requests_made"] += 1
+                            if html:
+                                bfs_stats["requests_ok"] += 1
+                                proxy_stats[worker_id]["ok"] += 1
+                            else:
+                                bfs_stats["requests_fail"] += 1
+                                proxy_stats[worker_id]["fail"] += 1
+                        if not html:
+                            continue
+                        found = parse_sidebar_children(html, chart_url)
+                        for c in found:
+                            cid = c.get("node_id")
+                            if cid and cid not in seen_child_ids:
+                                seen_child_ids.add(cid)
+                                all_children.append(c)
 
                 if not all_children and not node_nid:
                     html = _safe_get(session, url)
@@ -433,7 +460,7 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                                     for wid, ps in sorted(proxy_stats.items())]
                         print(f"  [{ts}] 🌐 IP池  " + "  ".join(ip_parts), flush=True)
 
-                time.sleep(random.uniform(0.8, 1.5))
+                time.sleep(random.uniform(0.3, 0.8))
                 if new_count > 0 or depth <= 1:
                     ts = time.strftime("%H:%M:%S")
                     print(f"  [{ts}] [W{worker_id}] L{depth} {node['name']}  子+{new_count}  请求×{node_req_count}  队列:{task_q.qsize()}  总:{total_found[0]}", flush=True)
