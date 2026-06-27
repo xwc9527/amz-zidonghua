@@ -3,12 +3,25 @@ fetch_products.py — 商品抓取脚本（独立进程）
 从 categories.db 读取有效节点，抓取 3 个 SSR 榜单的商品数据
 用法: python fetch_products.py
 """
-import sqlite3, requests, threading, time, sys, os, re, json, argparse
+import sqlite3, requests, threading, time, sys, os, re, json, argparse, logging, traceback
 from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# ── 日志 ──────────────────────────────────────────────────────────
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fetch_products.log")
+_log = logging.getLogger("fetch_products")
+_log.setLevel(logging.DEBUG)
+_fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setLevel(logging.INFO)
+_sh.setFormatter(logging.Formatter("%(message)s"))
+_log.addHandler(_fh)
+_log.addHandler(_sh)
 
 # ── 配置 ────────────────────────────────────────────────────────────
 BASE    = os.path.dirname(os.path.abspath(__file__))
@@ -151,7 +164,7 @@ def get_descendant_nodes(root_ids: list, lists: list) -> list:
     rows = conn.execute(sql, root_ids).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
-    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
+    _log.info(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
     return result
 
 
@@ -176,7 +189,7 @@ def _get_descendant_nodes_pg(root_ids):
         ORDER BY depth DESC, name
     """
     result = _pg_fetchall(sql, params)
-    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先）")
+    _log.info(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -202,7 +215,7 @@ def get_nodes_by_slugs(slugs: list, lists: list) -> list:
     rows = conn.execute(sql).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
-    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
+    _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -220,7 +233,7 @@ def _get_nodes_by_slugs_pg(slugs):
         ORDER BY depth DESC, name
     """
     result = _pg_fetchall(sql, (_SITE,))
-    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
+    _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -322,8 +335,10 @@ def _save_products_pg(products):
                     p["list_type"], p.get("category_name"), _SITE,
                 ))
                 saved += 1
-            except Exception:
+            except sqlite3.IntegrityError:
                 pass
+            except Exception:
+                _log.debug(f"save_products 写入失败 asin={p.get('asin')}: {traceback.format_exc()}")
     return saved
 
 
@@ -486,7 +501,7 @@ def parse_products(html: str, node_id: str, category_name: str,
     return products
 
 
-print("[fetch_products] 模块加载完成", flush=True)
+_log.info("[fetch_products] 模块加载完成")
 
 
 # ── 详情页解析 ─────────────────────────────────────────────────────
@@ -779,8 +794,12 @@ def enrich_with_details(products: list, session: requests.Session,
                 finally:
                     conn.close()
             p.update(detail)
+        except requests.RequestException as e:
+            _log.warning(f"  [detail] {asin} 网络异常: {e}")
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
-            print(f"  [detail] {asin} 失败: {e}", flush=True)
+            _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
         time.sleep(delay)
 
 
@@ -804,7 +823,8 @@ def process_node(node: dict, lists: list, review_max: int,
 
         try:
             r = session.get(url_base, timeout=15)
-        except Exception as e:
+        except requests.RequestException as e:
+            _log.warning(f"  [node] {node_id} 列表页请求失败: {e}")
             with _stats_lock:
                 _stats["errors"] += 1
             continue
@@ -840,7 +860,8 @@ def process_node(node: dict, lists: list, review_max: int,
                         review_min, rating_min, rating_max
                     )
                 time.sleep(delay)
-            except Exception:
+            except requests.RequestException as e:
+                _log.warning(f"  [node] {node_id} 翻页pg={pg}失败: {e}")
                 break
 
         with _stats_lock:
@@ -875,7 +896,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         _seen_asins.clear()
 
     if not nodes:
-        print("[fetch_products] 无目标节点，退出", flush=True)
+        _log.warning("[fetch_products] 无目标节点，退出")
         return
 
     session = requests.Session()
@@ -886,7 +907,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     if price_min > 0 or price_max > 0:
         c = _CURRENCY
         price_info = f" 价格{c}{price_min:.0f}-{c}{price_max:.0f}" if price_max > 0 else f" 价格>{c}{price_min:.0f}"
-    print(f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单, "
+    _log.info(f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单, "
           f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s",
           flush=True)
 
@@ -900,20 +921,20 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         if n % 10 == 0 or n == total:
             elapsed = time.time() - t0
             rate = n / elapsed if elapsed > 0 else 0
-            print(f"  [{n}/{total}] {rate:.1f}节点/s "
+            _log.info(f"  [{n}/{total}] {rate:.1f}节点/s "
                   f"找到:{_stats['products_found']} "
                   f"录入:{_stats['products_saved']} "
-                  f"跳过:{_stats['skipped']}", flush=True)
+                  f"跳过:{_stats['skipped']}")
 
     elapsed = time.time() - t0
-    print(f"\n[fetch_products] 完成！")
-    print(f"  耗时: {elapsed:.0f}s")
-    print(f"  节点: {_stats['done_nodes']}/{_stats['total_nodes']}")
-    print(f"  找到: {_stats['products_found']} 个符合条件商品")
-    print(f"  录入: {_stats['products_saved']} 条（去重后）")
-    print(f"  跳过: {_stats['skipped']} 个冷门榜单")
-    print(f"  去重: {_stats['products_dup']} 个重复ASIN已跳过")
-    print(f"  错误: {_stats['errors']}", flush=True)
+    _log.info(f"\n[fetch_products] 完成！"
+              f"\n  耗时: {elapsed:.0f}s"
+              f"\n  节点: {_stats['done_nodes']}/{_stats['total_nodes']}"
+              f"\n  找到: {_stats['products_found']} 个符合条件商品"
+              f"\n  录入: {_stats['products_saved']} 条（去重后）"
+              f"\n  跳过: {_stats['skipped']} 个冷门榜单"
+              f"\n  去重: {_stats['products_dup']} 个重复ASIN已跳过"
+              f"\n  错误: {_stats['errors']}")
 
     export_excel()
 
@@ -923,7 +944,7 @@ def export_excel():
     try:
         import openpyxl
     except ImportError:
-        print("[fetch_products] 需要 openpyxl: pip install openpyxl", flush=True)
+        _log.error("[fetch_products] 需要 openpyxl: pip install openpyxl")
         return
 
     if DB_BACKEND == "pg":
@@ -956,7 +977,7 @@ def export_excel():
         conn.close()
 
     if not rows:
-        print("[fetch_products] 无数据可导出", flush=True)
+        _log.warning("[fetch_products] 无数据可导出")
         return
 
     excel_path = os.path.join(BASE, "data", "products.xlsx")
@@ -974,7 +995,7 @@ def export_excel():
         ws.append(list(r))
 
     wb.save(excel_path)
-    print(f"[fetch_products] Excel 已导出: {excel_path} ({len(rows)} 行)", flush=True)
+    _log.info(f"[fetch_products] Excel 已导出: {excel_path} ({len(rows)} 行)")
 
 
 # ── CLI 入口 ────────────────────────────────────────────────────────
@@ -1032,7 +1053,7 @@ if __name__ == "__main__":
     _DECIMAL_SEP = mp["decimal_sep"]
     _RATING_PAT  = mp["rating_pattern"]
     _RESULTS_PAT = mp["results_pattern"]
-    print(f"[站点] {mp['name']} ({_SITE}) → {_DOMAIN}")
+    _log.info(f"[站点] {mp['name']} ({_SITE}) → {_DOMAIN}")
 
     detail_filters = {
         "bsr_main_min": args.bsr_main_min, "bsr_main_max": args.bsr_main_max,

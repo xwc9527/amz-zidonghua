@@ -16,12 +16,25 @@ fetch_new_arrivals.py — 最新到货商品抓取（多 worker 并发）
   python fetch_new_arrivals.py --site DE --phase1-only            # 仅跑列表页收集ASIN
 """
 
-import json, os, re, sys, time, random, sqlite3, threading, argparse
+import json, os, re, sys, time, random, sqlite3, threading, argparse, logging, traceback
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# ── 日志 ──────────────────────────────────────────────────────────
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fetch_new_arrivals.log")
+_log = logging.getLogger("fetch_new_arrivals")
+_log.setLevel(logging.DEBUG)
+_fh = logging.FileHandler(_LOG_PATH, encoding="utf-8")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+_sh = logging.StreamHandler(sys.stdout)
+_sh.setLevel(logging.INFO)
+_sh.setFormatter(logging.Formatter("%(message)s"))
+_log.addHandler(_fh)
+_log.addHandler(_sh)
 
 import requests, urllib3
 urllib3.disable_warnings()
@@ -84,9 +97,9 @@ class ProxyPool:
             for p in entries:
                 self._q.put(p)
                 self._all.append(p)
-            print(f"[pool] 加载 {len(entries)} 个代理端口")
+            _log.info(f"[pool] 加载 {len(entries)} 个代理端口")
         else:
-            print("[pool] 代理未启用，使用直连")
+            _log.info("[pool] 代理未启用，使用直连")
 
     @property
     def size(self):
@@ -236,13 +249,13 @@ def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | No
             r = session.get(url, timeout=18, verify=PROXY_VERIFY)
             if r.status_code == 200:
                 if "captcha" in r.text.lower() or "Type the characters" in r.text:
-                    print(f"    [CAPTCHA] 等待 30s 后重试", flush=True)
+                    _log.info(f"    [CAPTCHA] 等待 30s 后重试")
                     time.sleep(30 + random.uniform(0, 15))
                     continue
                 return r.text
             if r.status_code == 429:
                 wait = 60 + random.uniform(0, 30)
-                print(f"    [429] 限速 {wait:.0f}s", flush=True)
+                _log.info(f"    [429] 限速 {wait:.0f}s")
                 time.sleep(wait)
             elif r.status_code == 503:
                 time.sleep(15 + random.uniform(0, 10))
@@ -637,17 +650,17 @@ def _worker_phase2(worker_id: int, task_q: Queue, pool: ProxyPool):
 def _print_p1_progress():
     n = stats["nodes_done"]
     t = stats["nodes_total"]
-    print(f"  [P1 {n}/{t}] ASIN总={stats['asins_found']} "
+    _log.info(f"  [P1 {n}/{t}] ASIN总={stats['asins_found']} "
           f"去重={stats['asins_unique']} captcha={stats['captcha']} "
-          f"err={stats['p1_error']}", flush=True)
+          f"err={stats['p1_error']}")
 
 
 def _print_p2_progress():
     done = stats["details_ok"] + stats["details_filtered"] + stats["details_error"]
     total = stats["asins_unique"]
-    print(f"  [P2 {done}/{total}] 命中={stats['details_ok']} "
+    _log.info(f"  [P2 {done}/{total}] 命中={stats['details_ok']} "
           f"过滤={stats['details_filtered']} 信号={stats['signals']} "
-          f"入库={stats['saved']} err={stats['details_error']}", flush=True)
+          f"入库={stats['saved']} err={stats['details_error']}")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -690,13 +703,13 @@ def main():
         nodes = nodes[:args.sample]
     stats["nodes_total"] = len(nodes)
 
-    print(f"=== 最新到货抓取 [{_mp['name']}] ===")
-    print(f"节点数: {len(nodes)}, Worker数: {num_workers}, 最大翻页: {args.max_pages}")
-    print(f"过滤: 上架≤{MAX_LISTING_AGE_DAYS}天, BSR≤{MAX_BSR_MAIN_RANK}, 列表review≤{MAX_REVIEW_COUNT_LIST}")
-    print()
+    _log.info(f"=== 最新到货抓取 [{_mp['name']}] ===")
+    _log.info(f"节点数: {len(nodes)}, Worker数: {num_workers}, 最大翻页: {args.max_pages}")
+    _log.info(f"过滤: 上架≤{MAX_LISTING_AGE_DAYS}天, BSR≤{MAX_BSR_MAIN_RANK}, 列表review≤{MAX_REVIEW_COUNT_LIST}")
+    _log.info("")
 
     # ── Phase 1: 搜索列表页 ──
-    print("━━━ Phase 1: 搜索列表页收集 ASIN ━━━", flush=True)
+    _log.info("━━━ Phase 1: 搜索列表页收集 ASIN ━━━")
     t0 = time.time()
     task_q = Queue()
     for n in nodes:
@@ -709,17 +722,17 @@ def main():
             f.result()
 
     p1_time = time.time() - t0
-    print(f"\n[P1 完成] {p1_time:.0f}s — 节点={stats['nodes_done']}, "
+    _log.info(f"\n[P1 完成] {p1_time:.0f}s — 节点={stats['nodes_done']}, "
           f"ASIN总={stats['asins_found']}, 去重={stats['asins_unique']}, "
-          f"captcha={stats['captcha']}", flush=True)
+          f"captcha={stats['captcha']}")
 
     if args.phase1_only or not all_asins:
-        print("[结束] phase1-only 模式或无 ASIN")
+        _log.info("[结束] phase1-only 模式或无 ASIN")
         return
 
     # ── Phase 2: 详情页（降并发，详情页反爬更严） ──
     p2_workers = min(num_workers, max(num_workers // 2, 4))
-    print(f"\n━━━ Phase 2: {len(all_asins)} 个 ASIN 详情页解析 (worker={p2_workers}) ━━━", flush=True)
+    _log.info(f"\n━━━ Phase 2: {len(all_asins)} 个 ASIN 详情页解析 (worker={p2_workers}) ━━━")
     t1 = time.time()
     detail_q = Queue()
     for asin, info in all_asins.items():
@@ -733,15 +746,15 @@ def main():
 
     p2_time = time.time() - t1
     total_time = time.time() - t0
-    print(f"\n[P2 完成] {p2_time:.0f}s — 命中={stats['details_ok']}, "
+    _log.info(f"\n[P2 完成] {p2_time:.0f}s — 命中={stats['details_ok']}, "
           f"过滤={stats['details_filtered']}, 信号产品={stats['signals']}, "
           f"入库={stats['saved']}")
 
-    print(f"\n=== 总计 {total_time:.0f}s ===")
-    print(f"  P1: {stats['nodes_done']}节点 → {stats['asins_unique']} ASIN")
-    print(f"  P2: {stats['details_ok']}命中 / {stats['details_filtered']}过滤 / {stats['details_error']}失败")
-    print(f"  信号产品: {stats['signals']}")
-    print(f"  入库: {stats['saved']} 条")
+    _log.info(f"\n=== 总计 {total_time:.0f}s ===")
+    _log.info(f"  P1: {stats['nodes_done']}节点 → {stats['asins_unique']} ASIN")
+    _log.info(f"  P2: {stats['details_ok']}命中 / {stats['details_filtered']}过滤 / {stats['details_error']}失败")
+    _log.info(f"  信号产品: {stats['signals']}")
+    _log.info(f"  入库: {stats['saved']} 条")
 
     _export_summary()
 
@@ -758,13 +771,13 @@ def _export_summary():
     ).fetchall()
     conn.close()
 
-    print(f"\n=== DB 汇总: {total} 条记录, {signals} 个信号产品 ===")
+    _log.info(f"\n=== DB 汇总: {total} 条记录, {signals} 个信号产品 ===")
     if top:
-        print(f"\nTop 信号产品 (BSR 最优):")
+        _log.info(f"\nTop 信号产品 (BSR 最优):")
         for r in top:
             age = f"{r['listing_age_days']}天" if r["listing_age_days"] is not None else "?"
             bsr = f"#{r['bsr_main_rank']}" if r["bsr_main_rank"] else "?"
-            print(f"  {r['asin']}  {bsr:>8}  {age:>4}  rev={r['review_count']:<4} "
+            _log.info(f"  {r['asin']}  {bsr:>8}  {age:>4}  rev={r['review_count']:<4} "
                   f"{r['price'] or '?':>10}  {(r['title'] or '')[:50]}")
 
 
