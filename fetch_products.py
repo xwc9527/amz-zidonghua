@@ -178,8 +178,8 @@ def _next_proxy() -> dict | None:
     return p
 
 
-def _make_session() -> requests.Session:
-    """创建带 UA 轮换、Sec-Fetch 头、代理的 session。"""
+def _make_session(warmup: bool = True) -> requests.Session:
+    """创建带 UA 轮换、Sec-Fetch 头、代理的 session，并 warmup 拿 cookie。"""
     session = requests.Session()
     ua = random.choice(USER_AGENTS)
     session.headers.update({
@@ -190,6 +190,13 @@ def _make_session() -> requests.Session:
     proxy = _next_proxy()
     if proxy:
         session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+    if warmup:
+        try:
+            session.get(f"{_DOMAIN}/", timeout=15, verify=PROXY_VERIFY)
+            _log.info(f"[session] warmup 完成, cookies={len(session.cookies)}")
+            time.sleep(1 + random.uniform(0, 1))
+        except Exception as e:
+            _log.warning(f"[session] warmup 失败: {e}")
     return session
 
 
