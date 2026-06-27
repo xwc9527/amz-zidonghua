@@ -36,8 +36,8 @@ _sh.setFormatter(logging.Formatter("%(message)s"))
 _log.addHandler(_fh)
 _log.addHandler(_sh)
 
-import requests, urllib3
-urllib3.disable_warnings()
+from curl_cffi import requests as requests
+from curl_cffi.requests import RequestsError
 from bs4 import BeautifulSoup
 
 from config import (
@@ -226,9 +226,8 @@ def _load_nodes(site: str, depths: list[int] | None = None,
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _make_session(worker_id: int, proxy_entry: dict | None) -> requests.Session:
-    session = requests.Session()
     ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
-    session.headers.update({
+    hdrs = {
         **HEADERS,
         "User-Agent": ua,
         "Accept-Language": _LANG,
@@ -237,16 +236,18 @@ def _make_session(worker_id: int, proxy_entry: dict | None) -> requests.Session:
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
-    })
+    }
+    proxies = {}
     if proxy_entry:
-        session.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
+        proxies = {"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]}
+    session = requests.Session(impersonate="chrome124", headers=hdrs, proxies=proxies, verify=False)
     return session
 
 
 def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | None:
     for attempt in range(retries):
         try:
-            r = session.get(url, timeout=18, verify=PROXY_VERIFY)
+            r = session.get(url, timeout=18)
             if r.status_code == 200:
                 if "captcha" in r.text.lower() or "Type the characters" in r.text:
                     _log.info(f"    [CAPTCHA] 等待 30s 后重试")
@@ -261,7 +262,7 @@ def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | No
                 time.sleep(15 + random.uniform(0, 10))
             else:
                 return None
-        except requests.RequestException as e:
+        except RequestsError as e:
             wait = 5 * (2 ** attempt) + random.uniform(0, 3)
             time.sleep(wait)
     return None
@@ -269,7 +270,7 @@ def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | No
 
 def _warmup(session: requests.Session):
     try:
-        session.get(f"{_DOMAIN}/", timeout=10, verify=PROXY_VERIFY)
+        session.get(f"{_DOMAIN}/", timeout=10)
         time.sleep(1 + random.uniform(0, 1))
     except Exception:
         pass

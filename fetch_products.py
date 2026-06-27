@@ -3,8 +3,9 @@ fetch_products.py — 商品抓取脚本（独立进程）
 从 categories.db 读取有效节点，抓取 3 个 SSR 榜单的商品数据
 用法: python fetch_products.py
 """
-import sqlite3, requests, threading, time, sys, os, re, json, argparse, logging, traceback, random
-import urllib3; urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import sqlite3, threading, time, sys, os, re, json, argparse, logging, traceback, random
+from curl_cffi import requests as requests
+from curl_cffi.requests import RequestsError
 from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
@@ -126,7 +127,7 @@ def _validate_proxy_pool():
 
     local_ip = ""
     try:
-        r = requests.get("http://ip-api.com/json?fields=query", timeout=5)
+        r = requests.get("http://ip-api.com/json?fields=query", timeout=5, impersonate="chrome124")
         local_ip = r.json().get("query", "")
     except Exception:
         pass
@@ -134,7 +135,7 @@ def _validate_proxy_pool():
     def _check(entry):
         px = {"http": entry["proxy"], "https": entry["proxy"]}
         try:
-            r = requests.get(CHECK_URL, proxies=px, verify=False, timeout=12)
+            r = requests.get(CHECK_URL, proxies=px, verify=False, timeout=12, impersonate="chrome124")
             d = r.json()
             ip = d.get("query", "")
             if ip and ip != local_ip and not ip.startswith(("192.", "10.")):
@@ -180,19 +181,20 @@ def _next_proxy() -> dict | None:
 
 def _make_session(warmup: bool = True) -> requests.Session:
     """创建带 UA 轮换、Sec-Fetch 头、代理的 session，并 warmup 拿 cookie。"""
-    session = requests.Session()
     ua = random.choice(USER_AGENTS)
-    session.headers.update({
+    hdrs = {
         **HEADERS,
         "User-Agent": ua,
         "Accept-Language": _LANG,
-    })
+    }
+    proxies = {}
     proxy = _next_proxy()
     if proxy:
-        session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+        proxies = {"http": proxy["proxy"], "https": proxy["proxy"]}
+    session = requests.Session(impersonate="chrome124", headers=hdrs, proxies=proxies, verify=False)
     if warmup:
         try:
-            session.get(f"{_DOMAIN}/", timeout=15, verify=PROXY_VERIFY)
+            session.get(f"{_DOMAIN}/", timeout=15)
             _log.info(f"[session] warmup 完成, cookies={len(session.cookies)}")
             time.sleep(1 + random.uniform(0, 1))
         except Exception as e:
@@ -207,7 +209,7 @@ def _safe_get(session: requests.Session, url: str,
         session.headers["Referer"] = referer
     for attempt in range(retries):
         try:
-            r = session.get(url, timeout=18, verify=PROXY_VERIFY)
+            r = session.get(url, timeout=18)
             if r.status_code == 200:
                 if "captcha" in r.text.lower() or "Type the characters" in r.text:
                     _log.warning(f"  [CAPTCHA] {url} — 等待 30s 后重试 ({attempt+1}/{retries})")
@@ -229,7 +231,7 @@ def _safe_get(session: requests.Session, url: str,
             else:
                 _log.debug(f"  [HTTP {r.status_code}] {url}")
                 return None
-        except requests.RequestException as e:
+        except RequestsError as e:
             wait = 5 * (2 ** attempt) + random.uniform(0, 3)
             _log.warning(f"  [网络异常] {url}: {e} — 重试等待 {wait:.0f}s")
             time.sleep(wait)
