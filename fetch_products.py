@@ -3,7 +3,8 @@ fetch_products.py — 商品抓取脚本（独立进程）
 从 categories.db 读取有效节点，抓取 3 个 SSR 榜单的商品数据
 用法: python fetch_products.py
 """
-import sqlite3, requests, threading, time, sys, os, re, json, argparse, logging, traceback
+import sqlite3, requests, threading, time, sys, os, re, json, argparse, logging, traceback, random
+import urllib3; urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
@@ -57,16 +58,27 @@ DEFAULT_PRICE_MAX     = 0.0
 DEFAULT_DELAY         = 2.0   # 请求间隔（秒）
 DEFAULT_LISTS         = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for"]
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
-    "Accept": "text/html,application/xhtml+xml",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+from config import PROXY_ENABLED, PROXY_POOL_FILE, PROXY_VERIFY
 
 LIST_LABELS = {
     "new-releases":       "新品榜",
@@ -89,6 +101,133 @@ _stats = {"total_nodes": 0, "done_nodes": 0, "skipped": 0,
 _stats_lock = threading.Lock()
 _seen_asins = set()
 _seen_lock = threading.Lock()
+
+# ── 代理池 ─────────────────────────────────────────────────────────
+
+_proxy_pool: list[dict] = []
+_proxy_idx = 0
+
+def _validate_proxy_pool():
+    """启动时并发校验 proxy_pool.json 中所有端口，剔除不可用的。"""
+    global _proxy_pool
+    if not PROXY_ENABLED or not os.path.exists(PROXY_POOL_FILE):
+        _log.info("[proxy] 代理未启用或池文件不存在，使用直连")
+        return
+    with open(PROXY_POOL_FILE, encoding="utf-8") as f:
+        pool = json.load(f)
+    if not pool:
+        _log.info("[proxy] 代理池为空，使用直连")
+        return
+
+    _log.info(f"[proxy] 启动校验 {len(pool)} 个代理端口...")
+    CHECK_URL = "http://ip-api.com/json?fields=query,country"
+    alive = []
+    lock = threading.Lock()
+
+    local_ip = ""
+    try:
+        r = requests.get("http://ip-api.com/json?fields=query", timeout=5)
+        local_ip = r.json().get("query", "")
+    except Exception:
+        pass
+
+    def _check(entry):
+        px = {"http": entry["proxy"], "https": entry["proxy"]}
+        try:
+            r = requests.get(CHECK_URL, proxies=px, verify=False, timeout=12)
+            d = r.json()
+            ip = d.get("query", "")
+            if ip and ip != local_ip and not ip.startswith(("192.", "10.")):
+                entry_copy = dict(entry)
+                entry_copy["exit_ip"] = ip
+                entry_copy["country"] = d.get("country", "?")
+                with lock:
+                    alive.append(entry_copy)
+                _log.debug(f"  ✅ {entry.get('port', '?')} → {ip} ({d.get('country', '?')})")
+            else:
+                _log.debug(f"  ❌ {entry.get('port', '?')} IP异常({ip})")
+        except Exception as e:
+            _log.debug(f"  ❌ {entry.get('port', '?')} {e}")
+
+    threads = [threading.Thread(target=_check, args=(p,), daemon=True) for p in pool]
+    for t in threads:
+        t.start()
+        time.sleep(0.15)
+    for t in threads:
+        t.join()
+
+    seen_ips = {}
+    for entry in sorted(alive, key=lambda x: x.get("delay") or 9999):
+        ip = entry.get("exit_ip", "")
+        if ip and ip not in seen_ips:
+            seen_ips[ip] = entry
+    _proxy_pool = sorted(seen_ips.values(), key=lambda x: x.get("delay") or 9999)
+
+    with open(PROXY_POOL_FILE, "w", encoding="utf-8") as f:
+        json.dump(_proxy_pool, f, ensure_ascii=False, indent=2)
+    _log.info(f"[proxy] 校验完成: {len(_proxy_pool)}/{len(pool)} 可用, {len(seen_ips)} 独立IP")
+
+
+def _next_proxy() -> dict | None:
+    """轮询返回下一个代理。"""
+    global _proxy_idx
+    if not _proxy_pool:
+        return None
+    p = _proxy_pool[_proxy_idx % len(_proxy_pool)]
+    _proxy_idx += 1
+    return p
+
+
+def _make_session() -> requests.Session:
+    """创建带 UA 轮换、Sec-Fetch 头、代理的 session。"""
+    session = requests.Session()
+    ua = random.choice(USER_AGENTS)
+    session.headers.update({
+        **HEADERS,
+        "User-Agent": ua,
+        "Accept-Language": _LANG,
+    })
+    proxy = _next_proxy()
+    if proxy:
+        session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+    return session
+
+
+def _safe_get(session: requests.Session, url: str,
+              referer: str = "", retries: int = 3) -> requests.Response | None:
+    """带 CAPTCHA/429/503 检测和重试的 GET 请求。"""
+    if referer:
+        session.headers["Referer"] = referer
+    for attempt in range(retries):
+        try:
+            r = session.get(url, timeout=18, verify=PROXY_VERIFY)
+            if r.status_code == 200:
+                if "captcha" in r.text.lower() or "Type the characters" in r.text:
+                    _log.warning(f"  [CAPTCHA] {url} — 等待 30s 后重试 ({attempt+1}/{retries})")
+                    time.sleep(30 + random.uniform(0, 15))
+                    session.headers["User-Agent"] = random.choice(USER_AGENTS)
+                    proxy = _next_proxy()
+                    if proxy:
+                        session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+                    continue
+                return r
+            if r.status_code == 429:
+                wait = 60 + random.uniform(0, 30)
+                _log.warning(f"  [429] {url} — 限速 {wait:.0f}s ({attempt+1}/{retries})")
+                time.sleep(wait)
+            elif r.status_code == 503:
+                wait = 15 + random.uniform(0, 10)
+                _log.warning(f"  [503] {url} — 等待 {wait:.0f}s ({attempt+1}/{retries})")
+                time.sleep(wait)
+            else:
+                _log.debug(f"  [HTTP {r.status_code}] {url}")
+                return None
+        except requests.RequestException as e:
+            wait = 5 * (2 ** attempt) + random.uniform(0, 3)
+            _log.warning(f"  [网络异常] {url}: {e} — 重试等待 {wait:.0f}s")
+            time.sleep(wait)
+    _log.error(f"  [放弃] {url} — {retries} 次重试均失败")
+    return None
 
 
 # ── DB 工具 ─────────────────────────────────────────────────────────
@@ -761,9 +900,10 @@ def enrich_with_details(products: list, session: requests.Session,
     for p in products:
         asin = p["asin"]
         url = f"{_DOMAIN}/dp/{asin}"
+        referer = p.get("product_url", f"{_DOMAIN}/s?k={asin}")
         try:
-            r = session.get(url, timeout=15)
-            if r.status_code != 200:
+            r = _safe_get(session, url, referer=referer)
+            if r is None or r.status_code != 200:
                 continue
             detail = parse_detail_fields(r.text)
             if not detail:
@@ -794,13 +934,11 @@ def enrich_with_details(products: list, session: requests.Session,
                 finally:
                     conn.close()
             p.update(detail)
-        except requests.RequestException as e:
-            _log.warning(f"  [detail] {asin} 网络异常: {e}")
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
             _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
-        time.sleep(delay)
+        time.sleep(delay + random.uniform(delay * 0.3, delay * 0.8))
 
 
 # ── Worker 主循环 ───────────────────────────────────────────────────
@@ -821,10 +959,8 @@ def process_node(node: dict, lists: list, review_max: int,
     for list_type in lists:
         url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
 
-        try:
-            r = session.get(url_base, timeout=15)
-        except requests.RequestException as e:
-            _log.warning(f"  [node] {node_id} 列表页请求失败: {e}")
+        r = _safe_get(session, url_base, referer=f"{_DOMAIN}/")
+        if r is None:
             with _stats_lock:
                 _stats["errors"] += 1
             continue
@@ -834,7 +970,7 @@ def process_node(node: dict, lists: list, review_max: int,
         if r.status_code != 200:
             continue
 
-        time.sleep(delay)
+        time.sleep(delay + random.uniform(0, delay * 0.5))
 
         html = r.text
 
@@ -851,18 +987,15 @@ def process_node(node: dict, lists: list, review_max: int,
         )
 
         for pg in range(2, max_pages + 1):
-            try:
-                rp = session.get(url_base + f"?pg={pg}", timeout=15)
-                if rp.status_code == 200:
-                    all_products += parse_products(
-                        rp.text, node_id, name, slug, depth,
-                        list_type, total, review_max, price_min, price_max,
-                        review_min, rating_min, rating_max
-                    )
-                time.sleep(delay)
-            except requests.RequestException as e:
-                _log.warning(f"  [node] {node_id} 翻页pg={pg}失败: {e}")
+            rp = _safe_get(session, url_base + f"?pg={pg}", referer=url_base)
+            if rp is None or rp.status_code != 200:
                 break
+            all_products += parse_products(
+                rp.text, node_id, name, slug, depth,
+                list_type, total, review_max, price_min, price_max,
+                review_min, rating_min, rating_max
+            )
+            time.sleep(delay + random.uniform(0, delay * 0.5))
 
         with _stats_lock:
             _stats["products_found"] += len(all_products)
@@ -899,8 +1032,8 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         _log.warning("[fetch_products] 无目标节点，退出")
         return
 
-    session = requests.Session()
-    session.headers.update({**HEADERS, "Accept-Language": _LANG})
+    _validate_proxy_pool()
+    session = _make_session()
 
     t0 = time.time()
     price_info = ""
