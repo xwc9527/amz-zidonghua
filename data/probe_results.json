@@ -1,404 +1,374 @@
 [
   {
-    "name": "🇭🇰香港08 | 移动联通推荐",
+    "name": "🇸🇬新加坡6 | 高速专线-hy2",
     "type": "Hysteria2",
-    "delay": 32,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港06 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 36,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港10 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 36,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港03 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 38,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇸🇬AWS新加坡03 | 移动联通推荐",
-    "type": "Vless",
-    "delay": 58,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港02 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 61,
+    "delay": 68,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇸🇬新加坡2 | 高速专线-hy2",
     "type": "Hysteria2",
-    "delay": 61,
+    "delay": 72,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇸🇬新加坡 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 63,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇸🇬新加坡3 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 65,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港03-0.1倍",
-    "type": "Vless",
-    "delay": 69,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港08-0.1倍",
-    "type": "Vless",
-    "delay": 69,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港02-0.1倍",
-    "type": "Vless",
-    "delay": 71,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港04-0.1倍",
+    "name": "🇸🇬AWS新加坡04 | 电信移动联通推荐",
     "type": "Vless",
     "delay": 75,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇭🇰香港01 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 75,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇸🇬新加坡4 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 78,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港06-0.1倍",
+    "name": "🇸🇬AWS新加坡05 | 电信移动联通推荐",
     "type": "Vless",
-    "delay": 82,
+    "delay": 83,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇯🇵日本东京02 | 移动联通推荐",
-    "type": "Vless",
-    "delay": 88,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京03 | 移动联通推荐",
-    "type": "Vless",
-    "delay": 89,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇸🇬新加坡02 | 电信联通推荐",
+    "name": "🇯🇵AWS日本06 | 电信移动联通推荐",
     "type": "Vless",
     "delay": 96,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇰🇷韩国 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 99,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇸🇬新加坡01 | 电信联通推荐",
+    "name": "🇯🇵AWS日本08 | 电信移动联通推荐",
     "type": "Vless",
-    "delay": 111,
+    "delay": 106,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇭🇰香港05 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 118,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇮🇳印度01-0.1倍",
+    "name": "🇸🇬新加坡04-0.1倍 | 电信联通推荐",
     "type": "Vless",
-    "delay": 157,
+    "delay": 116,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇦🇺澳大利亚2 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 168,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京 | 移动联通推荐-hy2",
-    "type": "Hysteria2",
-    "delay": 177,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇦🇺澳大利亚 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 180,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国洛杉矶08-0.1倍",
+    "name": "🇸🇬新加坡05-0.1倍 | 电信联通推荐",
     "type": "Vless",
-    "delay": 190,
+    "delay": 125,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇺🇸美国圣何塞03-0.1倍",
-    "type": "Vless",
-    "delay": 193,
+    "name": "🇸🇬新加坡5 | 高速专线-hy2",
+    "type": "Hysteria2",
+    "delay": 185,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇺🇸美国圣何塞05-0.1倍",
-    "type": "Vless",
+    "name": "🇸🇬新加坡3 | 高速专线-hy2",
+    "type": "Hysteria2",
+    "delay": 186,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬新加坡 | 高速专线-hy2",
+    "type": "Hysteria2",
     "delay": 196,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国圣何塞04-0.1倍",
-    "type": "Vless",
-    "delay": 200,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国圣何塞06-0.1倍",
-    "type": "Vless",
-    "delay": 201,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇺🇸美国圣何塞01-0.1倍",
     "type": "Vless",
-    "delay": 202,
+    "delay": 210,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇺🇸美国圣何塞02-0.1倍",
     "type": "Vless",
-    "delay": 203,
+    "delay": 210,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国洛杉矶08-0.1倍",
+    "type": "Vless",
+    "delay": 213,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国圣何塞05-0.1倍",
+    "type": "Vless",
+    "delay": 216,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇺🇸美国圣何塞07-0.1倍",
     "type": "Vless",
-    "delay": 205,
+    "delay": 216,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇺🇸美国02 | 合适下载使用-0.01倍",
-    "type": "Vless",
-    "delay": 209,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京5 | 移动联通推荐-hy2",
-    "type": "Hysteria2",
-    "delay": 212,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国03 | 合适下载使用-0.01倍",
-    "type": "Vless",
-    "delay": 215,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国05 | 合适下载使用-0.01倍",
-    "type": "Vless",
-    "delay": 221,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇦🇪迪拜 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 229,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京4 | 移动联通推荐-hy2",
-    "type": "Hysteria2",
-    "delay": 230,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国08-0.1倍 | 电信联通移动推荐",
-    "type": "Hysteria2",
-    "delay": 231,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国04 | 合适下载使用-0.01倍",
-    "type": "Vless",
-    "delay": 233,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇨🇭瑞士苏黎世 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 245,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国阿什本03-0.1倍",
-    "type": "Vless",
-    "delay": 247,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国阿什本02-0.1倍",
-    "type": "Vless",
-    "delay": 249,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京3 | 移动联通推荐-hy2",
-    "type": "Hysteria2",
-    "delay": 252,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本高速01-0.1倍",
+    "name": "🇺🇸美国洛杉矶08 | 三网推荐",
     "type": "Vless",
     "delay": 256,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇯🇵日本东京2 | 移动联通推荐-hy2",
-    "type": "Hysteria2",
-    "delay": 257,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国阿什本01-0.1倍",
+    "name": "🇺🇸美国05 | 合适下载使用-0.01倍",
     "type": "Vless",
-    "delay": 258,
+    "delay": 261,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇺🇸美国05-0.1倍 | 电信联通移动推荐",
-    "type": "Hysteria2",
-    "delay": 259,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国圣何塞02 | 三网推荐",
+    "name": "🇺🇸美国04 | 合适下载使用-0.01倍",
     "type": "Vless",
     "delay": 262,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇺🇸美国圣何塞07 | 三网推荐",
-    "type": "Vless",
-    "delay": 264,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国圣何塞01 | 三网推荐",
-    "type": "Vless",
-    "delay": 271,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇺🇸美国圣何塞03 | 三网推荐",
-    "type": "Vless",
-    "delay": 275,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
     "name": "🇺🇸美国04-0.1倍 | 电信联通移动推荐",
     "type": "Hysteria2",
-    "delay": 277,
+    "delay": 263,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇯🇵日本东京04-0.1倍 | 电信联通推荐",
+    "name": "🇯🇵AWS日本07 | 电信移动联通推荐",
     "type": "Vless",
-    "delay": 286,
+    "delay": 279,
     "proxy": "http://127.0.0.1:7897"
   },
   {
-    "name": "🇯🇵日本东京01-0.1倍 | 电信联通推荐",
+    "name": "🇯🇵AWS日本09 | 电信移动联通推荐",
     "type": "Vless",
-    "delay": 287,
+    "delay": 279,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本04 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 281,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国圣何塞04 | 三网推荐",
+    "type": "Vless",
+    "delay": 281,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本02 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 284,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国03-0.1倍 | 电信联通移动推荐",
+    "type": "Hysteria2",
+    "delay": 299,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇺🇸美国07-0.1倍 | 电信联通移动推荐",
     "type": "Hysteria2",
-    "delay": 289,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京03-0.1倍 | 电信联通推荐",
-    "type": "Vless",
-    "delay": 292,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京08-0.1倍 | 高速专线推荐",
-    "type": "Vless",
-    "delay": 296,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京09-0.1倍 | 高速专线推荐",
-    "type": "Vless",
-    "delay": 299,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京07-0.1倍 | 高速专线推荐",
-    "type": "Vless",
-    "delay": 304,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京06-0.1倍 | 高速专线推荐",
-    "type": "Vless",
-    "delay": 319,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇦🇺澳大利亚3 | 高速专线-hy2",
-    "type": "Hysteria2",
-    "delay": 410,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇯🇵日本东京05-0.1倍 | 电信联通推荐",
-    "type": "Vless",
-    "delay": 469,
-    "proxy": "http://127.0.0.1:7897"
-  },
-  {
-    "name": "🇭🇰香港04 | 移动联通推荐",
-    "type": "Hysteria2",
-    "delay": 517,
+    "delay": 301,
     "proxy": "http://127.0.0.1:7897"
   },
   {
     "name": "🇺🇸美国02-0.1倍 | 电信联通移动推荐",
     "type": "Hysteria2",
-    "delay": 612,
+    "delay": 305,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国05-0.1倍 | 电信联通移动推荐",
+    "type": "Hysteria2",
+    "delay": 305,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国01-0.1倍 | 电信联通移动推荐",
+    "type": "Hysteria2",
+    "delay": 306,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京06-0.1倍 | 高速专线推荐",
+    "type": "Vless",
+    "delay": 307,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬新加坡4 | 高速专线-hy2",
+    "type": "Hysteria2",
+    "delay": 316,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国06-0.1倍 | 电信联通移动推荐",
+    "type": "Hysteria2",
+    "delay": 317,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本03 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 328,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬AWS新加坡03 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 332,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬AWS新加坡02 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 425,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京2 | 移动联通推荐-hy2",
+    "type": "Hysteria2",
+    "delay": 458,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京5 | 移动联通推荐-hy2",
+    "type": "Hysteria2",
+    "delay": 459,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国03 | 合适下载使用-0.01倍",
+    "type": "Vless",
+    "delay": 460,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬AWS新加坡01 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 526,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国08-0.1倍 | 电信联通移动推荐",
+    "type": "Hysteria2",
+    "delay": 706,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本05 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 805,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国圣何塞01 | 三网推荐",
+    "type": "Vless",
+    "delay": 1093,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京02-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 1291,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京09-0.1倍 | 高速专线推荐",
+    "type": "Vless",
+    "delay": 1392,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京08-0.1倍 | 高速专线推荐",
+    "type": "Vless",
+    "delay": 1448,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京4 | 移动联通推荐-hy2",
+    "type": "Hysteria2",
+    "delay": 1466,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京3 | 移动联通推荐-hy2",
+    "type": "Hysteria2",
+    "delay": 1498,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京07-0.1倍 | 高速专线推荐",
+    "type": "Vless",
+    "delay": 1945,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬新加坡03-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 1962,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬新加坡02-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 2067,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇸🇬新加坡01-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 2264,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京03-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 2650,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京05-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 3017,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇹🇼台湾2 | 避免晚高峰使用",
+    "type": "Vless",
+    "delay": 3057,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本10 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 3087,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵AWS日本01 | 电信移动联通推荐",
+    "type": "Vless",
+    "delay": 3157,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京 | 移动联通推荐-hy2",
+    "type": "Hysteria2",
+    "delay": 3288,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京01-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 3767,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇹🇼台湾3 | 避免晚高峰使用",
+    "type": "Vless",
+    "delay": 3844,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇯🇵日本东京04-0.1倍 | 电信联通推荐",
+    "type": "Vless",
+    "delay": 3883,
+    "proxy": "http://127.0.0.1:7897"
+  },
+  {
+    "name": "🇺🇸美国01 | 合适下载使用-0.01倍",
+    "type": "Vless",
+    "delay": 4550,
     "proxy": "http://127.0.0.1:7897"
   }
 ]

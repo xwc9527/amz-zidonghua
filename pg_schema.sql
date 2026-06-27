@@ -78,12 +78,14 @@ CREATE TABLE IF NOT EXISTS product_sightings (
     product_url   TEXT,
     list_type     TEXT,
     category_name TEXT,
+    site          TEXT DEFAULT 'US',
     scraped_at    TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_ps_asin       ON product_sightings(asin);
 CREATE INDEX IF NOT EXISTS idx_ps_scraped    ON product_sightings(scraped_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ps_list_type  ON product_sightings(list_type);
+CREATE INDEX IF NOT EXISTS idx_ps_site       ON product_sightings(site);
 
 -- ── 选品清单 ──
 CREATE TABLE IF NOT EXISTS watchlist (

@@ -20,6 +20,26 @@ check_url.py
 venv/
 env/
 
+# 日志
+data/*.log
+
+# 运行时状态/PID
+data/lb_pid.json
+data/crawl_checkpoint.json
+data/proxy_pool.json
+data/lb_instance/
+
+# 样本HTML（调试用，不入库）
+data/sample_*.html
+
+# 临时文件
+data/*.tmp.*
+
+# 中间产物
+data/search_api_test_results.json
+data/de_node_ids.txt
+data/Amazon商品字段映射表_updated.xlsx
+
 # 系统文件
 .DS_Store
 Thumbs.db
