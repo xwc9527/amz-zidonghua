@@ -308,6 +308,35 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     root_url = normalize_url(f"{_DOMAIN}/gp/new-releases/{slug}/")
     task_q = Queue()
 
+    # 确保 depth=0 根节点存在，尝试从页面获取本地化类目名
+    root_name = slug
+    try:
+        session0 = _make_session(0)
+        root_html = _safe_get(session0, root_url)
+        if root_html:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(root_html, "html.parser")
+            # Amazon 根类目页面 <span class="zg_selected"> 或 <h1> 中包含类目名
+            sel = soup.select_one("span.zg_selected, #zg_banner_text span")
+            if sel and sel.get_text(strip=True):
+                root_name = sel.get_text(strip=True)
+            else:
+                h1 = soup.select_one("h1")
+                if h1 and h1.get_text(strip=True):
+                    root_name = h1.get_text(strip=True)
+    except Exception:
+        pass
+    root_node = {
+        "name": root_name,
+        "url": root_url,
+        "node_id": slug,
+        "depth": 0,
+        "source": "subtree",
+        "slug": slug,
+        "parent_node_id": None,
+    }
+    _db_batch_insert([root_node])
+
     if existing:
         existing_ids = {r[1] for r in existing if r[1]}
         child_parent_ids = set()

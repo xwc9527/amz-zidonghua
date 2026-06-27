@@ -174,6 +174,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             self._json_response(self._get_tree_children(qs))
 
+        elif path == "/api/v2/tree_children":
+            qs = urllib.parse.parse_qs(parsed.query)
+            self._json_response(self._get_tree_children(qs))
+
         elif path == "/api/check_progress":
             self._json_response(self._get_check_progress())
 
@@ -435,15 +439,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _get_tree_children(self, qs):
         parent = qs.get("parent", [""])[0]
         search = qs.get("q", [""])[0]
+        site = qs.get("site", [""])[0].upper()
         if parent == "root":
-            total = db_scalar("SELECT COUNT(*) FROM categories")
-            roots = db_query("SELECT name, node_id FROM categories WHERE depth = 0 LIMIT 10")
+            if site:
+                roots = db_query("SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 0 AND site = ? ORDER BY name", (site,))
+            else:
+                roots = db_query("SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 0 ORDER BY site, name")
             if roots:
-                return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in roots]
-            return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
-        elif db_scalar("SELECT COUNT(*) FROM categories WHERE node_id = ? AND depth = 0", (parent,)) > 0:
+                return roots
             sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.depth = 1"
             params = []
+            if site:
+                sql += " AND c.site = ?"
+                params.append(site)
             if search:
                 sql += " AND c.name LIKE ?"
                 params.append(f"%{search}%")
@@ -452,6 +460,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         else:
             sql = "SELECT c.name, c.node_id, c.depth, c.slug, c.child_count FROM categories c WHERE c.parent_node_id = ?"
             params = [parent]
+            if site:
+                sql += " AND c.site = ?"
+                params.append(site)
             if search:
                 sql += " AND c.name LIKE ?"
                 params.append(f"%{search}%")

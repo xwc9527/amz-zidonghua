@@ -124,7 +124,7 @@ async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: 
     if DB_BACKEND == "pg":
         return await _tree_children_pg(parent, q, limit, offset, site)
     else:
-        return await _tree_children_sqlite(parent, q, limit, offset)
+        return await _tree_children_sqlite(parent, q, limit, offset, site)
 
 async def _tree_children_pg(parent, q, limit, offset, site="US"):
     if parent == "root":
@@ -136,8 +136,8 @@ async def _tree_children_pg(parent, q, limit, offset, site="US"):
     elif (await pg_scalar("SELECT COUNT(*) FROM categories WHERE node_id=$1 AND depth=0 AND site=$2", parent, site)) > 0:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug,
                  (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
-                 FROM categories c WHERE c.depth = 1 AND c.site = $1"""
-        args = [site]
+                 FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
+        args = [parent, site]
         if q:
             sql += " AND (c.name ILIKE $" + str(len(args)+1) + " OR c.name % $" + str(len(args)+1) + ")"
             args.append(f"%{q}%")
@@ -162,28 +162,54 @@ async def _tree_children_pg(parent, q, limit, offset, site="US"):
         args.extend([limit, offset])
         return await pg_query(sql, *args)
 
-async def _tree_children_sqlite(parent, q, limit, offset):
+async def _tree_children_sqlite(parent, q, limit, offset, site="US"):
     if parent == "root":
-        total = await _sqlite_scalar("SELECT COUNT(*) FROM categories")
-        roots = await _sqlite_query("SELECT name, node_id FROM categories WHERE depth = 0 LIMIT 10")
+        # 递归统计某根 node_id 下全部后代（通过 parent_node_id 链）
+        async def _descendant_count(root_node_id):
+            return await _sqlite_scalar(
+                """WITH RECURSIVE sub AS (
+                       SELECT node_id FROM categories WHERE parent_node_id = ? AND site = ?
+                       UNION ALL
+                       SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id WHERE c.site = ?
+                   ) SELECT COUNT(*) FROM sub""",
+                (root_node_id, site, site))
+        # 先查 depth=0 根节点（新版爬虫自动创建的）
+        roots = await _sqlite_query(
+            "SELECT name, node_id FROM categories WHERE depth = 0 AND site = ? ORDER BY name", (site,))
         if roots:
-            return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in roots]
+            result = []
+            for r in roots:
+                cc = await _descendant_count(r["node_id"])
+                result.append({"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": cc})
+            return result
+        # 兼容旧数据：没有 depth=0 节点时，从 depth=1 的 parent_node_id 反推出 slug 列表作为根
+        slug_rows = await _sqlite_query(
+            "SELECT DISTINCT parent_node_id as slug FROM categories "
+            "WHERE site = ? AND depth = 1 AND parent_node_id IS NOT NULL AND parent_node_id != '' "
+            "ORDER BY parent_node_id", (site,))
+        if slug_rows:
+            result = []
+            for r in slug_rows:
+                slug = r["slug"]
+                cc = await _descendant_count(slug)
+                display_name = slug.replace("-", " ").title()
+                result.append({"name": display_name, "node_id": slug, "depth": 0, "child_count": cc})
+            return result
+        total = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE site = ?", (site,))
         return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
-    elif (await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE node_id = ? AND depth = 0", (parent,))) > 0:
-        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE depth = 1"
-        params = []
-        if q:
-            sql += " AND name LIKE ?"
-            params.append(f"%{q}%")
-        sql += f" ORDER BY name LIMIT {limit} OFFSET {offset}"
-        return await _sqlite_query(sql, params)
     else:
-        sql = "SELECT name, node_id, depth, slug, child_count FROM categories WHERE parent_node_id = ?"
-        params = [parent]
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+                 (WITH RECURSIVE sub AS (
+                     SELECT node_id FROM categories WHERE parent_node_id = c.node_id
+                     UNION ALL
+                     SELECT cat.node_id FROM categories cat JOIN sub s ON cat.parent_node_id = s.node_id
+                 ) SELECT COUNT(*) FROM sub) as child_count
+                 FROM categories c WHERE c.parent_node_id = ? AND c.site = ?"""
+        params = [parent, site]
         if q:
-            sql += " AND name LIKE ?"
+            sql += " AND c.name LIKE ?"
             params.append(f"%{q}%")
-        sql += f" ORDER BY name LIMIT {limit} OFFSET {offset}"
+        sql += f" ORDER BY c.name LIMIT {limit} OFFSET {offset}"
         return await _sqlite_query(sql, params)
 
 # ── 商品 ──
