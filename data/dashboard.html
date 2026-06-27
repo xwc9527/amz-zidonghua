@@ -294,6 +294,40 @@
               </div>
             </div>
             <div class="filter-item">
+              <span class="filter-label">运费</span>
+              <div class="filter-inputs">
+                <select id="f_shipping_fee" onchange="document.getElementById('f_shipping_custom').style.display=this.value==='custom'?'flex':'none';">
+                  <option value="">不限</option>
+                  <option value="free">免费</option>
+                  <option value="paid">付费</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </div>
+              <div id="f_shipping_custom" class="filter-inputs" style="display:none; margin-top:3px;">
+                <select id="f_shipping_op" style="width:auto;padding:5px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;outline:none;background:#fff;">
+                  <option value="lte">≤</option>
+                  <option value="gte">≥</option>
+                </select>
+                <input type="number" id="f_shipping_val" placeholder="金额" min="0" step="0.01">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">配送模式</span>
+              <div class="filter-inputs">
+                <select id="f_fulfillment_type">
+                  <option value="">不限</option>
+                  <option value="FBA">FBA</option>
+                  <option value="FBM">FBM</option>
+                </select>
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label">产地</span>
+              <div class="filter-inputs">
+                <input type="text" id="f_country" placeholder="如 China" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px;outline:none;background:#fff;">
+              </div>
+            </div>
+            <div class="filter-item">
               <span class="filter-label">标记</span>
               <div class="filter-check">
                 <label><input type="checkbox" id="f_amazons_choice"> Amazon精选</label>
@@ -301,10 +335,9 @@
               </div>
             </div>
             <div style="position:absolute; right:16px; bottom:12px; display:flex; align-items:center; gap:6px;">
-              <div class="progress-wrap" style="width:80px;">
-                <div id="p_bar" class="progress-bar-inner" style="width:0%;"></div>
-              </div>
-              <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600;">0%</span>
+              <span style="font-size:11px; color:var(--gray);">抓取页数</span>
+              <input type="number" id="f_max_pages" value="2" min="1" max="2" style="width:48px; padding:4px 6px; border:1px solid var(--border); border-radius:5px; font-size:12px; text-align:center; outline:none;">
+              <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:36px; text-align:right;">0</span>
               <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
             </div>
           </div>
@@ -371,6 +404,14 @@
       el.classList.add('active');
       _currentChart = key;
       document.getElementById('chartDrop').style.display = 'none';
+      const mp = document.getElementById('f_max_pages');
+      if (key === 'la') {
+        mp.max = 400; mp.min = 1;
+        if (+mp.value > 400) mp.value = 20;
+      } else {
+        mp.max = 2; mp.min = 1;
+        if (+mp.value > 2) mp.value = 2;
+      }
     }
     function updateChartAvailability() {
       const la = document.getElementById('chartItemLA');
@@ -460,6 +501,12 @@
         date_to: document.getElementById('f_date_to').value || '',
         amazons_choice: document.getElementById('f_amazons_choice').checked,
         bestseller: document.getElementById('f_bestseller').checked,
+        shipping_fee: document.getElementById('f_shipping_fee').value || '',
+        shipping_op: document.getElementById('f_shipping_op').value || 'lte',
+        shipping_val: +document.getElementById('f_shipping_val').value || 0,
+        fulfillment_type: document.getElementById('f_fulfillment_type').value || '',
+        country: (document.getElementById('f_country').value || '').trim(),
+        max_pages: +document.getElementById('f_max_pages').value || 2,
       };
     }
 
@@ -723,11 +770,12 @@
         const params = {
           roots: allSelected,
           lists: enabledLists,
-          filters: filters,
+          site: _currentSite.toUpperCase(),
+          chart: _currentChart,
+          ...filters,
         };
 
-        document.getElementById('p_bar').style.width = '0%';
-        document.getElementById('p_progress_text').innerText = '0%';
+        document.getElementById('p_progress_text').innerText = '0';
 
         try {
           const r = await fetch(API + '/api/v2/start_products', {
@@ -747,21 +795,7 @@
       try {
         const r = await fetch(API + '/api/v2/product_progress?t=' + Date.now());
         const d = await r.json();
-        if (d.running) {
-          let p = parseFloat(document.getElementById('p_progress_text').innerText) || 0;
-          if (p < 95) {
-            p += Math.random() * 5;
-            p = Math.min(p, 98);
-            document.getElementById('p_bar').style.width = p + '%';
-            document.getElementById('p_progress_text').innerText = Math.round(p) + '%';
-          }
-        } else {
-          const pText = document.getElementById('p_progress_text').innerText;
-          if (pText !== '0%' && pText !== '100%') {
-            document.getElementById('p_bar').style.width = '100%';
-            document.getElementById('p_progress_text').innerText = '100%';
-          }
-        }
+        document.getElementById('p_progress_text').innerText = d.total_products || 0;
       } catch(e) {}
     }
 

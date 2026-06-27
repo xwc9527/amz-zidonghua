@@ -440,6 +440,40 @@ def _parse_detail_page(html: str, asin: str) -> dict | None:
             bsr_main = matches[0]
             bsr_sub = matches[1:]
 
+    # ── 运费 & 配送模式 ──
+    shipping_fee = None
+    shipping_fee_value = None
+    delivery_el = soup.select_one("#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage")
+    if delivery_el:
+        dtxt = delivery_el.get_text(" ", strip=True)
+        if re.search(r"\bFREE\b|Kostenlose|KOSTENLOS", dtxt, re.I):
+            shipping_fee = "FREE"
+            shipping_fee_value = 0.0
+        else:
+            fee_m = re.search(
+                r"(?:für|for|:)\s*([\d,.]+)\s*(?:\xa0)?([€$£])|([€$£])\s*([\d,.]+)",
+                dtxt
+            )
+            if fee_m:
+                raw = (fee_m.group(1) or fee_m.group(4)).replace(",", ".")
+                try:
+                    shipping_fee_value = float(raw)
+                    shipping_fee = fee_m.group(0).strip()
+                except ValueError:
+                    pass
+
+    fulfillment_type = None
+    for mid in ("#merchant-info", "#merchantInfoFeature",
+                ".offer-display-feature-text", "#tabular-buybox"):
+        mel = soup.select_one(mid)
+        if mel:
+            mtxt = mel.get_text(" ", strip=True)
+            if re.search(r"Fulfilled by Amazon|Versand durch Amazon|Expédié par Amazon|Amazonが発送", mtxt, re.I):
+                fulfillment_type = "FBA"
+            else:
+                fulfillment_type = "FBM"
+            break
+
     # ── 过滤 ──
     if bsr_main is None and not bsr_sub:
         return None
@@ -469,6 +503,9 @@ def _parse_detail_page(html: str, asin: str) -> dict | None:
         "bsr_sub": bsr_sub if bsr_sub else None,
         "image_url": image_url,
         "product_url": f"{_DOMAIN}/dp/{asin}",
+        "shipping_fee": shipping_fee,
+        "shipping_fee_value": shipping_fee_value,
+        "fulfillment_type": fulfillment_type,
         "is_signal": is_signal,
     }
 

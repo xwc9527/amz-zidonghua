@@ -226,7 +226,13 @@ async def products(limit: int = Query(50, le=200), offset: int = 0,
         return await _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
 
 async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max, site=None):
-    sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, site, scraped_at FROM product_sightings WHERE 1=1"
+    sql = """SELECT name, asin, price, review_count, rank, rating, image_url, product_url,
+             list_type, category_name, site, scraped_at,
+             bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
+             variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
+             country_of_origin
+             FROM product_sightings WHERE 1=1"""
     args = []
     idx = 1
     if site:
@@ -248,7 +254,13 @@ async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_m
         return []
 
 async def _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max):
-    sql = "SELECT name, asin, price, review_count, rank, rating, image_url, product_url, list_type, category_name, scraped_at FROM product_sightings WHERE 1=1"
+    sql = """SELECT name, asin, price, price_raw, review_count, rank, rating,
+             image_url, product_url, list_type, category_name, scraped_at,
+             bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
+             variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
+             country_of_origin
+             FROM product_sightings WHERE 1=1"""
     params = []
     for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
                           (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
@@ -313,11 +325,34 @@ async def start_products(body: dict):
             cmd += ["--lists"] + body["lists"]
         if body.get("site"):
             cmd += ["--site", body["site"]]
-        for key, flag in [("review_max", "--review-max"), ("min_list", "--min-list"),
-                          ("price_min", "--price-min"), ("price_max", "--price-max"),
-                          ("delay", "--delay")]:
-            if body.get(key):
-                cmd += [flag, str(body[key])]
+        param_flags = [
+            ("review_max", "--review-max"), ("review_min", "--review-min"),
+            ("min_list", "--min-list"),
+            ("price_min", "--price-min"), ("price_max", "--price-max"),
+            ("rating_min", "--rating-min"), ("rating_max", "--rating-max"),
+            ("bsr_main_min", "--bsr-main-min"), ("bsr_main_max", "--bsr-main-max"),
+            ("bsr_sub_min", "--bsr-sub-min"), ("bsr_sub_max", "--bsr-sub-max"),
+            ("variant_min", "--variant-min"), ("variant_max", "--variant-max"),
+            ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
+            ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
+            ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
+            ("list_total_min", "--list-total-min"), ("list_total_max", "--list-total-max"),
+            ("shipping_fee", "--shipping-fee"), ("shipping_op", "--shipping-op"),
+            ("shipping_val", "--shipping-val"),
+            ("fulfillment_type", "--fulfillment-type"),
+            ("country", "--country"),
+            ("date_range", "--date-range"), ("date_from", "--date-from"), ("date_to", "--date-to"),
+            ("max_pages", "--max-pages"),
+            ("delay", "--delay"),
+        ]
+        for key, flag in param_flags:
+            v = body.get(key)
+            if v and str(v) != "0":
+                cmd += [flag, str(v)]
+        if body.get("amazons_choice"):
+            cmd += ["--amazons-choice"]
+        if body.get("bestseller"):
+            cmd += ["--bestseller"]
         _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR)
     return {"status": "started", "pid": _product_proc.pid}
 

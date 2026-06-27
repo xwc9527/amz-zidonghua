@@ -4,6 +4,7 @@ fetch_products.py — 商品抓取脚本（独立进程）
 用法: python fetch_products.py
 """
 import sqlite3, requests, threading, time, sys, os, re, json, argparse
+from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
 
@@ -71,16 +72,47 @@ LIST_COL_MAP = {
 
 _db_lock = threading.Lock()
 _stats = {"total_nodes": 0, "done_nodes": 0, "skipped": 0,
-          "products_found": 0, "products_saved": 0, "errors": 0}
+          "products_found": 0, "products_saved": 0, "products_dup": 0, "errors": 0}
 _stats_lock = threading.Lock()
+_seen_asins = set()
+_seen_lock = threading.Lock()
 
 
 # ── DB 工具 ─────────────────────────────────────────────────────────
+
+DE_MONTHS = {
+    "Januar": 1, "Februar": 2, "März": 3, "April": 4,
+    "Mai": 5, "Juni": 6, "Juli": 7, "August": 8,
+    "September": 9, "Oktober": 10, "November": 11, "Dezember": 12,
+}
+
+_DETAIL_COLS = [
+    ("bsr_main_rank", "INTEGER"),
+    ("bsr_main_category", "TEXT"),
+    ("bsr_sub_rank", "INTEGER"),
+    ("bsr_sub_category", "TEXT"),
+    ("variant_option_count", "INTEGER"),
+    ("other_sellers_count", "INTEGER"),
+    ("item_weight", "TEXT"),
+    ("item_dimensions", "TEXT"),
+    ("date_first_available", "TEXT"),
+    ("shipping_fee", "TEXT"),
+    ("shipping_fee_value", "REAL"),
+    ("fulfillment_type", "TEXT"),
+    ("country_of_origin", "TEXT"),
+    ("detail_scraped", "INTEGER DEFAULT 0"),
+]
+
 
 def db_conn():
     c = sqlite3.connect(DB_PATH, timeout=15)
     c.execute("PRAGMA journal_mode=WAL")
     c.row_factory = sqlite3.Row
+    existing = {r[1] for r in c.execute("PRAGMA table_info(product_sightings)").fetchall()}
+    for col, ctype in _DETAIL_COLS:
+        if col not in existing:
+            c.execute(f"ALTER TABLE product_sightings ADD COLUMN {col} {ctype}")
+    c.commit()
     return c
 
 
@@ -114,12 +146,12 @@ def get_descendant_nodes(root_ids: list, lists: list) -> list:
         SELECT node_id, url, name, depth FROM categories
         WHERE node_id IS NOT NULL
           AND ({" OR ".join(like_clauses)})
-        ORDER BY depth, name
+        ORDER BY depth DESC, name
     """
     rows = conn.execute(sql, root_ids).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
-    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点")
+    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
     return result
 
 
@@ -141,10 +173,10 @@ def _get_descendant_nodes_pg(root_ids):
     sql = f"""
         SELECT node_id, url, name, depth FROM categories
         WHERE node_id IS NOT NULL AND ({" OR ".join(clauses)})
-        ORDER BY depth, name
+        ORDER BY depth DESC, name
     """
     result = _pg_fetchall(sql, params)
-    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点")
+    print(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -165,12 +197,12 @@ def get_nodes_by_slugs(slugs: list, lists: list) -> list:
         SELECT DISTINCT node_id, url, name, depth FROM categories
         WHERE node_id IS NOT NULL
           AND ({" OR ".join(like_clauses)})
-        ORDER BY depth, name
+        ORDER BY depth DESC, name
     """
     rows = conn.execute(sql).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
-    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点")
+    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -185,10 +217,10 @@ def _get_nodes_by_slugs_pg(slugs):
     sql = f"""
         SELECT DISTINCT node_id, url, name, depth FROM categories
         WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(like_clauses)})
-        ORDER BY depth, name
+        ORDER BY depth DESC, name
     """
     result = _pg_fetchall(sql, (_SITE,))
-    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点")
+    print(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
 
@@ -312,7 +344,10 @@ def parse_products(html: str, node_id: str, category_name: str,
                    list_type: str, list_total: int,
                    review_max: int,
                    price_min: float = 0.0,
-                   price_max: float = 0.0) -> list:
+                   price_max: float = 0.0,
+                   review_min: int = 0,
+                   rating_min: float = 0.0,
+                   rating_max: float = 0.0) -> list:
     """解析单页 HTML，提取符合条件的商品。"""
     soup = BeautifulSoup(html, "html.parser")
     items = soup.select("[id^='gridItemRoot']")
@@ -408,8 +443,18 @@ def parse_products(html: str, node_id: str, category_name: str,
 
         # ── 评论数筛选 ──
         rc = p.get("review_count", 0)
-        if rc >= review_max:
+        if review_max > 0 and rc >= review_max:
             continue
+        if review_min > 0 and rc < review_min:
+            continue
+
+        # ── 评分筛选 ──
+        rt = p.get("rating")
+        if rt is not None:
+            if rating_min > 0 and rt < rating_min:
+                continue
+            if rating_max > 0 and rt > rating_max:
+                continue
 
         # ── 价格筛选 ──
         price = p.get("price")
@@ -418,6 +463,15 @@ def parse_products(html: str, node_id: str, category_name: str,
                 continue
             if price_max > 0 and price > price_max:
                 continue
+
+        # ── ASIN去重 ──
+        asin = p["asin"]
+        with _seen_lock:
+            if asin in _seen_asins:
+                with _stats_lock:
+                    _stats["products_dup"] += 1
+                continue
+            _seen_asins.add(asin)
 
         # 来源信息
         p["node_id"] = node_id
@@ -435,12 +489,310 @@ def parse_products(html: str, node_id: str, category_name: str,
 print("[fetch_products] 模块加载完成", flush=True)
 
 
+# ── 详情页解析 ─────────────────────────────────────────────────────
+
+def parse_detail_fields(html: str) -> dict:
+    """从详情页HTML提取补全字段。"""
+    soup = BeautifulSoup(html, "html.parser")
+    d = {}
+
+    # BSR
+    bsr_section = (
+        soup.select_one("#prodDetails")
+        or soup.select_one("#detailBulletsWrapper_feature_div")
+        or soup.select_one("#productDetails_db_sections")
+    )
+    if bsr_section:
+        bsr_text = bsr_section.get_text(" ")
+        bsr_matches = []
+        for pat in [r"Nr\.\s*([\d\.]+)\s+in\s+(.+?)(?:\s*\(|\s{2,}|\s*#|\s*$)",
+                    r"#([\d,]+)\s+in\s+(.+?)(?:\s*\(|\s{2,}|\s*#|\s*$)"]:
+            for m in re.finditer(pat, bsr_text):
+                rank_str = m.group(1).replace(".", "").replace(",", "")
+                cat = m.group(2).strip().rstrip("( ,")
+                if not cat or len(cat) < 2:
+                    continue
+                try:
+                    bsr_matches.append((int(rank_str), cat))
+                except ValueError:
+                    pass
+        if bsr_matches:
+            d["bsr_main_rank"] = bsr_matches[0][0]
+            d["bsr_main_category"] = bsr_matches[0][1]
+        if len(bsr_matches) > 1:
+            d["bsr_sub_rank"] = bsr_matches[1][0]
+            d["bsr_sub_category"] = bsr_matches[1][1]
+
+    # 商品属性表
+    detail_rows = soup.select(
+        "#detailBullets_feature_div li, "
+        "#productDetails_techSpec_section_1 tr, "
+        "#productDetails_detailBullets_sections1 tr, "
+        "#prodDetails tr"
+    )
+    for row in detail_rows:
+        text = row.get_text(" ", strip=True)
+
+        # 上架日期
+        if any(k in text for k in ["Date First Available", "Datum der Ersten",
+                                     "Erstmals verfügbar", "発売日"]):
+            dm = re.search(r"(\d{1,2})\.\s*(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*(\d{4})", text)
+            if dm:
+                try:
+                    dt = datetime(int(dm.group(3)), DE_MONTHS[dm.group(2)], int(dm.group(1)))
+                    d["date_first_available"] = dt.strftime("%Y-%m-%d")
+                except (ValueError, KeyError):
+                    pass
+            if "date_first_available" not in d:
+                em = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})", text)
+                if em:
+                    try:
+                        dt = datetime.strptime(f"{em.group(1)} {em.group(2)} {em.group(3)}", "%B %d %Y")
+                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+            if "date_first_available" not in d:
+                jm = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", text)
+                if jm:
+                    try:
+                        dt = datetime(int(jm.group(1)), int(jm.group(2)), int(jm.group(3)))
+                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+
+        # 重量
+        if any(k in text for k in ["Item Weight", "Artikelgewicht", "商品の重量"]):
+            wm = re.search(r"([\d,.]+)\s*(pounds?|ounces?|kg|g|Kilogramm|Gramm|lbs?|oz)\b", text, re.I)
+            if wm:
+                d["item_weight"] = wm.group(0).strip()
+
+        # 尺寸
+        if any(k in text for k in ["Item Dimensions", "Produktabmessungen",
+                                     "Artikelabmessungen", "Package Dimensions"]):
+            dim_m = re.search(r"[\d,.]+\s*x\s*[\d,.]+(?:\s*x\s*[\d,.]+)?(?:\s*(?:inches|cm|mm|Zoll|zoll))?", text, re.I)
+            if dim_m:
+                d["item_dimensions"] = dim_m.group(0).strip()
+
+        # 产地
+        if any(k in text for k in ["Country of Origin", "Herkunftsland", "原産国"]):
+            parts = re.split(r"[:‏‎]+", text)
+            if len(parts) >= 2:
+                d["country_of_origin"] = parts[-1].strip()
+
+    # 变体数
+    variants = soup.select("#twister_feature_div li[data-defaultasin]")
+    if variants:
+        d["variant_option_count"] = len(variants)
+
+    # 其他卖家
+    olp = soup.select_one("#olp_feature_div, #aod-offer-list")
+    if olp:
+        om = re.search(r"(\d+)\s+(?:new|neu|nouveau)", olp.get_text(), re.I)
+        if om:
+            d["other_sellers_count"] = int(om.group(1))
+
+    # 运费
+    delivery_el = soup.select_one("#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage")
+    if delivery_el:
+        dtxt = delivery_el.get_text(" ", strip=True)
+        if re.search(r"\bFREE\b|Kostenlose|KOSTENLOS", dtxt, re.I):
+            d["shipping_fee"] = "FREE"
+            d["shipping_fee_value"] = 0.0
+        else:
+            fee_m = re.search(
+                r"(?:für|for|:)\s*([\d,.]+)\s*(?:\xa0)?([€$£])|([€$£])\s*([\d,.]+)", dtxt)
+            if fee_m:
+                raw = (fee_m.group(1) or fee_m.group(4)).replace(",", ".")
+                try:
+                    d["shipping_fee_value"] = float(raw)
+                    d["shipping_fee"] = fee_m.group(0).strip()
+                except ValueError:
+                    pass
+
+    # 配送模式
+    for sel in ("#merchant-info", "#merchantInfoFeature",
+                ".offer-display-feature-text", "#tabular-buybox"):
+        mel = soup.select_one(sel)
+        if mel:
+            mtxt = mel.get_text(" ", strip=True)
+            if re.search(r"Fulfilled by Amazon|Versand durch Amazon|Expédié par Amazon|Amazonが発送", mtxt, re.I):
+                d["fulfillment_type"] = "FBA"
+            else:
+                d["fulfillment_type"] = "FBM"
+            break
+
+    return d
+
+
+def _check_detail_filters(detail: dict, filters: dict) -> bool:
+    """检查详情页字段是否满足筛选条件。返回True=通过，False=不符合。"""
+    def _range_check(val, fmin_key, fmax_key):
+        fmin = filters.get(fmin_key, 0)
+        fmax = filters.get(fmax_key, 0)
+        if val is None:
+            return True
+        if fmin and val < fmin:
+            return False
+        if fmax and val > fmax:
+            return False
+        return True
+
+    if not _range_check(detail.get("bsr_main_rank"), "bsr_main_min", "bsr_main_max"):
+        return False
+    if not _range_check(detail.get("bsr_sub_rank"), "bsr_sub_min", "bsr_sub_max"):
+        return False
+    if not _range_check(detail.get("variant_option_count"), "variant_min", "variant_max"):
+        return False
+    if not _range_check(detail.get("other_sellers_count"), "sellers_min", "sellers_max"):
+        return False
+
+    # 重量 (解析数值，统一为 lb)
+    wmin = filters.get("weight_min", 0)
+    wmax = filters.get("weight_max", 0)
+    if wmin or wmax:
+        w = detail.get("item_weight")
+        if w:
+            wm = re.search(r"([\d,.]+)", w)
+            if wm:
+                wv = float(wm.group(1).replace(",", "."))
+                if "kg" in w.lower() or "kilogramm" in w.lower():
+                    wv *= 2.205
+                elif "ounce" in w.lower() or "oz" in w.lower():
+                    wv /= 16
+                elif "gramm" in w.lower() or (" g" in w.lower() and "kg" not in w.lower()):
+                    wv *= 0.0022
+                if wmin and wv < wmin:
+                    return False
+                if wmax and wv > wmax:
+                    return False
+
+    # 尺寸
+    dl = filters.get("dim_l", 0)
+    dw = filters.get("dim_w", 0)
+    dh = filters.get("dim_h", 0)
+    if dl or dw or dh:
+        dims_raw = detail.get("item_dimensions", "")
+        if dims_raw:
+            nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", dims_raw)]
+            if "cm" in dims_raw.lower():
+                nums = [n / 2.54 for n in nums]
+            nums.sort(reverse=True)
+            while len(nums) < 3:
+                nums.append(0)
+            if dl and nums[0] > dl:
+                return False
+            if dw and nums[1] > dw:
+                return False
+            if dh and nums[2] > dh:
+                return False
+
+    # 运费
+    sf = filters.get("shipping_fee", "")
+    if sf == "free" and detail.get("shipping_fee_value") is not None and detail["shipping_fee_value"] > 0:
+        return False
+    if sf == "paid" and detail.get("shipping_fee_value") is not None and detail["shipping_fee_value"] == 0:
+        return False
+    if sf == "custom":
+        sop = filters.get("shipping_op", "lte")
+        sval = filters.get("shipping_val", 0)
+        sfv = detail.get("shipping_fee_value")
+        if sfv is not None and sval > 0:
+            if sop == "lte" and sfv > sval:
+                return False
+            if sop == "gte" and sfv < sval:
+                return False
+
+    # 配送模式
+    ft = filters.get("fulfillment_type", "")
+    if ft and detail.get("fulfillment_type") and detail["fulfillment_type"] != ft:
+        return False
+
+    # 产地
+    country = filters.get("country", "")
+    if country and detail.get("country_of_origin"):
+        if country.lower() not in detail["country_of_origin"].lower():
+            return False
+
+    # 上架日期
+    date_range = filters.get("date_range", "")
+    if date_range and detail.get("date_first_available"):
+        try:
+            dfa = datetime.strptime(detail["date_first_available"], "%Y-%m-%d")
+            if date_range == "custom":
+                df = filters.get("date_from", "")
+                dt = filters.get("date_to", "")
+                if df and dfa < datetime.strptime(df, "%Y-%m-%d"):
+                    return False
+                if dt and dfa > datetime.strptime(dt, "%Y-%m-%d"):
+                    return False
+            else:
+                days = int(date_range)
+                if (datetime.now() - dfa).days > days:
+                    return False
+        except (ValueError, TypeError):
+            pass
+
+    return True
+
+
+def enrich_with_details(products: list, session: requests.Session,
+                        delay: float, filters: dict = None):
+    """对列表页抓到的商品逐个请求详情页，补全字段并 UPDATE 到数据库。
+    不符合筛选条件的商品从数据库删除。"""
+    if not products:
+        return
+    if filters is None:
+        filters = {}
+    for p in products:
+        asin = p["asin"]
+        url = f"{_DOMAIN}/dp/{asin}"
+        try:
+            r = session.get(url, timeout=15)
+            if r.status_code != 200:
+                continue
+            detail = parse_detail_fields(r.text)
+            if not detail:
+                continue
+            detail["detail_scraped"] = 1
+
+            # 详情页筛选
+            if filters and not _check_detail_filters(detail, filters):
+                with _db_lock:
+                    conn = db_conn()
+                    try:
+                        conn.execute("DELETE FROM product_sightings WHERE asin=?", (asin,))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                with _stats_lock:
+                    _stats["products_saved"] -= 1
+                continue
+
+            # UPDATE DB
+            sets = ", ".join(f"{k}=?" for k in detail)
+            vals = list(detail.values()) + [asin]
+            with _db_lock:
+                conn = db_conn()
+                try:
+                    conn.execute(f"UPDATE product_sightings SET {sets} WHERE asin=?", vals)
+                    conn.commit()
+                finally:
+                    conn.close()
+            p.update(detail)
+        except Exception as e:
+            print(f"  [detail] {asin} 失败: {e}", flush=True)
+        time.sleep(delay)
+
+
 # ── Worker 主循环 ───────────────────────────────────────────────────
 
 def process_node(node: dict, lists: list, review_max: int,
                  min_list_size: int, session: requests.Session,
                  price_min: float = 0.0, price_max: float = 0.0,
-                 delay: float = 2.0):
+                 review_min: int = 0,
+                 rating_min: float = 0.0, rating_max: float = 0.0,
+                 max_pages: int = 2, delay: float = 2.0,
+                 detail_filters: dict = None):
     """处理单个节点的所有榜单。"""
     node_id = node["node_id"]
     slug    = extract_slug(node["url"])
@@ -448,17 +800,15 @@ def process_node(node: dict, lists: list, review_max: int,
     depth   = node["depth"]
 
     for list_type in lists:
-        # 检查该节点对应榜单是否有效（从 URL 前缀构建）
-        url_p1 = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
+        url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
 
         try:
-            r = session.get(url_p1, timeout=15)
+            r = session.get(url_base, timeout=15)
         except Exception as e:
             with _stats_lock:
                 _stats["errors"] += 1
             continue
 
-        # 顺手写入榜单有效性（合并 check_links 逻辑）
         save_link_validity(node_id, list_type, 1 if r.status_code == 200 else 0)
 
         if r.status_code != 200:
@@ -468,33 +818,30 @@ def process_node(node: dict, lists: list, review_max: int,
 
         html = r.text
 
-        # ── 活体检测 ──
         total = extract_list_total(html)
-        if total < min_list_size:
+        if min_list_size > 0 and total < min_list_size:
             with _stats_lock:
                 _stats["skipped"] += 1
             continue
 
-        # ── 解析 page 1 ──
-        page1_products = parse_products(
+        all_products = parse_products(
             html, node_id, name, slug, depth,
-            list_type, total, review_max, price_min, price_max
+            list_type, total, review_max, price_min, price_max,
+            review_min, rating_min, rating_max
         )
 
-        # ── 请求 page 2 ──
-        page2_products = []
-        try:
-            r2 = session.get(url_p1 + "?pg=2", timeout=15)
-            if r2.status_code == 200:
-                page2_products = parse_products(
-                    r2.text, node_id, name, slug, depth,
-                    list_type, total, review_max, price_min, price_max
-                )
-            time.sleep(delay)
-        except Exception:
-            pass
-
-        all_products = page1_products + page2_products
+        for pg in range(2, max_pages + 1):
+            try:
+                rp = session.get(url_base + f"?pg={pg}", timeout=15)
+                if rp.status_code == 200:
+                    all_products += parse_products(
+                        rp.text, node_id, name, slug, depth,
+                        list_type, total, review_max, price_min, price_max,
+                        review_min, rating_min, rating_max
+                    )
+                time.sleep(delay)
+            except Exception:
+                break
 
         with _stats_lock:
             _stats["products_found"] += len(all_products)
@@ -503,6 +850,7 @@ def process_node(node: dict, lists: list, review_max: int,
             saved = save_products(all_products)
             with _stats_lock:
                 _stats["products_saved"] += saved
+            enrich_with_details(all_products, session, delay, detail_filters)
 
     with _stats_lock:
         _stats["done_nodes"] += 1
@@ -511,13 +859,20 @@ def process_node(node: dict, lists: list, review_max: int,
 def run_batch(root_ids: list, lists: list, review_max: int,
               min_list_size: int, delay: float = 2.0,
               price_min: float = 0.0, price_max: float = 0.0,
-              slugs: list = None):
-    """主入口：单线程顺序抓取。"""
+              review_min: int = 0,
+              rating_min: float = 0.0, rating_max: float = 0.0,
+              max_pages: int = 2,
+              slugs: list = None,
+              detail_filters: dict = None):
+    """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
     if slugs:
         nodes = get_nodes_by_slugs(slugs, lists)
     else:
         nodes = get_descendant_nodes(root_ids, lists)
     _stats["total_nodes"] = len(nodes)
+    _stats["products_dup"] = 0
+    with _seen_lock:
+        _seen_asins.clear()
 
     if not nodes:
         print("[fetch_products] 无目标节点，退出", flush=True)
@@ -537,7 +892,9 @@ def run_batch(root_ids: list, lists: list, review_max: int,
 
     for node in nodes:
         process_node(node, lists, review_max, min_list_size, session,
-                     price_min, price_max, delay)
+                     price_min, price_max, review_min,
+                     rating_min, rating_max, max_pages, delay,
+                     detail_filters)
         n = _stats["done_nodes"]
         total = _stats["total_nodes"]
         if n % 10 == 0 or n == total:
@@ -555,6 +912,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     print(f"  找到: {_stats['products_found']} 个符合条件商品")
     print(f"  录入: {_stats['products_saved']} 条（去重后）")
     print(f"  跳过: {_stats['skipped']} 个冷门榜单")
+    print(f"  去重: {_stats['products_dup']} 个重复ASIN已跳过")
     print(f"  错误: {_stats['errors']}", flush=True)
 
     export_excel()
@@ -629,10 +987,39 @@ if __name__ == "__main__":
     group.add_argument("--slugs", nargs="+",
                        help="L1 类目 slug 列表 (如 automotive baby-products)")
     parser.add_argument("--site", default="US", help="站点代码: US, DE, JP, UK, FR")
-    parser.add_argument("--review-max", type=int, default=DEFAULT_REVIEW_MAX)
-    parser.add_argument("--min-list",   type=int, default=DEFAULT_MIN_LIST_SIZE)
+    parser.add_argument("--review-max", type=int, default=0)
+    parser.add_argument("--review-min", type=int, default=0)
+    parser.add_argument("--min-list",   type=int, default=0)
     parser.add_argument("--price-min",  type=float, default=DEFAULT_PRICE_MIN)
     parser.add_argument("--price-max",  type=float, default=DEFAULT_PRICE_MAX)
+    parser.add_argument("--rating-min", type=float, default=0)
+    parser.add_argument("--rating-max", type=float, default=0)
+    parser.add_argument("--bsr-main-min", type=int, default=0)
+    parser.add_argument("--bsr-main-max", type=int, default=0)
+    parser.add_argument("--bsr-sub-min",  type=int, default=0)
+    parser.add_argument("--bsr-sub-max",  type=int, default=0)
+    parser.add_argument("--variant-min",  type=int, default=0)
+    parser.add_argument("--variant-max",  type=int, default=0)
+    parser.add_argument("--sellers-min",  type=int, default=0)
+    parser.add_argument("--sellers-max",  type=int, default=0)
+    parser.add_argument("--weight-min", type=float, default=0)
+    parser.add_argument("--weight-max", type=float, default=0)
+    parser.add_argument("--dim-l", type=float, default=0)
+    parser.add_argument("--dim-w", type=float, default=0)
+    parser.add_argument("--dim-h", type=float, default=0)
+    parser.add_argument("--list-total-min", type=int, default=0)
+    parser.add_argument("--list-total-max", type=int, default=0)
+    parser.add_argument("--shipping-fee", default="")
+    parser.add_argument("--shipping-op",  default="lte")
+    parser.add_argument("--shipping-val", type=float, default=0)
+    parser.add_argument("--fulfillment-type", default="")
+    parser.add_argument("--country", default="")
+    parser.add_argument("--date-range", default="")
+    parser.add_argument("--date-from",  default="")
+    parser.add_argument("--date-to",    default="")
+    parser.add_argument("--amazons-choice", action="store_true")
+    parser.add_argument("--bestseller",     action="store_true")
+    parser.add_argument("--max-pages", type=int, default=2)
     parser.add_argument("--delay",      type=float, default=DEFAULT_DELAY)
     parser.add_argument("--lists", nargs="+", default=DEFAULT_LISTS)
     args = parser.parse_args()
@@ -647,6 +1034,22 @@ if __name__ == "__main__":
     _RESULTS_PAT = mp["results_pattern"]
     print(f"[站点] {mp['name']} ({_SITE}) → {_DOMAIN}")
 
+    detail_filters = {
+        "bsr_main_min": args.bsr_main_min, "bsr_main_max": args.bsr_main_max,
+        "bsr_sub_min": args.bsr_sub_min, "bsr_sub_max": args.bsr_sub_max,
+        "variant_min": args.variant_min, "variant_max": args.variant_max,
+        "sellers_min": args.sellers_min, "sellers_max": args.sellers_max,
+        "weight_min": args.weight_min, "weight_max": args.weight_max,
+        "dim_l": args.dim_l, "dim_w": args.dim_w, "dim_h": args.dim_h,
+        "shipping_fee": args.shipping_fee, "shipping_op": args.shipping_op,
+        "shipping_val": args.shipping_val,
+        "fulfillment_type": args.fulfillment_type,
+        "country": args.country,
+        "date_range": args.date_range,
+        "date_from": args.date_from, "date_to": args.date_to,
+    }
+    detail_filters = {k: v for k, v in detail_filters.items() if v}
+
     run_batch(
         root_ids=args.roots or [],
         lists=args.lists,
@@ -655,6 +1058,11 @@ if __name__ == "__main__":
         delay=args.delay,
         price_min=args.price_min,
         price_max=args.price_max,
+        review_min=args.review_min,
+        rating_min=args.rating_min,
+        rating_max=args.rating_max,
+        max_pages=args.max_pages,
         slugs=args.slugs,
+        detail_filters=detail_filters,
     )
 
