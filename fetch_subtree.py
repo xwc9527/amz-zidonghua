@@ -316,14 +316,22 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         if root_html:
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(root_html, "html.parser")
-            # Amazon 根类目页面 <span class="zg_selected"> 或 <h1> 中包含类目名
-            sel = soup.select_one("span.zg_selected, #zg_banner_text span")
+            # 榜单页左侧导航树中“选中”的节点即当前根类目名（locale 无关，无榜单前缀）
+            # Amazon 用 CSS-module 哈希类名，形如 _p13n-zg-nav-tree-all_style_zg-selected__XXXX
+            # 内部含无障碍隐藏子标签 <span class="zg-visually-hidden">(Current)</span>，需剔除
+            sel = soup.select_one('span[class*="zg-selected"], span.zg_selected')
+            if sel:
+                for hidden in sel.select('[class*="visually-hidden"]'):
+                    hidden.decompose()
             if sel and sel.get_text(strip=True):
                 root_name = sel.get_text(strip=True)
             else:
+                # 回退：h1 形如“Neuerscheinungen in Haustier”/“New Releases in X”，去掉前缀
                 h1 = soup.select_one("h1")
                 if h1 and h1.get_text(strip=True):
-                    root_name = h1.get_text(strip=True)
+                    h1_text = h1.get_text(strip=True)
+                    m = re.search(r"\bin\s+(.+)$", h1_text)
+                    root_name = m.group(1).strip() if m else h1_text
     except Exception:
         pass
     root_node = {

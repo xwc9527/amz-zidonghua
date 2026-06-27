@@ -34,7 +34,7 @@ PID_FILE    = "data/lb_pid.json"
 POOL_FILE   = "data/proxy_pool.json"
 CTRL_PORT   = 19897
 BASE_PORT   = 18001
-MAX_PROXIES = 8       # 默认上限
+MAX_PROXIES = 0       # 0 = 不限，取所有可用节点
 SKIP_PROTO  = {"hysteria2", "hysteria"}
 SKIP_NAMES  = {"剩余流量：866.47 GB", "套餐到期：长期有效", "PASS", "REJECT-DROP", "COMPATIBLE"}
 DB_FILES    = ["Country.mmdb", "geoip.dat", "geosite.dat"]
@@ -45,12 +45,30 @@ CDN_SERVERS = {
 }
 CHECK_URL   = "http://ip-api.com/json?fields=query,country"
 CHECK_TIMEOUT = 12
+CLASH_VERGE_API = "http://127.0.0.1:9097"
 
 
 # ── 工具 ──────────────────────────────────────────────────────────────
 
+def _get_local_active_nodes() -> set[str]:
+    """查询本机 Clash Verge 当前所有规则组选中的节点名，供排除。"""
+    try:
+        req = urllib.request.Request(f"{CLASH_VERGE_API}/proxies",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        active = set()
+        for name, info in data.get("proxies", {}).items():
+            if info.get("type") in ("Selector", "URLTest", "Fallback") and info.get("now"):
+                active.add(info["now"])
+        return active
+    except Exception as e:
+        print(f"[warn] 无法查询 Clash Verge 当前节点: {e}")
+        return set()
+
+
 def _load_nodes(max_n: int = MAX_PROXIES) -> list:
-    """从 probe_results.json + profile 加载可用节点，按延迟排序，取前 max_n 个。"""
+    """从 probe_results.json + profile 加载可用节点，按延迟排序。max_n=0 表示不限。"""
     with open(PROBE_FILE, encoding="utf-8") as f:
         probe = json.load(f)
     with open(PROFILE, encoding="utf-8") as f:
@@ -63,10 +81,10 @@ def _load_nodes(max_n: int = MAX_PROXIES) -> list:
         cfg = profile_map.get(n["name"])
         if not cfg or cfg.get("server", "") in CDN_SERVERS:
             continue
-        cfg = dict(cfg)          # 不修改原始 profile_map
+        cfg = dict(cfg)
         cfg["_delay"] = n.get("delay", 9999)
         nodes.append(cfg)
-        if len(nodes) >= max_n:
+        if max_n > 0 and len(nodes) >= max_n:
             break
     return nodes
 
@@ -78,6 +96,15 @@ def _verify_ports(pool: list, timeout: int = CHECK_TIMEOUT) -> list[dict]:
     lock = threading.Lock()
     alive = []
 
+    # 获取本机公网 IP，用于过滤直连节点
+    local_ip = ""
+    try:
+        r = requests.get("http://ip-api.com/json?fields=query", timeout=5)
+        local_ip = r.json().get("query", "")
+        print(f"  [info] 本机公网IP: {local_ip}")
+    except Exception:
+        pass
+
     def _check(entry):
         px = {"http": entry["proxy"], "https": entry["proxy"]}
         try:
@@ -85,7 +112,7 @@ def _verify_ports(pool: list, timeout: int = CHECK_TIMEOUT) -> list[dict]:
             d = r.json()
             ip = d.get("query", "")
             country = d.get("country", "?")
-            if ip and not ip.startswith("192.") and not ip.startswith("10."):
+            if ip and not ip.startswith("192.") and not ip.startswith("10.") and ip != local_ip:
                 with lock:
                     entry = dict(entry)
                     entry["exit_ip"] = ip
@@ -105,7 +132,17 @@ def _verify_ports(pool: list, timeout: int = CHECK_TIMEOUT) -> list[dict]:
         t.join()
 
     alive.sort(key=lambda x: x["port"])
-    return alive
+
+    # 按出口 IP 去重：同一出口 IP 只保留延迟最低的节点
+    seen_ips = {}
+    for entry in sorted(alive, key=lambda x: x.get("delay") or 9999):
+        ip = entry.get("exit_ip", "")
+        if ip and ip not in seen_ips:
+            seen_ips[ip] = entry
+    deduped = sorted(seen_ips.values(), key=lambda x: x["port"])
+    if len(deduped) < len(alive):
+        print(f"  [去重] {len(alive)} 个端口 → {len(deduped)} 个独立出口IP")
+    return deduped
 
 
 def _build_mihomo_cfg(nodes: list) -> dict:
@@ -158,7 +195,19 @@ def cmd_start(max_n: int = MAX_PROXIES):
         time.sleep(3)
 
     nodes = _load_nodes(max_n)
-    print(f"[proxy] 候选节点: {len(nodes)} 个（上限 {max_n}）")
+
+    # 排除本机 Clash Verge 正在使用的节点
+    local_active = _get_local_active_nodes()
+    if local_active:
+        before = len(nodes)
+        excluded = [n["name"] for n in nodes if n["name"] in local_active]
+        nodes = [n for n in nodes if n["name"] not in local_active]
+        if excluded:
+            print(f"[proxy] 排除本机正在使用的 {len(excluded)} 个节点: {excluded}")
+        print(f"[proxy] 排除后剩余: {len(nodes)} 个（原 {before} 个）")
+
+    limit_str = f"上限 {max_n}" if max_n > 0 else "不限"
+    print(f"[proxy] 候选节点: {len(nodes)} 个（{limit_str}）")
     if not nodes:
         print("[proxy] 无可用节点，请先运行 probe_proxies.py")
         return
