@@ -569,6 +569,7 @@
     async function _fetchTreePage(parentId, q, limit, offset) {
       let url = API + '/api/v2/tree_children?parent=' + parentId + '&limit=' + limit + '&offset=' + offset + '&site=' + _currentSite.toUpperCase();
       if (q) url += '&q=' + encodeURIComponent(q);
+      if (_currentChart === 'la') url += '&na_only=1';
       const res = await fetchRetry(url + '&t=' + Date.now());
       return await res.json();
     }

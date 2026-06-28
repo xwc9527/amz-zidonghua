@@ -118,15 +118,26 @@ async def stats():
 # ── 类目树 ──
 
 @app.get("/api/v2/tree_children")
-async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: int = 0, site: str = "US"):
+async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: int = 0, site: str = "US", na_only: int = 0):
     limit = min(limit, 200)
     site = site.upper()
     if DB_BACKEND == "pg":
-        return await _tree_children_pg(parent, q, limit, offset, site)
+        return await _tree_children_pg(parent, q, limit, offset, site, na_only)
     else:
-        return await _tree_children_sqlite(parent, q, limit, offset, site)
+        return await _tree_children_sqlite(parent, q, limit, offset, site, na_only)
 
-async def _tree_children_pg(parent, q, limit, offset, site="US"):
+async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
+    if na_only:
+        sql = "SELECT name, node_id, depth, slug, na_valid, 0 as child_count FROM categories WHERE site = $1 AND na_valid = 1"
+        args = [site]
+        if q:
+            sql += " AND name ILIKE $2"
+            args.append(f"%{q}%")
+            sql += f" ORDER BY depth, name LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
+        else:
+            sql += f" ORDER BY depth, name LIMIT $2 OFFSET $3"
+        args.extend([limit, offset])
+        return await pg_query(sql, *args)
     if parent == "root":
         total = await pg_scalar("SELECT COUNT(*) FROM categories WHERE site = $1", site)
         root_rows = await pg_query("SELECT node_id, name FROM categories WHERE depth = 0 AND site = $1", site)
@@ -162,7 +173,18 @@ async def _tree_children_pg(parent, q, limit, offset, site="US"):
         args.extend([limit, offset])
         return await pg_query(sql, *args)
 
-async def _tree_children_sqlite(parent, q, limit, offset, site="US"):
+async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
+    # na_only 模式：平铺返回所有 na_valid=1 的节点，忽略层级
+    if na_only:
+        sql = """SELECT name, node_id, depth, slug, na_valid, 0 as child_count
+                 FROM categories WHERE site = ? AND na_valid = 1"""
+        params = [site]
+        if q:
+            sql += " AND name LIKE ?"
+            params.append(f"%{q}%")
+        sql += f" ORDER BY depth, name LIMIT {limit} OFFSET {offset}"
+        return await _sqlite_query(sql, params)
+
     if parent == "root":
         # 递归统计某根 node_id 下全部后代（通过 parent_node_id 链）
         async def _descendant_count(root_node_id):
