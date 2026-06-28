@@ -399,6 +399,7 @@
     }
     function selectChart(el, key, label) {
       if (el.classList.contains('disabled')) return;
+      const prev = _currentChart;
       document.getElementById('chartLabel').textContent = label;
       document.querySelectorAll('#chartDrop .dropdown-item').forEach(i => i.classList.remove('active'));
       el.classList.add('active');
@@ -411,6 +412,10 @@
       } else {
         mp.max = 2; mp.min = 1;
         if (+mp.value > 2) mp.value = 2;
+      }
+      if ((prev === 'la') !== (key === 'la')) {
+        taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
+        loadTaskDrillDown();
       }
     }
     function updateChartAvailability() {
