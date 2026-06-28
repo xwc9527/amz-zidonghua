@@ -541,10 +541,10 @@
       const d = child.depth != null ? child.depth : 1;
       const depthLabel = d > 0 ? 'L' + d : '';
 
-      // 最新到货模式：na_valid=1 才可操作，否则置灰
+      // 最新到货模式：叶子节点按 na_valid 控制，父节点始终可导航
       const isLA = _currentChart === 'la';
       const naSupported = child.na_valid === 1;
-      const laDisabled = isLA && !naSupported;
+      const laDisabled = isLA && !hasChild && !naSupported;
 
       // 链接：最新到货模式用搜索 URL，其它模式用新品榜 URL
       const siteDomains = {us:'https://www.amazon.com', de:'https://www.amazon.de', jp:'https://www.amazon.co.jp',
@@ -557,7 +557,7 @@
       const disabledStyle = laDisabled ? 'opacity:0.38; pointer-events:none;' : '';
       const naTag = isLA && naSupported ? '<span style="font-size:10px; color:#16a34a; font-weight:700; margin-left:4px; flex-shrink:0;">NEW</span>' : '';
 
-      return '<div class="drill-item ' + (isSel ? 'selected' : '') + (laDisabled ? ' la-disabled' : '') + '" style="' + (laDisabled ? 'cursor:default;' : '') + '" ondblclick="' + (!laDisabled && hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
+      return '<div class="drill-item ' + (isSel ? 'selected' : '') + (laDisabled ? ' la-disabled' : '') + '" style="' + (laDisabled ? 'cursor:default;' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
           '<input type="checkbox" ' + (isSel ? 'checked' : '') + (laDisabled ? ' disabled' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
           '<span class="item-name-wrap" style="' + disabledStyle + '"><a class="item-name" href="' + itemUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()' + (laDisabled ? '; return false;' : '') + '">' + child.name + '</a></span>' +
           naTag +
