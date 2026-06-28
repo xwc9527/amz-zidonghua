@@ -134,7 +134,7 @@ async def _tree_children_pg(parent, q, limit, offset, site="US"):
             return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in root_rows]
         return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
     elif (await pg_scalar("SELECT COUNT(*) FROM categories WHERE node_id=$1 AND depth=0 AND site=$2", parent, site)) > 0:
-        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
                  (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
                  FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
         args = [parent, site]
@@ -148,7 +148,7 @@ async def _tree_children_pg(parent, q, limit, offset, site="US"):
         args.extend([limit, offset])
         return await pg_query(sql, *args)
     else:
-        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
                  (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
                  FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
         args = [parent, site]
@@ -198,7 +198,7 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US"):
         total = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE site = ?", (site,))
         return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
     else:
-        sql = """SELECT c.name, c.node_id, c.depth, c.slug,
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
                  (WITH RECURSIVE sub AS (
                      SELECT node_id FROM categories WHERE parent_node_id = c.node_id
                      UNION ALL

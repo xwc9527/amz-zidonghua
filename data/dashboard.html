@@ -416,21 +416,10 @@
     function updateChartAvailability() {
       const la = document.getElementById('chartItemLA');
       if (!la) return;
-      if (_currentSite === 'us') {
-        la.classList.add('disabled');
-        la.style.opacity = '0.4';
-        la.style.cursor = 'not-allowed';
-        la.title = 'US站不支持最新到货';
-        if (_currentChart === 'la') {
-          const nr = document.querySelector('#chartDrop .dropdown-item[data-key="nr"]');
-          selectChart(nr, 'nr', '新品榜');
-        }
-      } else {
-        la.classList.remove('disabled');
-        la.style.opacity = '';
-        la.style.cursor = '';
-        la.title = '';
-      }
+      la.classList.remove('disabled');
+      la.style.opacity = '';
+      la.style.cursor = '';
+      la.title = '';
     }
     function selectCountry(el, site, flag, label) {
       document.getElementById('countryFlag').textContent = flag;
@@ -550,11 +539,28 @@
       const key = child.node_id;
       const isSel = _selectedNodes.has(key);
       const d = child.depth != null ? child.depth : 1;
-      const nrUrl = 'https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/';
       const depthLabel = d > 0 ? 'L' + d : '';
-      return '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
-          '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
-          '<span class="item-name-wrap"><a class="item-name" href="' + nrUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()">' + child.name + '</a></span>' +
+
+      // 最新到货模式：na_valid=1 才可操作，否则置灰
+      const isLA = _currentChart === 'la';
+      const naSupported = child.na_valid === 1;
+      const laDisabled = isLA && !naSupported;
+
+      // 链接：最新到货模式用搜索 URL，其它模式用新品榜 URL
+      const siteDomains = {us:'https://www.amazon.com', de:'https://www.amazon.de', jp:'https://www.amazon.co.jp',
+                           uk:'https://www.amazon.co.uk', fr:'https://www.amazon.fr'};
+      const domain = siteDomains[_currentSite] || 'https://www.amazon.com';
+      const itemUrl = isLA
+        ? (domain + '/s?rh=n%3A' + child.node_id + '&s=date-desc-rank')
+        : ('https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/');
+
+      const disabledStyle = laDisabled ? 'opacity:0.38; pointer-events:none;' : '';
+      const naTag = isLA && naSupported ? '<span style="font-size:10px; color:#16a34a; font-weight:700; margin-left:4px; flex-shrink:0;">NEW</span>' : '';
+
+      return '<div class="drill-item ' + (isSel ? 'selected' : '') + (laDisabled ? ' la-disabled' : '') + '" style="' + (laDisabled ? 'cursor:default;' : '') + '" ondblclick="' + (!laDisabled && hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
+          '<input type="checkbox" ' + (isSel ? 'checked' : '') + (laDisabled ? ' disabled' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
+          '<span class="item-name-wrap" style="' + disabledStyle + '"><a class="item-name" href="' + itemUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()' + (laDisabled ? '; return false;' : '') + '">' + child.name + '</a></span>' +
+          naTag +
           (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
           '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
       '</div>';
