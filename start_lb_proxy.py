@@ -35,7 +35,7 @@ POOL_FILE   = "data/proxy_pool.json"
 CTRL_PORT   = 19897
 BASE_PORT   = 18001
 MAX_PROXIES = 0       # 0 = 不限，取所有可用节点
-SKIP_PROTO  = {"hysteria2", "hysteria"}
+SKIP_PROTO  = {"hysteria"}   # 仅砍 hysteria v1 老协议；hy2 配置完整且 server 独立，放行（L0）
 SKIP_NAMES  = {"剩余流量：866.47 GB", "套餐到期：长期有效", "PASS", "REJECT-DROP", "COMPATIBLE"}
 DB_FILES    = ["Country.mmdb", "geoip.dat", "geosite.dat"]
 CDN_SERVERS = {

@@ -823,11 +823,8 @@ def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False, no
         print(f"{'='*50}")
         crawl_slug(slug, entries, max_depth=max_depth)
 
-    if not skip_breadcrumb:
-        print(f"\n{'='*50}")
-        print(f"Phase 2: 并发面包屑补全")
-        print(f"{'='*50}")
-        run_breadcrumb()
+    # 面包屑阶段已从工作流移除：无界 asin_q 会撑爆内存导致 OOM，
+    # 且实测 发现=0 毫无收益。仅保留 BFS。
 
     _clear_checkpoint()
     conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -848,6 +845,12 @@ SKIP_SLUG_KEYWORDS = {
     "collectible-coins", "entertainment-collectibles", "unique-finds",
     "handmade",
     "boost",
+    # ── 服装鞋帽箱包珠宝（用户要求排除） ──
+    "fashion", "clothing", "bekleidung", "shoes", "schuhe",
+    "jewelry", "schmuck", "watches", "uhren",
+    "luggage", "handbags", "koffer",
+    # ── 收藏品（钱币/球星卡，非标准品） ──
+    "coins", "collectible", "collectibles",
 }
 
 KEEP_SLUG_KEYWORDS = {
