@@ -115,7 +115,7 @@ PRODUCT_PRICE_MIN     = 0.0   # 价格下限（0 = 不限）
 PRODUCT_PRICE_MAX     = 0.0   # 价格上限（0 = 不限）
 
 # 抓取哪些榜单
-PRODUCT_LISTS = ["new-releases", "bestsellers", "most-wished-for"]
+PRODUCT_LISTS = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for", "most-gifted"]
 
 # 并发
 PRODUCT_WORKERS = 10
@@ -123,4 +123,3 @@ PRODUCT_WORKERS = 10
 # 输出
 PRODUCTS_DB_TABLE = "product_sightings"
 PRODUCTS_EXCEL    = os.path.join(DATA_DIR, "products.xlsx")
-

@@ -268,11 +268,9 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label">榜单商品总数</span>
+              <span class="filter-label" id="f_limit_label">抓取商品数</span>
               <div class="filter-inputs">
-                <input type="number" id="f_list_total_min" placeholder="最小" min="0">
-                <span class="filter-sep">~</span>
-                <input type="number" id="f_list_total_max" placeholder="最大" min="0">
+                <input type="number" id="f_list_limit" value="10" placeholder="10" min="1" max="100" oninput="syncLimitControl(false)">
               </div>
             </div>
             <div class="filter-item">
@@ -335,8 +333,7 @@
               </div>
             </div>
             <div style="position:absolute; right:16px; bottom:12px; display:flex; align-items:center; gap:6px;">
-              <span style="font-size:11px; color:var(--gray);">抓取页数</span>
-              <input type="number" id="f_max_pages" value="2" min="1" max="2" style="width:48px; padding:4px 6px; border:1px solid var(--border); border-radius:5px; font-size:12px; text-align:center; outline:none;">
+              <input type="hidden" id="f_max_pages" value="5" min="1">
               <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:36px; text-align:right;">0</span>
               <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
             </div>
@@ -405,17 +402,38 @@
       el.classList.add('active');
       _currentChart = key;
       document.getElementById('chartDrop').style.display = 'none';
-      const mp = document.getElementById('f_max_pages');
-      if (key === 'la') {
-        mp.max = 400; mp.min = 1;
-        if (+mp.value > 400) mp.value = 20;
-      } else {
-        mp.max = 2; mp.min = 1;
-        if (+mp.value > 2) mp.value = 2;
-      }
+      syncLimitControl(prev !== key);
       if ((prev === 'la') !== (key === 'la')) {
         taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
         loadTaskDrillDown();
+      }
+    }
+    function getLimitValue() {
+      const el = document.getElementById('f_list_limit');
+      let v = parseInt(el.value, 10);
+      if (!v || v < 1) v = 10;
+      if (_currentChart !== 'la' && v > 100) v = 100;
+      return v;
+    }
+    function syncLimitControl(resetValue) {
+      const input = document.getElementById('f_list_limit');
+      const label = document.getElementById('f_limit_label');
+      const pages = document.getElementById('f_max_pages');
+      if (!input || !label || !pages) return;
+      if (resetValue || !input.value) input.value = 10;
+      if (_currentChart === 'la') {
+        label.textContent = '抓取页数';
+        input.placeholder = '10';
+        input.min = 1;
+        input.removeAttribute('max');
+        pages.value = getLimitValue();
+      } else {
+        label.textContent = '抓取商品数';
+        input.placeholder = '10';
+        input.min = 1;
+        input.max = 100;
+        input.value = getLimitValue();
+        pages.value = Math.max(5, Math.ceil(getLimitValue() / 24));
       }
     }
     function updateChartAvailability() {
@@ -468,6 +486,8 @@
 
     // ── 筛选值收集 ──
     function getFilterValues() {
+      syncLimitControl(false);
+      const limitValue = getLimitValue();
       return {
         price_min: +document.getElementById('f_price_min').value || 0,
         price_max: +document.getElementById('f_price_max').value || 0,
@@ -488,8 +508,7 @@
         dim_l: +document.getElementById('f_dim_l').value || 0,
         dim_w: +document.getElementById('f_dim_w').value || 0,
         dim_h: +document.getElementById('f_dim_h').value || 0,
-        list_total_min: +document.getElementById('f_list_total_min').value || 0,
-        list_total_max: +document.getElementById('f_list_total_max').value || 0,
+        list_limit: _currentChart === 'la' ? 0 : limitValue,
         date_range: document.getElementById('f_date_range').value || '',
         date_from: document.getElementById('f_date_from').value || '',
         date_to: document.getElementById('f_date_to').value || '',
@@ -500,7 +519,7 @@
         shipping_val: +document.getElementById('f_shipping_val').value || 0,
         fulfillment_type: document.getElementById('f_fulfillment_type').value || '',
         country: (document.getElementById('f_country').value || '').trim(),
-        max_pages: +document.getElementById('f_max_pages').value || 2,
+        max_pages: _currentChart === 'la' ? limitValue : Math.max(5, Math.ceil(limitValue / 24)),
       };
     }
 
@@ -777,7 +796,7 @@
         if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
 
         const chartMap = {nr:'new-releases', bs:'bestsellers', ms:'movers-and-shakers', mw:'most-wished-for', mg:'most-gifted'};
-        const enabledLists = [chartMap[_currentChart]];
+        const enabledLists = _currentChart === 'la' ? [] : [chartMap[_currentChart]];
         const filters = getFilterValues();
         const params = {
           roots: allSelected,
@@ -856,6 +875,7 @@
     // ── 初始化 ──
     loadStats();
     updateChartAvailability();
+    syncLimitControl(false);
     loadTaskDrillDown();
     refreshProductStats();
     loadLiveProducts();

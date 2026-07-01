@@ -24,6 +24,13 @@ _product_proc = None
 _product_lock = threading.Lock()
 _pool = None
 
+def _positive_int(value, default):
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
@@ -336,6 +343,19 @@ async def start_products(body: dict):
     with _product_lock:
         if _product_proc is not None and _product_proc.poll() is None:
             return {"status": "already_running"}
+        chart = body.get("chart", "")
+        if chart == "la":
+            cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
+            if body.get("roots"):
+                cmd += ["--roots"] + body["roots"]
+            else:
+                return {"status": "error", "msg": "latest arrivals requires roots"}
+            if body.get("site"):
+                cmd += ["--site", body["site"]]
+            cmd += ["--max-pages", str(_positive_int(body.get("max_pages"), 10))]
+            _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR)
+            return {"status": "started", "pid": _product_proc.pid}
+
         cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_products.py")]
         if body.get("slugs"):
             cmd += ["--slugs"] + body["slugs"]
@@ -347,6 +367,9 @@ async def start_products(body: dict):
             cmd += ["--lists"] + body["lists"]
         if body.get("site"):
             cmd += ["--site", body["site"]]
+        list_limit = min(_positive_int(body.get("list_limit"), 10), 100)
+        page_cap = max(5, (list_limit + 23) // 24)
+        cmd += ["--list-limit", str(list_limit), "--max-pages", str(page_cap)]
         param_flags = [
             ("review_max", "--review-max"), ("review_min", "--review-min"),
             ("min_list", "--min-list"),
@@ -358,13 +381,11 @@ async def start_products(body: dict):
             ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
             ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
             ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
-            ("list_total_min", "--list-total-min"), ("list_total_max", "--list-total-max"),
             ("shipping_fee", "--shipping-fee"), ("shipping_op", "--shipping-op"),
             ("shipping_val", "--shipping-val"),
             ("fulfillment_type", "--fulfillment-type"),
             ("country", "--country"),
             ("date_range", "--date-range"), ("date_from", "--date-from"), ("date_to", "--date-to"),
-            ("max_pages", "--max-pages"),
             ("delay", "--delay"),
         ]
         for key, flag in param_flags:

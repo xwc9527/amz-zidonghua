@@ -57,7 +57,7 @@ DEFAULT_MIN_LIST_SIZE = 100
 DEFAULT_PRICE_MIN     = 0.0
 DEFAULT_PRICE_MAX     = 0.0
 DEFAULT_DELAY         = 2.0   # 请求间隔（秒）
-DEFAULT_LISTS         = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for"]
+DEFAULT_LISTS         = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for", "most-gifted"]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -86,6 +86,7 @@ LIST_LABELS = {
     "bestsellers":        "畅销榜",
     "movers-and-shakers": "飙升榜",
     "most-wished-for":    "心愿单",
+    "most-gifted":        "礼品榜",
 }
 
 # 榜单名 → categories 表列名（用于写入验证结果）
@@ -261,6 +262,7 @@ _DETAIL_COLS = [
     ("shipping_fee_value", "REAL"),
     ("fulfillment_type", "TEXT"),
     ("country_of_origin", "TEXT"),
+    ("is_bestseller", "INTEGER DEFAULT 0"),
     ("detail_scraped", "INTEGER DEFAULT 0"),
 ]
 
@@ -499,7 +501,23 @@ def extract_list_total(html: str) -> int:
     m2 = re.search(r'showing\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)', html, re.IGNORECASE)
     if m2:
         return int(m2.group(1).replace(",", ""))
-    return 0
+    soup = BeautifulSoup(html, "html.parser")
+    cards = _select_product_items(soup)
+    if cards:
+        return len(cards)
+    asins = {m.group(1) for m in re.finditer(r"/dp/([A-Z0-9]{10})", html)}
+    return len(asins)
+
+
+def _select_product_items(soup: BeautifulSoup) -> list:
+    items = soup.select("[id^='gridItemRoot']")
+    if not items:
+        items = soup.select(".zg-grid-general-faceout")
+    return items
+
+
+def _count_product_items(html: str) -> int:
+    return len(_select_product_items(BeautifulSoup(html, "html.parser")))
 
 
 def parse_products(html: str, node_id: str, category_name: str,
@@ -510,16 +528,17 @@ def parse_products(html: str, node_id: str, category_name: str,
                    price_max: float = 0.0,
                    review_min: int = 0,
                    rating_min: float = 0.0,
-                   rating_max: float = 0.0) -> list:
+                   rating_max: float = 0.0,
+                   list_limit: int = 0,
+                   position_start: int = 1) -> list:
     """解析单页 HTML，提取符合条件的商品。"""
     soup = BeautifulSoup(html, "html.parser")
-    items = soup.select("[id^='gridItemRoot']")
-    if not items:
-        items = soup.select(".zg-grid-general-faceout")
+    items = _select_product_items(soup)
 
     products = []
-    for item in items:
+    for idx, item in enumerate(items):
         p = {}
+        list_position = position_start + idx
 
         # ASIN
         link = item.select_one("a[href*='/dp/']")
@@ -597,12 +616,35 @@ def parse_products(html: str, node_id: str, category_name: str,
             rk = rank_el.get_text(strip=True).lstrip("#")
             if rk.isdigit():
                 p["rank"] = int(rk)
+                list_position = p["rank"]
+
+        if list_limit > 0 and list_position > list_limit:
+            continue
 
         # 视频标记
         p["has_video"] = 1 if item.select_one(".vse-video-badge, .a-icon-vse") else 0
 
         # Amazon's Choice
-        p["is_amazon_choice"] = 1 if item.select_one(".a-badge[data-a-badge-type='amazons-choice']") else 0
+        badge_text = " ".join(
+            el.get_text(" ", strip=True)
+            for el in item.select(".a-badge, .a-badge-label, .a-badge-label-inner, [data-a-badge-type]")
+        )
+        badge_type = " ".join(
+            el.get("data-a-badge-type", "")
+            for el in item.select("[data-a-badge-type]")
+        )
+        badge_blob = f"{badge_type} {badge_text}".lower()
+        p["is_amazon_choice"] = 1 if (
+            "amazons-choice" in badge_blob
+            or "amazon's choice" in badge_blob
+            or "amazon choice" in badge_blob
+            or "amazon\u304a\u3059\u3059\u3081" in badge_blob
+        ) else 0
+        p["is_bestseller"] = 1 if re.search(
+            r"best[\s-]*seller|bestseller|\u30d9\u30b9\u30c8\u30bb\u30e9\u30fc|\u58f2\u308c\u7b4b",
+            badge_blob,
+            re.I,
+        ) else 0
 
         # ── 评论数筛选 ──
         rc = p.get("review_count", 0)
@@ -613,6 +655,8 @@ def parse_products(html: str, node_id: str, category_name: str,
 
         # ── 评分筛选 ──
         rt = p.get("rating")
+        if (rating_min > 0 or rating_max > 0) and rt is None:
+            continue
         if rt is not None:
             if rating_min > 0 and rt < rating_min:
                 continue
@@ -621,6 +665,8 @@ def parse_products(html: str, node_id: str, category_name: str,
 
         # ── 价格筛选 ──
         price = p.get("price")
+        if (price_min > 0 or price_max > 0) and price is None:
+            continue
         if price is not None:
             if price_min > 0 and price < price_min:
                 continue
@@ -658,6 +704,31 @@ def parse_detail_fields(html: str) -> dict:
     """从详情页HTML提取补全字段。"""
     soup = BeautifulSoup(html, "html.parser")
     d = {}
+
+    badge_blob = " ".join(
+        el.get_text(" ", strip=True)
+        for el in soup.select(
+            ".a-badge, .a-badge-label, .a-badge-label-inner, "
+            "[data-a-badge-type], #acBadge_feature_div, #zeitgeistBadge_feature_div, "
+            "#badge_feature_div"
+        )
+    )
+    badge_blob = f"{badge_blob} " + " ".join(
+        el.get("data-a-badge-type", "")
+        for el in soup.select("[data-a-badge-type]")
+    )
+    badge_blob_l = badge_blob.lower()
+    d["is_amazon_choice"] = 1 if (
+        "amazons-choice" in badge_blob_l
+        or "amazon's choice" in badge_blob_l
+        or "amazon choice" in badge_blob_l
+        or "amazon\u304a\u3059\u3059\u3081" in badge_blob_l
+    ) else 0
+    d["is_bestseller"] = 1 if re.search(
+        r"#\s*1\s+best\s+seller|best\s+seller\s+in|\u30d9\u30b9\u30c8\u30bb\u30e9\u30fc|\u58f2\u308c\u7b4b",
+        badge_blob,
+        re.I,
+    ) else 0
 
     # BSR
     bsr_section = (
@@ -792,8 +863,10 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
     def _range_check(val, fmin_key, fmax_key):
         fmin = filters.get(fmin_key, 0)
         fmax = filters.get(fmax_key, 0)
-        if val is None:
+        if not fmin and not fmax:
             return True
+        if val is None:
+            return False
         if fmin and val < fmin:
             return False
         if fmax and val > fmax:
@@ -814,20 +887,22 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
     wmax = filters.get("weight_max", 0)
     if wmin or wmax:
         w = detail.get("item_weight")
-        if w:
-            wm = re.search(r"([\d,.]+)", w)
-            if wm:
-                wv = float(wm.group(1).replace(",", "."))
-                if "kg" in w.lower() or "kilogramm" in w.lower():
-                    wv *= 2.205
-                elif "ounce" in w.lower() or "oz" in w.lower():
-                    wv /= 16
-                elif "gramm" in w.lower() or (" g" in w.lower() and "kg" not in w.lower()):
-                    wv *= 0.0022
-                if wmin and wv < wmin:
-                    return False
-                if wmax and wv > wmax:
-                    return False
+        if not w:
+            return False
+        wm = re.search(r"([\d,.]+)", w)
+        if not wm:
+            return False
+        wv = float(wm.group(1).replace(",", "."))
+        if "kg" in w.lower() or "kilogramm" in w.lower():
+            wv *= 2.205
+        elif "ounce" in w.lower() or "oz" in w.lower():
+            wv /= 16
+        elif "gramm" in w.lower() or (" g" in w.lower() and "kg" not in w.lower()):
+            wv *= 0.0022
+        if wmin and wv < wmin:
+            return False
+        if wmax and wv > wmax:
+            return False
 
     # 尺寸
     dl = filters.get("dim_l", 0)
@@ -835,31 +910,36 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
     dh = filters.get("dim_h", 0)
     if dl or dw or dh:
         dims_raw = detail.get("item_dimensions", "")
-        if dims_raw:
-            nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", dims_raw)]
-            if "cm" in dims_raw.lower():
-                nums = [n / 2.54 for n in nums]
-            nums.sort(reverse=True)
-            while len(nums) < 3:
-                nums.append(0)
-            if dl and nums[0] > dl:
-                return False
-            if dw and nums[1] > dw:
-                return False
-            if dh and nums[2] > dh:
-                return False
+        if not dims_raw:
+            return False
+        nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", dims_raw)]
+        if not nums:
+            return False
+        if "cm" in dims_raw.lower():
+            nums = [n / 2.54 for n in nums]
+        nums.sort(reverse=True)
+        while len(nums) < 3:
+            nums.append(0)
+        if dl and nums[0] > dl:
+            return False
+        if dw and nums[1] > dw:
+            return False
+        if dh and nums[2] > dh:
+            return False
 
     # 运费
     sf = filters.get("shipping_fee", "")
-    if sf == "free" and detail.get("shipping_fee_value") is not None and detail["shipping_fee_value"] > 0:
+    if sf in ("free", "paid", "custom") and detail.get("shipping_fee_value") is None:
         return False
-    if sf == "paid" and detail.get("shipping_fee_value") is not None and detail["shipping_fee_value"] == 0:
+    if sf == "free" and detail["shipping_fee_value"] > 0:
+        return False
+    if sf == "paid" and detail["shipping_fee_value"] == 0:
         return False
     if sf == "custom":
         sop = filters.get("shipping_op", "lte")
         sval = filters.get("shipping_val", 0)
         sfv = detail.get("shipping_fee_value")
-        if sfv is not None and sval > 0:
+        if sval > 0:
             if sop == "lte" and sfv > sval:
                 return False
             if sop == "gte" and sfv < sval:
@@ -867,18 +947,30 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
 
     # 配送模式
     ft = filters.get("fulfillment_type", "")
-    if ft and detail.get("fulfillment_type") and detail["fulfillment_type"] != ft:
-        return False
+    if ft:
+        if not detail.get("fulfillment_type"):
+            return False
+        if detail["fulfillment_type"] != ft:
+            return False
 
     # 产地
     country = filters.get("country", "")
-    if country and detail.get("country_of_origin"):
+    if country:
+        if not detail.get("country_of_origin"):
+            return False
         if country.lower() not in detail["country_of_origin"].lower():
             return False
 
+    if filters.get("amazons_choice") and detail.get("is_amazon_choice") != 1:
+        return False
+    if filters.get("bestseller") and detail.get("is_bestseller") != 1:
+        return False
+
     # 上架日期
     date_range = filters.get("date_range", "")
-    if date_range and detail.get("date_first_available"):
+    if date_range:
+        if not detail.get("date_first_available"):
+            return False
         try:
             dfa = datetime.strptime(detail["date_first_available"], "%Y-%m-%d")
             if date_range == "custom":
@@ -893,7 +985,7 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
                 if (datetime.now() - dfa).days > days:
                     return False
         except (ValueError, TypeError):
-            pass
+            return False
 
     return True
 
@@ -958,12 +1050,19 @@ def process_node(node: dict, lists: list, review_max: int,
                  review_min: int = 0,
                  rating_min: float = 0.0, rating_max: float = 0.0,
                  max_pages: int = 2, delay: float = 2.0,
-                 detail_filters: dict = None):
+                 detail_filters: dict = None,
+                 list_limit: int = 10):
     """处理单个节点的所有榜单。"""
     node_id = node["node_id"]
     slug    = extract_slug(node["url"])
     name    = node["name"]
     depth   = node["depth"]
+    try:
+        list_limit = int(list_limit)
+    except (TypeError, ValueError):
+        list_limit = 10
+    list_limit = max(1, min(list_limit, 100))
+    max_pages = max(max_pages, 5, (list_limit + 23) // 24)
 
     for list_type in lists:
         url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
@@ -989,21 +1088,28 @@ def process_node(node: dict, lists: list, review_max: int,
                 _stats["skipped"] += 1
             continue
 
+        position_start = 1
         all_products = parse_products(
             html, node_id, name, slug, depth,
             list_type, total, review_max, price_min, price_max,
-            review_min, rating_min, rating_max
+            review_min, rating_min, rating_max,
+            list_limit, position_start
         )
+        position_start += _count_product_items(html)
 
         for pg in range(2, max_pages + 1):
+            if list_limit > 0 and position_start > list_limit:
+                break
             rp = _safe_get(session, url_base + f"?pg={pg}", referer=url_base)
             if rp is None or rp.status_code != 200:
                 break
             all_products += parse_products(
                 rp.text, node_id, name, slug, depth,
                 list_type, total, review_max, price_min, price_max,
-                review_min, rating_min, rating_max
+                review_min, rating_min, rating_max,
+                list_limit, position_start
             )
+            position_start += _count_product_items(rp.text)
             time.sleep(delay + random.uniform(0, delay * 0.5))
 
         with _stats_lock:
@@ -1026,7 +1132,8 @@ def run_batch(root_ids: list, lists: list, review_max: int,
               rating_min: float = 0.0, rating_max: float = 0.0,
               max_pages: int = 2,
               slugs: list = None,
-              detail_filters: dict = None):
+              detail_filters: dict = None,
+              list_limit: int = 10):
     """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
     if slugs:
         nodes = get_nodes_by_slugs(slugs, lists)
@@ -1036,6 +1143,12 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     _stats["products_dup"] = 0
     with _seen_lock:
         _seen_asins.clear()
+    try:
+        list_limit = int(list_limit)
+    except (TypeError, ValueError):
+        list_limit = 10
+    list_limit = max(1, min(list_limit, 100))
+    max_pages = max(max_pages, 5, (list_limit + 23) // 24)
 
     if not nodes:
         _log.warning("[fetch_products] 无目标节点，退出")
@@ -1057,7 +1170,8 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         process_node(node, lists, review_max, min_list_size, session,
                      price_min, price_max, review_min,
                      rating_min, rating_max, max_pages, delay,
-                     detail_filters)
+                     detail_filters,
+                     list_limit)
         n = _stats["done_nodes"]
         total = _stats["total_nodes"]
         if n % 10 == 0 or n == total:
@@ -1170,8 +1284,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim-l", type=float, default=0)
     parser.add_argument("--dim-w", type=float, default=0)
     parser.add_argument("--dim-h", type=float, default=0)
-    parser.add_argument("--list-total-min", type=int, default=0)
-    parser.add_argument("--list-total-max", type=int, default=0)
+    parser.add_argument("--list-limit", type=int, default=10)
     parser.add_argument("--shipping-fee", default="")
     parser.add_argument("--shipping-op",  default="lte")
     parser.add_argument("--shipping-val", type=float, default=0)
@@ -1182,10 +1295,12 @@ if __name__ == "__main__":
     parser.add_argument("--date-to",    default="")
     parser.add_argument("--amazons-choice", action="store_true")
     parser.add_argument("--bestseller",     action="store_true")
-    parser.add_argument("--max-pages", type=int, default=2)
+    parser.add_argument("--max-pages", type=int, default=5)
     parser.add_argument("--delay",      type=float, default=DEFAULT_DELAY)
     parser.add_argument("--lists", nargs="+", default=DEFAULT_LISTS)
     args = parser.parse_args()
+    args.list_limit = max(1, min(args.list_limit, 100))
+    args.max_pages = max(args.max_pages, 5, (args.list_limit + 23) // 24)
 
     mp = get_marketplace(args.site)
     _SITE   = args.site.upper()
@@ -1208,6 +1323,8 @@ if __name__ == "__main__":
         "shipping_val": args.shipping_val,
         "fulfillment_type": args.fulfillment_type,
         "country": args.country,
+        "amazons_choice": args.amazons_choice,
+        "bestseller": args.bestseller,
         "date_range": args.date_range,
         "date_from": args.date_from, "date_to": args.date_to,
     }
@@ -1227,5 +1344,5 @@ if __name__ == "__main__":
         max_pages=args.max_pages,
         slugs=args.slugs,
         detail_filters=detail_filters,
+        list_limit=args.list_limit,
     )
-
