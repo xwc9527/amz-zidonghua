@@ -611,11 +611,11 @@ def parse_products(html: str, node_id: str, category_name: str,
                 p["review_count"] = int(rt_text)
 
         # 排名
-        rank_el = item.select_one(".zg-badge-text")
+        rank_el = item.select_one(".zg-badge-text, .zg-bdg-text")
         if rank_el:
-            rk = rank_el.get_text(strip=True).lstrip("#")
-            if rk.isdigit():
-                p["rank"] = int(rk)
+            rk = re.search(r"\d+", rank_el.get_text(strip=True))
+            if rk:
+                p["rank"] = int(rk.group())
                 list_position = p["rank"]
 
         if list_limit > 0 and list_position > list_limit:
