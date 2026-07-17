@@ -46,8 +46,8 @@ def _get_pg():
     global _pg_conn
     if _pg_conn is None or _pg_conn.closed:
         import psycopg2
-        from pg_config import PG_DSN
-        _pg_conn = psycopg2.connect(PG_DSN)
+        from pg_config import get_pg_dsn
+        _pg_conn = psycopg2.connect(get_pg_dsn())
         _pg_conn.autocommit = True
     return _pg_conn
 
@@ -267,6 +267,22 @@ _DETAIL_COLS = [
 ]
 
 
+def _pg_fetchall(sql, params=()):
+    conn = _get_pg()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _pg_execute(sql, params=()):
+    """执行 PG 写操作，返回 rowcount。"""
+    conn = _get_pg()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur.rowcount
+
+
 def db_conn():
     c = sqlite3.connect(DB_PATH, timeout=15)
     c.execute("PRAGMA journal_mode=WAL")
@@ -275,16 +291,11 @@ def db_conn():
     for col, ctype in _DETAIL_COLS:
         if col not in existing:
             c.execute(f"ALTER TABLE product_sightings ADD COLUMN {col} {ctype}")
+            existing.add(col)
+    if "site" not in existing:
+        c.execute("ALTER TABLE product_sightings ADD COLUMN site TEXT DEFAULT 'US'")
     c.commit()
     return c
-
-
-def _pg_fetchall(sql, params=()):
-    conn = _get_pg()
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 def get_descendant_nodes(root_ids: list, lists: list) -> list:
@@ -321,21 +332,24 @@ def get_descendant_nodes(root_ids: list, lists: list) -> list:
 def _get_descendant_nodes_pg(root_ids):
     ph = ",".join(["%s"] * len(root_ids))
     roots = _pg_fetchall(
-        f"SELECT node_id, path FROM categories WHERE node_id IN ({ph})", root_ids
+        f"SELECT node_id, path FROM categories WHERE site = %s AND node_id IN ({ph})",
+        [_SITE, *root_ids],
     )
     if not roots:
         return []
     clauses = []
-    params = list(root_ids)
+    params = [_SITE]
     for r in roots:
         if r.get("path"):
             clauses.append("path <@ %s::ltree")
             params.append(str(r["path"]))
-    if not clauses:
+    if len(params) == 1:
+        # 所有节点都无 path 时回退到 node_id IN（params 仅含 site）
         clauses.append(f"node_id IN ({ph})")
+        params.extend(root_ids)
     sql = f"""
         SELECT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL AND ({" OR ".join(clauses)})
+        WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(clauses)})
         ORDER BY depth DESC, name
     """
     result = _pg_fetchall(sql, params)
@@ -343,16 +357,35 @@ def _get_descendant_nodes_pg(root_ids):
     return result
 
 
+_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
+
+
+def _validate_slugs(slugs: list) -> list:
+    """校验 slug 格式，拒绝注入字符。"""
+    cleaned = []
+    for s in slugs:
+        if not isinstance(s, str) or not _SLUG_RE.match(s):
+            raise ValueError(f"非法 slug: {s!r}（仅允许字母数字、_、-，最长80）")
+        cleaned.append(s)
+    return cleaned
+
+
 def get_nodes_by_slugs(slugs: list, lists: list) -> list:
     """根据 L1 slug 查出所有后代节点。"""
+    slugs = _validate_slugs(slugs)
     if DB_BACKEND == "pg":
         return _get_nodes_by_slugs_pg(slugs)
     conn = db_conn()
     like_clauses = []
+    params = []
     for slug in slugs:
-        like_clauses.append(f"url LIKE '%/gp/new-releases/{slug}/%'")
-        like_clauses.append(f"url LIKE '%/gp/bestsellers/{slug}/%'")
-        like_clauses.append(f"url LIKE '%/gp/most-wished-for/{slug}/%'")
+        for pattern in (
+            f"%/gp/new-releases/{slug}/%",
+            f"%/gp/bestsellers/{slug}/%",
+            f"%/gp/most-wished-for/{slug}/%",
+        ):
+            like_clauses.append("url LIKE ?")
+            params.append(pattern)
     if not like_clauses:
         conn.close()
         return []
@@ -362,7 +395,7 @@ def get_nodes_by_slugs(slugs: list, lists: list) -> list:
           AND ({" OR ".join(like_clauses)})
         ORDER BY depth DESC, name
     """
-    rows = conn.execute(sql).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
     _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
@@ -370,11 +403,17 @@ def get_nodes_by_slugs(slugs: list, lists: list) -> list:
 
 
 def _get_nodes_by_slugs_pg(slugs):
+    slugs = _validate_slugs(slugs)
     like_clauses = []
+    params = [_SITE]
     for slug in slugs:
-        like_clauses.append(f"url LIKE '%/gp/new-releases/{slug}/%'")
-        like_clauses.append(f"url LIKE '%/gp/bestsellers/{slug}/%'")
-        like_clauses.append(f"url LIKE '%/gp/most-wished-for/{slug}/%'")
+        for pattern in (
+            f"%/gp/new-releases/{slug}/%",
+            f"%/gp/bestsellers/{slug}/%",
+            f"%/gp/most-wished-for/{slug}/%",
+        ):
+            like_clauses.append("url LIKE %s")
+            params.append(pattern)
     if not like_clauses:
         return []
     sql = f"""
@@ -382,7 +421,7 @@ def _get_nodes_by_slugs_pg(slugs):
         WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(like_clauses)})
         ORDER BY depth DESC, name
     """
-    result = _pg_fetchall(sql, (_SITE,))
+    result = _pg_fetchall(sql, params)
     _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
@@ -436,8 +475,8 @@ def save_products(products: list):
          rating, review_count, rank, image_url, product_url,
          has_video, is_amazon_choice,
          node_id, category_name, category_slug, category_depth,
-         list_type, list_total)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         list_type, list_total, site)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """
     saved = 0
     with _db_lock:
@@ -455,6 +494,7 @@ def save_products(products: list):
                         p["node_id"], p.get("category_name"),
                         p.get("category_slug"), p.get("category_depth"),
                         p["list_type"], p.get("list_total"),
+                        p.get("site", _SITE),
                     ))
                     saved += 1
                 except sqlite3.IntegrityError:
@@ -468,9 +508,24 @@ def save_products(products: list):
 def _save_products_pg(products):
     sql = """
         INSERT INTO product_sightings
-        (asin, name, price, review_count, rank, rating,
-         image_url, product_url, list_type, category_name, site)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        (asin, name, price, price_raw, original_price, discount_pct,
+         rating, review_count, rank, image_url, product_url,
+         has_video, is_amazon_choice,
+         node_id, category_name, category_slug, category_depth,
+         list_type, list_total, site)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT ON CONSTRAINT uq_ps_asin_node_list_site
+        DO UPDATE SET
+            name = EXCLUDED.name,
+            price = EXCLUDED.price,
+            price_raw = EXCLUDED.price_raw,
+            rating = EXCLUDED.rating,
+            review_count = EXCLUDED.review_count,
+            rank = EXCLUDED.rank,
+            image_url = EXCLUDED.image_url,
+            product_url = EXCLUDED.product_url,
+            list_total = EXCLUDED.list_total,
+            scraped_at = now()
     """
     saved = 0
     with _db_lock:
@@ -480,13 +535,17 @@ def _save_products_pg(products):
             try:
                 cur.execute(sql, (
                     p["asin"], p.get("name"), p.get("price"),
-                    p.get("review_count"), p.get("rank"), p.get("rating"),
+                    p.get("price_raw"), p.get("original_price"),
+                    p.get("discount_pct"), p.get("rating"),
+                    p.get("review_count"), p.get("rank"),
                     p.get("image_url"), p.get("product_url"),
-                    p["list_type"], p.get("category_name"), _SITE,
+                    p.get("has_video", 0), p.get("is_amazon_choice", 0),
+                    p.get("node_id"), p.get("category_name"),
+                    p.get("category_slug"), p.get("category_depth"),
+                    p["list_type"], p.get("list_total"),
+                    p.get("site", _SITE),
                 ))
                 saved += 1
-            except sqlite3.IntegrityError:
-                pass
             except Exception:
                 _log.debug(f"save_products 写入失败 asin={p.get('asin')}: {traceback.format_exc()}")
     return saved
@@ -1011,35 +1070,65 @@ def enrich_with_details(products: list, session: requests.Session,
                 continue
             detail["detail_scraped"] = 1
 
-            # 详情页筛选
+            # 详情页筛选 — 按 asin+site 删除，避免误伤其他站点
             if filters and not _check_detail_filters(detail, filters):
-                with _db_lock:
-                    conn = db_conn()
-                    try:
-                        conn.execute("DELETE FROM product_sightings WHERE asin=?", (asin,))
-                        conn.commit()
-                    finally:
-                        conn.close()
+                _delete_sighting(asin)
                 with _stats_lock:
                     _stats["products_saved"] -= 1
                 continue
 
-            # UPDATE DB
-            sets = ", ".join(f"{k}=?" for k in detail)
-            vals = list(detail.values()) + [asin]
-            with _db_lock:
-                conn = db_conn()
-                try:
-                    conn.execute(f"UPDATE product_sightings SET {sets} WHERE asin=?", vals)
-                    conn.commit()
-                finally:
-                    conn.close()
+            # UPDATE DB — 按 asin+site
+            _update_sighting_detail(asin, detail)
             p.update(detail)
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
             _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
         time.sleep(delay + random.uniform(delay * 0.3, delay * 0.8))
+
+
+def _delete_sighting(asin: str):
+    """按 asin + 当前站点删除 product_sightings 记录。"""
+    with _db_lock:
+        if DB_BACKEND == "pg":
+            _pg_execute(
+                "DELETE FROM product_sightings WHERE asin=%s AND site=%s",
+                (asin, _SITE),
+            )
+        else:
+            conn = db_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM product_sightings WHERE asin=? AND site=?",
+                    (asin, _SITE),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+
+def _update_sighting_detail(asin: str, detail: dict):
+    """按 asin + 当前站点更新详情字段。"""
+    with _db_lock:
+        if DB_BACKEND == "pg":
+            sets = ", ".join(f"{k}=%s" for k in detail)
+            vals = list(detail.values()) + [asin, _SITE]
+            _pg_execute(
+                f"UPDATE product_sightings SET {sets} WHERE asin=%s AND site=%s",
+                vals,
+            )
+        else:
+            sets = ", ".join(f"{k}=?" for k in detail)
+            vals = list(detail.values()) + [asin, _SITE]
+            conn = db_conn()
+            try:
+                conn.execute(
+                    f"UPDATE product_sightings SET {sets} WHERE asin=? AND site=?",
+                    vals,
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
 
 # ── Worker 主循环 ───────────────────────────────────────────────────

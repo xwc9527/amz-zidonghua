@@ -1,6 +1,6 @@
 # api_server.py — FastAPI v2 API (asyncpg + PostgreSQL)
-# 启动: uvicorn api_server:app --host 0.0.0.0 --port 8081
-# 回退: DB_BACKEND=sqlite uvicorn api_server:app --port 8081
+# 启动: DB_BACKEND=sqlite uvicorn api_server:app --host 127.0.0.1 --port 8081
+# PG:   set PG_DSN=postgresql://user:pass@localhost:5432/amz_selection
 import os, sys, subprocess, threading, logging, time
 import asyncpg
 from fastapi import FastAPI, Query, Request
@@ -14,8 +14,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
-# PG config
-from pg_config import PG_DSN
+# PG config（SQLite 模式可不设置 PG_DSN）
+from pg_config import PG_DSN, get_pg_dsn
 
 # SQLite fallback
 DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
@@ -35,7 +35,7 @@ def _positive_int(value, default):
 async def lifespan(app: FastAPI):
     global _pool
     if DB_BACKEND == "pg":
-        _pool = await asyncpg.create_pool(PG_DSN, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(get_pg_dsn(), min_size=2, max_size=10)
     yield
     if _pool:
         await _pool.close()
@@ -46,7 +46,24 @@ async def lifespan(app: FastAPI):
             _product_proc = None
 
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# CORS：默认仅本机；局域网访问时可通过 CORS_ORIGINS 追加，例如
+#   set CORS_ORIGINS=http://192.168.1.10:8081,http://localhost:8081
+_DEFAULT_CORS = [
+    "http://127.0.0.1:8081",
+    "http://localhost:8081",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "null",  # file:// 打开 dashboard 时 Origin 为 null
+]
+_extra_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+_cors_origins = _DEFAULT_CORS + _extra_cors
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -303,8 +320,40 @@ async def _products_sqlite(limit, offset, price_min, price_max, rating_min, rati
     except Exception:
         return []
 
+@app.get("/api/v2/new_arrivals")
+async def new_arrivals_api(
+    limit: int = Query(50, le=200), offset: int = 0,
+    site: str = None, signal_only: bool = False,
+):
+    """读取 fetch_new_arrivals.py 写入的 new_arrivals 表，打通看板展示链路。"""
+    if DB_BACKEND == "pg":
+        # PG 路径尚未建 new_arrivals 表；短期仅 SQLite 闭环
+        return []
+    cond = "WHERE 1=1"
+    params = []
+    if site:
+        cond += " AND site=?"
+        params.append(site.upper())
+    if signal_only:
+        cond += " AND is_signal=1"
+    # 字段别名对齐看板 /api/v2/products 渲染（name / date_first_available）
+    sql = f"""SELECT asin, title AS name, title, price, price_value, rating, review_count,
+              listing_date, listing_date AS date_first_available, listing_age_days,
+              bsr_main_category, bsr_main_rank, bsr_sub, bsr_sub AS bsr_sub_category,
+              image_url, product_url, node_id, category_name, category_depth,
+              site, is_signal, scraped_at
+              FROM new_arrivals {cond}
+              ORDER BY scraped_at DESC LIMIT {int(limit)} OFFSET {int(offset)}"""
+    try:
+        return await _sqlite_query(sql, params)
+    except Exception as e:
+        logging.warning(f"new_arrivals query failed: {e}")
+        return []
+
 @app.get("/api/v2/product_stats")
 async def product_stats():
+    running = _product_proc is not None and _product_proc.poll() is None
+    total, by_list, multi, na_total = 0, [], 0, 0
     try:
         if DB_BACKEND == "pg":
             total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
@@ -313,27 +362,41 @@ async def product_stats():
                 "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t"
             )
         else:
-            total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
-            by_list = await _sqlite_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
-            multi = await _sqlite_scalar(
-                "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
-            )
-        running = _product_proc is not None and _product_proc.poll() is None
-        return {"total_asins": total, "by_list": by_list, "multi_list": multi, "running": running}
-    except Exception:
-        return {"total_asins": 0, "by_list": [], "multi_list": 0, "running": False}
+            try:
+                total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+                by_list = await _sqlite_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
+                multi = await _sqlite_scalar(
+                    "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
+                )
+            except Exception as e:
+                logging.warning(f"product_sightings stats failed: {e}")
+            try:
+                na_total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
+            except Exception as e:
+                logging.warning(f"new_arrivals stats failed: {e}")
+    except Exception as e:
+        logging.warning(f"product_stats failed: {e}")
+    return {"total_asins": total, "new_arrivals": na_total, "by_list": by_list or [], "multi_list": multi, "running": running}
 
 @app.get("/api/v2/product_progress")
 async def product_progress():
     running = _product_proc is not None and _product_proc.poll() is None
+    ps, na = 0, 0
     try:
         if DB_BACKEND == "pg":
-            total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            ps = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
         else:
-            total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            try:
+                ps = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            except Exception:
+                ps = 0
+            try:
+                na = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
+            except Exception:
+                na = 0
     except Exception:
-        total = 0
-    return {"running": running, "total_products": total}
+        pass
+    return {"running": running, "total_products": ps + na, "product_sightings": ps, "new_arrivals": na}
 
 # ── 爬虫控制 ──
 
@@ -411,11 +474,22 @@ async def stop_products():
     return {"status": "stopped", "pid": pid}
 
 @app.post("/api/v2/export_excel")
-async def export_excel():
+async def export_excel(body: dict = None):
+    """按当前看板模式导出：chart=la → new_arrivals，否则 → product_sightings。"""
+    body = body or {}
+    chart = (body.get("chart") or "").strip()
+    site = body.get("site")
     try:
+        if chart == "la":
+            import fetch_new_arrivals
+            path = fetch_new_arrivals.export_excel(
+                site=site,
+                signal_only=bool(body.get("signal_only")),
+            )
+            return {"status": "ok", "file": path, "source": "new_arrivals"}
         import fetch_products
         fetch_products.export_excel()
-        return {"status": "ok"}
+        return {"status": "ok", "file": "data/products.xlsx", "source": "product_sightings"}
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 

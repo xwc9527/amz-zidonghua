@@ -782,5 +782,51 @@ def _export_summary():
                   f"{r['price'] or '?':>10}  {(r['title'] or '')[:50]}")
 
 
+def export_excel(site: str = None, signal_only: bool = False) -> str:
+    """导出 new_arrivals 到 Excel，返回文件路径。"""
+    try:
+        import openpyxl
+    except ImportError:
+        raise RuntimeError("需要 openpyxl: pip install openpyxl")
+
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    conn.row_factory = sqlite3.Row
+    sql = """
+        SELECT asin, title, price, price_value, rating, review_count,
+               listing_date, listing_age_days, bsr_main_category, bsr_main_rank, bsr_sub,
+               image_url, product_url, node_id, category_name, category_depth,
+               site, is_signal, scraped_at
+        FROM new_arrivals WHERE 1=1
+    """
+    params = []
+    if site:
+        sql += " AND site=?"
+        params.append(site.upper())
+    if signal_only:
+        sql += " AND is_signal=1"
+    sql += " ORDER BY is_signal DESC, bsr_main_rank ASC NULLS LAST, scraped_at DESC"
+    # SQLite 不支持 NULLS LAST，改写
+    sql = sql.replace(" NULLS LAST", "")
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    if not rows:
+        raise RuntimeError("new_arrivals 无数据可导出")
+
+    excel_path = os.path.join(DATA_DIR, "new_arrivals.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "最新到货"
+    headers = ["ASIN", "标题", "价格", "价格数值", "评分", "评论数",
+               "上架日期", "上架天数", "BSR大类", "BSR大类排名", "BSR子类",
+               "图片URL", "商品URL", "节点ID", "类目名", "类目深度",
+               "站点", "信号新品", "抓取时间"]
+    ws.append(headers)
+    for r in rows:
+        ws.append(list(r))
+    wb.save(excel_path)
+    _log.info(f"[fetch_new_arrivals] Excel 已导出: {excel_path} ({len(rows)} 行)")
+    return excel_path
+
+
 if __name__ == "__main__":
     main()

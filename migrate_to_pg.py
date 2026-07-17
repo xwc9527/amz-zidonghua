@@ -11,7 +11,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
     import psycopg2
 
-from pg_config import PG_DSN
+from pg_config import get_pg_dsn
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
@@ -77,7 +77,7 @@ def migrate():
 
     # 连接 PG
     print(f"\n连接 PostgreSQL ...")
-    conn = psycopg2.connect(PG_DSN)
+    conn = psycopg2.connect(get_pg_dsn())
     conn.autocommit = True
     cur = conn.cursor()
 
@@ -110,7 +110,7 @@ def migrate():
             c.get('parent_node_id'), c.get('true_depth'), c.get('nr_valid'),
             c.get('bs_valid'), c.get('ms_valid'), c.get('mw_valid'),
             c.get('breadcrumb_checked', 0), c.get('slug', ''),
-            c.get('child_count', 0), 'US', lpath
+            c.get('child_count', 0), c.get('site') or 'US', lpath
         ]
         batch.append(vals)
 
@@ -127,17 +127,38 @@ def migrate():
     cur.execute("ALTER TABLE categories ENABLE TRIGGER trg_child_inc")
     cur.execute("ALTER TABLE categories ENABLE TRIGGER trg_child_dec")
 
-    # 写入商品
+    # 写入商品（字段与 pg_schema product_sightings 对齐，保留详情/站点/节点上下文）
     if prods:
         print("写入商品 ...")
-        prod_cols = ['name', 'asin', 'price', 'review_count', 'rank', 'rating',
-                     'image_url', 'product_url', 'list_type', 'category_name', 'scraped_at']
-        prod_ph = ','.join(['%s'] * len(prod_cols))
-        prod_sql = f"INSERT INTO product_sightings ({','.join(prod_cols)}) VALUES ({prod_ph})"
+        prod_cols = [
+            'name', 'asin', 'price', 'price_raw', 'original_price', 'discount_pct',
+            'review_count', 'rank', 'rating', 'image_url', 'product_url',
+            'has_video', 'is_amazon_choice', 'list_type', 'list_total',
+            'category_name', 'category_slug', 'category_depth', 'node_id', 'site',
+            'scraped_at',
+            'bsr_main_rank', 'bsr_main_category', 'bsr_sub_rank', 'bsr_sub_category',
+            'variant_option_count', 'other_sellers_count', 'item_weight', 'item_dimensions',
+            'date_first_available', 'shipping_fee', 'shipping_fee_value',
+            'fulfillment_type', 'country_of_origin', 'is_bestseller', 'detail_scraped',
+        ]
+        # 仅写入 SQLite 行里实际存在的列，避免旧库缺列时报错
+        available = set(prods[0].keys()) if prods else set()
+        use_cols = [c for c in prod_cols if c in available]
+        # site 若 SQLite 无该列，回退默认 US
+        if 'site' not in use_cols:
+            use_cols.append('site')
+        prod_ph = ','.join(['%s'] * len(use_cols))
+        prod_sql = f"INSERT INTO product_sightings ({','.join(use_cols)}) VALUES ({prod_ph})"
 
         prod_batch = []
         for p in prods:
-            prod_batch.append([p.get(c) for c in prod_cols])
+            row = []
+            for c in use_cols:
+                if c == 'site':
+                    row.append(p.get('site') or 'US')
+                else:
+                    row.append(p.get(c))
+            prod_batch.append(row)
 
         for i in range(0, len(prod_batch), CHUNK):
             chunk = prod_batch[i:i+CHUNK]
@@ -166,7 +187,8 @@ def migrate():
     print(f"  有 ltree path: {with_path}")
 
     # trgm 搜索测试
-    cur.execute("SELECT name FROM categories WHERE name %%%% 'kitchn' LIMIT 3")
+    # psycopg2 将 %% 转义为单个 %，即 pg_trgm 相似度运算符
+    cur.execute("SELECT name FROM categories WHERE name %% %s LIMIT 3", ("kitchn",))
     trgm_hits = [r[0] for r in cur.fetchall()]
     print(f"  trgm 搜索 'kitchn': {trgm_hits}")
 

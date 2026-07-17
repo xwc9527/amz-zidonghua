@@ -690,11 +690,14 @@ def main():
 
     _ensure_tables()
 
+    host = os.getenv("BIND_HOST", "127.0.0.1")
     handler = functools.partial(DashboardHandler, directory=DATA_DIR)
-    server = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    server = ThreadingHTTPServer((host, port), handler)
     stats = db_query("SELECT COUNT(*) as total FROM categories")[0]
-    print(f"[看板] http://localhost:{port}/dashboard.html", flush=True)
+    print(f"[看板] http://127.0.0.1:{port}/dashboard.html  (bind={host})", flush=True)
     print(f"[看板] 数据库: {DB_FILE}  当前 {stats['total']} 个节点", flush=True)
+    if host == "0.0.0.0":
+        print("[看板] 警告: 已绑定 0.0.0.0，局域网可访问", flush=True)
     print("[看板] Ctrl+C 停止", flush=True)
 
     try:

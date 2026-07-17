@@ -4,11 +4,11 @@ import sys, os
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 import psycopg2
-from pg_config import PG_DSN
+from pg_config import get_pg_dsn
 
 
 def snapshot():
-    conn = psycopg2.connect(PG_DSN)
+    conn = psycopg2.connect(get_pg_dsn())
     conn.autocommit = True
     cur = conn.cursor()
 

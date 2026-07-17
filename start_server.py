@@ -1,23 +1,27 @@
 # start_server.py — 统一启动 API 服务 (端口8081) 带守护自重启
 # 用法: python start_server.py [端口号]
 # 访问: http://localhost:8081/dashboard.html
+# 局域网访问: set BIND_HOST=0.0.0.0 && python start_server.py
 
 import os, sys, subprocess, time
 
 def main():
     port = sys.argv[1] if len(sys.argv) > 1 else "8081"
+    host = os.getenv("BIND_HOST", "127.0.0.1")
     base_dir = os.path.dirname(os.path.abspath(__file__))
     env = os.environ.copy()
     env.setdefault("DB_BACKEND", "sqlite")
 
-    print(f"[守护] API 服务守护进程已启动，端口 {port}", flush=True)
-    print(f"[守护] 访问 http://localhost:{port}/dashboard.html", flush=True)
+    print(f"[守护] API 服务守护进程已启动，{host}:{port}", flush=True)
+    print(f"[守护] 访问 http://127.0.0.1:{port}/dashboard.html", flush=True)
+    if host == "0.0.0.0":
+        print("[守护] 警告: 已绑定 0.0.0.0，局域网可访问爬虫控制接口", flush=True)
 
     while True:
         try:
             p = subprocess.Popen(
                 [sys.executable, "-m", "uvicorn", "api_server:app",
-                 "--host", "0.0.0.0", "--port", port],
+                 "--host", host, "--port", port],
                 cwd=base_dir, env=env
             )
             p.wait()
