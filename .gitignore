@@ -1,5 +1,6 @@
-# 数据库（体积大，不入库）
+# 数据库（默认不入库；categories.db 含类目树，显式入库）
 data/*.db
+!data/categories.db
 data/*.db-wal
 data/*.db-shm
 

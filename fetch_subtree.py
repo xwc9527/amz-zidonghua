@@ -7,6 +7,7 @@ fetch_subtree.py — 按需抓取类目子树（多 worker 并发 + 端口池）
   python fetch_subtree.py --breadcrumb-only         # 仅面包屑（多 worker 并发）
   python fetch_subtree.py --all                     # 所有 L1 大类
 """
+import html as htmlmod
 import json, os, re, sys, time, random, sqlite3, threading, argparse
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,6 +22,66 @@ from config import (
     HEADERS, DATA_DIR, DB_FILE, PROXY_POOL_FILE,
     PROXY_ENABLED, PROXY_VERIFY, get_marketplace,
 )
+
+# L1 根节点可读名回退（页面 zg-selected/h1 解析失败时用，避免把 slug 当展示名）
+L1_DISPLAY_NAMES = {
+    "US": {
+        "appliances": "Appliances",
+        "arts-crafts": "Arts, Crafts & Sewing",
+        "automotive": "Automotive",
+        "baby-products": "Baby",
+        "beauty": "Beauty & Personal Care",
+        "electronics": "Electronics",
+        "hi": "Tools & Home Improvement",
+        "home-garden": "Home & Kitchen",
+        "kitchen": "Kitchen & Dining",
+        "lawn-garden": "Patio, Lawn & Garden",
+        "musical-instruments": "Musical Instruments",
+        "office-products": "Office Products",
+        "pc": "Computers & Accessories",
+        "pet-supplies": "Pet Supplies",
+        "photo": "Camera & Photo Products",
+        "sporting-goods": "Sports & Outdoors",
+        "toys-and-games": "Toys & Games",
+        "wireless": "Cell Phones & Accessories",
+    },
+    "DE": {
+        "appliances": "Elektro-Großgeräte",
+        "automotive": "Auto & Motorrad",
+        "baby": "Baby",
+        "beauty": "Kosmetik",
+        "ce-de": "Elektronik & Foto",
+        "computers": "Computer & Zubehör",
+        "diy": "Baumarkt",
+        "drugstore": "Drogerie & Körperpflege",
+        "garden": "Garten",
+        "kitchen": "Küche, Haushalt & Wohnen",
+        "lighting": "Beleuchtung",
+        "musical-instruments": "Musikinstrumente & DJ-Equipment",
+        "officeproduct": "Bürobedarf & Schreibwaren",
+        "pet-supplies": "Haustier",
+        "photo": "Kamera & Foto",
+        "sports": "Sport & Freizeit",
+        "toys": "Spielzeug",
+    },
+    "JP": {
+        "appliances": "大型家電",
+        "automotive": "車＆バイク",
+        "baby": "ベビー＆マタニティ",
+        "beauty": "ビューティー",
+        "computers": "パソコン・周辺機器",
+        "diy": "DIY・工具・ガーデン",
+        "electronics": "家電＆カメラ",
+        "hobby": "ホビー",
+        "hpc": "ドラッグストア",
+        "kitchen": "ホーム＆キッチン",
+        "musical-instruments": "楽器・音響機器",
+        "office-products": "文房具・オフィス用品",
+        "pet-supplies": "ペット用品",
+        "sports": "スポーツ＆アウトドア",
+        "toys": "おもちゃ",
+    },
+}
 
 # 运行时站点配置（由 CLI --site 设置）
 _mp     = get_marketplace("US")
@@ -314,7 +375,6 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         session0 = _make_session(0)
         root_html = _safe_get(session0, root_url)
         if root_html:
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(root_html, "html.parser")
             # 榜单页左侧导航树中“选中”的节点即当前根类目名（locale 无关，无榜单前缀）
             # Amazon 用 CSS-module 哈希类名，形如 _p13n-zg-nav-tree-all_style_zg-selected__XXXX
@@ -324,16 +384,18 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                 for hidden in sel.select('[class*="visually-hidden"]'):
                     hidden.decompose()
             if sel and sel.get_text(strip=True):
-                root_name = sel.get_text(strip=True)
+                root_name = htmlmod.unescape(sel.get_text(strip=True)).replace("\xa0", " ").strip()
             else:
                 # 回退：h1 形如“Neuerscheinungen in Haustier”/“New Releases in X”，去掉前缀
                 h1 = soup.select_one("h1")
                 if h1 and h1.get_text(strip=True):
-                    h1_text = h1.get_text(strip=True)
-                    m = re.search(r"\bin\s+(.+)$", h1_text)
+                    h1_text = htmlmod.unescape(h1.get_text(strip=True)).strip()
+                    m = re.search(r"\bin\s+(.+)$", h1_text, re.I)
                     root_name = m.group(1).strip() if m else h1_text
     except Exception:
         pass
+    if not root_name or root_name == slug:
+        root_name = (L1_DISPLAY_NAMES.get(_SITE) or {}).get(slug, slug)
     root_node = {
         "name": root_name,
         "url": root_url,
@@ -344,6 +406,15 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         "parent_node_id": None,
     }
     _db_batch_insert([root_node])
+    # INSERT OR IGNORE 不会刷新已有根节点名；显式写回可读名
+    with _db_lock:
+        conn_rn = sqlite3.connect(DB_FILE, timeout=10)
+        conn_rn.execute(
+            "UPDATE categories SET name=? WHERE site=? AND depth=0 AND (node_id=? OR slug=?)",
+            (root_name, _SITE, slug, slug),
+        )
+        conn_rn.commit()
+        conn_rn.close()
 
     if existing:
         existing_ids = {r[1] for r in existing if r[1]}
@@ -365,7 +436,7 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         skipped = len(existing) - enqueued
         print(f"  [{slug}] DB {len(existing)} 节点, 跳过 {skipped} 个已展开父节点, 入队 {enqueued} 个待探索", flush=True)
     else:
-        task_q.put({"url": root_url, "name": slug, "node_id": None, "depth": 0, "parent_node_id": None})
+        task_q.put({"url": root_url, "name": root_name, "node_id": None, "depth": 0, "parent_node_id": None})
     visited_urls.add(root_url)
 
     lock = threading.Lock()
