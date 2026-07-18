@@ -135,10 +135,15 @@ ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS detail_scraped INTEGER DE
 
 -- 与 SQLite UNIQUE(asin, node_id, list_type) 对齐，并加上 site；NULLS NOT DISTINCT 避免 NULL 绕过唯一性
 DO $$ BEGIN
-    ALTER TABLE product_sightings
-        ADD CONSTRAINT uq_ps_asin_node_list_site
-        UNIQUE NULLS NOT DISTINCT (asin, node_id, list_type, site);
-EXCEPTION WHEN duplicate_object THEN NULL;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_ps_asin_node_list_site'
+          AND conrelid = 'product_sightings'::regclass
+    ) THEN
+        ALTER TABLE product_sightings
+            ADD CONSTRAINT uq_ps_asin_node_list_site
+            UNIQUE NULLS NOT DISTINCT (asin, node_id, list_type, site);
+    END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_ps_asin       ON product_sightings(asin);
 CREATE INDEX IF NOT EXISTS idx_ps_scraped    ON product_sightings(scraped_at DESC);
@@ -222,10 +227,15 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
 );
 
 DO $$ BEGIN
-    ALTER TABLE new_arrivals
-        ADD CONSTRAINT uq_na_asin_node_site
-        UNIQUE NULLS NOT DISTINCT (asin, node_id, site);
-EXCEPTION WHEN duplicate_object THEN NULL;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_na_asin_node_site'
+          AND conrelid = 'new_arrivals'::regclass
+    ) THEN
+        ALTER TABLE new_arrivals
+            ADD CONSTRAINT uq_na_asin_node_site
+            UNIQUE NULLS NOT DISTINCT (asin, node_id, site);
+    END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_na_asin      ON new_arrivals(asin);

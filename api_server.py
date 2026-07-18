@@ -1,7 +1,7 @@
 # api_server.py — FastAPI v2 API (asyncpg + PostgreSQL)
 # 启动: DB_BACKEND=sqlite uvicorn api_server:app --host 127.0.0.1 --port 8081
 # PG:   set PG_DSN=postgresql://user:pass@localhost:5432/amz_selection
-import os, sys, subprocess, threading, logging, time
+import os, sys, subprocess, threading, logging, time, math
 import asyncpg
 from fastapi import FastAPI, Query, Request
 from fastapi.staticfiles import StaticFiles
@@ -69,6 +69,17 @@ _INT_FILTER_KEYS = {
 
 def _parse_filter_number(raw, *, as_int: bool, label: str):
     """解析数值筛选；失败返回错误文案，成功返回 (None, number)。"""
+    if isinstance(raw, float) and not math.isfinite(raw):
+        return (f"{label} must be finite (received {raw!r})", None)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or not text.isascii():
+            return (f"{label} must be an ASCII number (received {raw!r})", None)
+        try:
+            if not math.isfinite(float(text)):
+                return (f"{label} must be finite (received {raw!r})", None)
+        except ValueError:
+            pass
     if isinstance(raw, bool):
         return (f"{label}必须是{'整数' if as_int else '数字'}（收到 {raw!r}）", None)
     if as_int:
@@ -96,7 +107,7 @@ def _validate_start_filters(body: dict) -> str | None:
     数值转换失败必须拒绝（禁止假成功启动子进程）。"""
     for key, label in _NONNEG_FILTER_KEYS:
         raw = body.get(key)
-        if raw is None or raw == "" or raw is False:
+        if raw is None or raw == "":
             continue
         err, v = _parse_filter_number(raw, as_int=(key in _INT_FILTER_KEYS), label=label)
         if err:
@@ -122,10 +133,18 @@ def _validate_start_filters(body: dict) -> str | None:
             return "评分筛选超出合理范围 (0~5)"
     except (TypeError, ValueError):
         return "评分必须是数字"
-    if body.get("date_range") == "custom":
+    date_range = body.get("date_range")
+    if date_range == "custom":
         df, dt = body.get("date_from"), body.get("date_to")
         if df and dt and str(df) > str(dt):
             return "上架日期：起始日期晚于结束日期"
+    elif date_range not in (None, ""):
+        try:
+            days = int(str(date_range).strip())
+        except (TypeError, ValueError):
+            return "上架日期天数必须是大于等于 1 的整数"
+        if days < 1 or str(date_range).strip() != str(days):
+            return "上架日期天数必须是大于等于 1 的整数"
     return None
 
 @asynccontextmanager
@@ -919,6 +938,8 @@ _LA_SKIP_FLAGS = {"min_list", "delay"}
 
 
 def _append_filter_flags(cmd: list, body: dict, *, for_la: bool = False):
+    if _validate_start_filters(body):
+        return
     for key, flag in _FILTER_PARAM_FLAGS:
         if for_la and key in _LA_SKIP_FLAGS:
             continue
@@ -956,7 +977,8 @@ async def start_products(body: dict):
                 return {"status": "error", "msg": "latest arrivals requires roots"}
             if body.get("site"):
                 cmd += ["--site", body["site"]]
-            cmd += ["--max-pages", str(_positive_int(body.get("max_pages"), 10))]
+            page_cap = min(_positive_int(body.get("max_pages"), 2), 999)
+            cmd += ["--max-pages", str(page_cap)]
             if not include_descendants:
                 cmd += ["--exact-roots"]
             _append_filter_flags(cmd, body, for_la=True)
@@ -976,9 +998,8 @@ async def start_products(body: dict):
             cmd += ["--lists"] + body["lists"]
         if body.get("site"):
             cmd += ["--site", body["site"]]
-        list_limit = min(_positive_int(body.get("list_limit"), 10), 100)
-        page_cap = max(5, (list_limit + 23) // 24)
-        cmd += ["--list-limit", str(list_limit), "--max-pages", str(page_cap)]
+        page_cap = min(_positive_int(body.get("max_pages"), 2), 2)
+        cmd += ["--list-limit", "0", "--max-pages", str(page_cap)]
         if not include_descendants:
             cmd += ["--exact-roots"]
         _append_filter_flags(cmd, body, for_la=False)

@@ -390,7 +390,20 @@ def _load_nodes(site: str, depths: list[int] | None = None,
     result = [{"node_id": r["node_id"], "name": r["name"], "depth": r["depth"]} for r in rows]
     if depths:
         result = [n for n in result if n["depth"] in depths]
-    return result
+    return _dedupe_nodes(result)
+
+
+def _dedupe_nodes(nodes: list[dict]) -> list[dict]:
+    """Preserve traversal order while preventing overlapping roots from double-fetching."""
+    seen = set()
+    unique = []
+    for node in nodes:
+        node_id = node["node_id"]
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        unique.append(node)
+    return unique
 
 
 def _load_nodes_pg(site: str, depths: list[int] | None = None,
@@ -424,7 +437,7 @@ def _load_nodes_pg(site: str, depths: list[int] | None = None,
     result = [{"node_id": r["node_id"], "name": r["name"], "depth": r["depth"]} for r in rows]
     if depths:
         result = [n for n in result if n["depth"] in depths]
-    return result
+    return _dedupe_nodes(result)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1041,6 +1054,20 @@ def main():
         _log.info("[结束] phase1-only 模式或无 ASIN")
         return
 
+    # 测试/冒烟硬限制：AMZ_MAX_DETAILS>0 时截断详情队列（不改变筛选规则）
+    try:
+        _max_details = int(os.getenv("AMZ_MAX_DETAILS", "0") or "0")
+    except ValueError:
+        _max_details = 0
+    if _max_details > 0 and len(all_asins) > _max_details:
+        keep = dict(list(all_asins.items())[:_max_details])
+        _log.info(
+            f"[限制] AMZ_MAX_DETAILS={_max_details}，"
+            f"详情 ASIN {len(all_asins)} → {len(keep)}"
+        )
+        all_asins.clear()
+        all_asins.update(keep)
+
     # ── Phase 2 ──
     p2_workers = min(num_workers, max(num_workers // 2, 4))
     _log.info(f"\n━━━ Phase 2: {len(all_asins)} 个 ASIN 详情页解析 (worker={p2_workers}) ━━━")
@@ -1136,7 +1163,12 @@ def export_excel(site: str = None, signal_only: bool = False) -> str:
 
     if DB_BACKEND == "pg":
         rows = _pg_fetchall(sql, tuple(params))
-        row_lists = [[r.get(k) for k in (
+        def excel_value(value):
+            if isinstance(value, datetime) and value.tzinfo is not None:
+                return value.replace(tzinfo=None)
+            return value
+
+        row_lists = [[excel_value(r.get(k)) for k in (
             "asin", "title", "price", "price_value", "rating", "review_count",
             "listing_date", "listing_age_days", "bsr_main_category", "bsr_main_rank",
             "bsr_sub_rank", "bsr_sub_category",

@@ -74,7 +74,12 @@ def get_marketplace(site: str = "US") -> dict:
     return MARKETPLACES[site]
 
 # ── 阶段1：类目树 ─────────────────────────────────────────────────
-DB_FILE            = os.path.join(DATA_DIR, "categories.db")
+# 可用环境变量 DB_FILE / AMZ_DB_FILE 覆盖（测试隔离用）；默认正式库路径不变
+DB_FILE            = (
+    os.environ.get("AMZ_DB_FILE")
+    or os.environ.get("DB_FILE")
+    or os.path.join(DATA_DIR, "categories.db")
+)
 
 
 # ── 阶段2：新品榜扫描 ─────────────────────────────────────────────

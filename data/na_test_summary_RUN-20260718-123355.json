@@ -1,0 +1,590 @@
+{
+  "run_id": "RUN-20260718-123355",
+  "ship": "暂不可上线（存在失败和/或外部阻塞未解除）",
+  "counts": {
+    "PASS": 774,
+    "FAIL": 42,
+    "BLOCKED": 22,
+    "NOT_RUN": 0,
+    "CONDITIONAL_PASS": 0
+  },
+  "pairwise": {
+    "dimension_count": 15,
+    "expected_pairs": 105,
+    "actual_pairs": 105,
+    "missing_pairs": [],
+    "coverage_pct": 100.0,
+    "covered_list": [
+      "ac+bs",
+      "ac+date",
+      "bs+date",
+      "bsr_main+ac",
+      "bsr_main+bs",
+      "bsr_main+bsr_sub",
+      "bsr_main+country",
+      "bsr_main+date",
+      "bsr_main+dim",
+      "bsr_main+fba",
+      "bsr_main+ft",
+      "bsr_main+sellers",
+      "bsr_main+variant",
+      "bsr_main+weight",
+      "bsr_sub+ac",
+      "bsr_sub+bs",
+      "bsr_sub+country",
+      "bsr_sub+date",
+      "bsr_sub+dim",
+      "bsr_sub+fba",
+      "bsr_sub+ft",
+      "bsr_sub+sellers",
+      "bsr_sub+variant",
+      "bsr_sub+weight",
+      "country+ac",
+      "country+bs",
+      "country+date",
+      "dim+ac",
+      "dim+bs",
+      "dim+country",
+      "dim+date",
+      "dim+fba",
+      "dim+ft",
+      "fba+ac",
+      "fba+bs",
+      "fba+country",
+      "fba+date",
+      "fba+ft",
+      "ft+ac",
+      "ft+bs",
+      "ft+country",
+      "ft+date",
+      "price+ac",
+      "price+bs",
+      "price+bsr_main",
+      "price+bsr_sub",
+      "price+country",
+      "price+date",
+      "price+dim",
+      "price+fba",
+      "price+ft",
+      "price+rating",
+      "price+review",
+      "price+sellers",
+      "price+variant",
+      "price+weight",
+      "rating+ac",
+      "rating+bs",
+      "rating+bsr_main",
+      "rating+bsr_sub",
+      "rating+country",
+      "rating+date",
+      "rating+dim",
+      "rating+fba",
+      "rating+ft",
+      "rating+review",
+      "rating+sellers",
+      "rating+variant",
+      "rating+weight",
+      "review+ac",
+      "review+bs",
+      "review+bsr_main",
+      "review+bsr_sub",
+      "review+country",
+      "review+date",
+      "review+dim",
+      "review+fba",
+      "review+ft",
+      "review+sellers",
+      "review+variant",
+      "review+weight",
+      "sellers+ac",
+      "sellers+bs",
+      "sellers+country",
+      "sellers+date",
+      "sellers+dim",
+      "sellers+fba",
+      "sellers+ft",
+      "sellers+weight",
+      "variant+ac",
+      "variant+bs",
+      "variant+country",
+      "variant+date",
+      "variant+dim",
+      "variant+fba",
+      "variant+ft",
+      "variant+sellers",
+      "variant+weight",
+      "weight+ac",
+      "weight+bs",
+      "weight+country",
+      "weight+date",
+      "weight+dim",
+      "weight+fba",
+      "weight+ft"
+    ]
+  },
+  "full_strict": {
+    "full_dim_count": 17,
+    "fail_rotation_count": 17,
+    "miss_rotation_count": 17,
+    "uncovered_fail": [],
+    "uncovered_miss": []
+  },
+  "root_causes": [
+    {
+      "id": "RC-PARAM-NONFINITE",
+      "title": "参数校验未拒绝 NaN/Infinity/非有限数值",
+      "severity": "P1",
+      "case_count": 26,
+      "cases": [
+        "VAL-NAN-01",
+        "VAL-INF-01",
+        "PAR-START-nan",
+        "PAR-NOPROC-nan",
+        "PAR-NA-API-nan",
+        "PAR-CLI-nan",
+        "PAR-START-pos_inf",
+        "PAR-NOPROC-pos_inf",
+        "PAR-NA-API-pos_inf",
+        "PAR-CLI-pos_inf",
+        "PAR-CLI-neg_inf",
+        "PAR-START-str_nan",
+        "PAR-NOPROC-str_nan",
+        "PAR-NA-API-str_nan",
+        "PAR-START-str_inf",
+        "PAR-NOPROC-str_inf",
+        "PAR-NA-API-str_inf",
+        "PAR-START-str_NaN",
+        "PAR-NOPROC-str_NaN",
+        "PAR-NA-API-str_NaN",
+        "PAR-START-str_Infinity",
+        "PAR-NOPROC-str_Infinity",
+        "PAR-NA-API-str_Infinity",
+        "PAR-START-exp_overflow",
+        "PAR-NOPROC-exp_overflow",
+        "PAR-NA-API-exp_overflow"
+      ]
+    },
+    {
+      "id": "RC-COO-LABEL",
+      "title": "产地单格「标签:值」未剥离标签前缀",
+      "severity": "P2",
+      "case_count": 4,
+      "cases": [
+        "PRS-US-COO-COMBINED",
+        "COO-TD-COLON-SPACE",
+        "COO-TD-COLON",
+        "COO-TD-FULLWIDTH"
+      ]
+    },
+    {
+      "id": "RC-参数异常-CLI参数",
+      "title": "参数异常/CLI参数: PAR-CLI-bool_true",
+      "severity": "P2",
+      "case_count": 1,
+      "cases": [
+        "PAR-CLI-bool_true"
+      ]
+    },
+    {
+      "id": "RC-参数异常-参数校验",
+      "title": "参数异常/参数校验: PAR-START-bool_false",
+      "severity": "P1",
+      "case_count": 2,
+      "cases": [
+        "PAR-START-bool_false",
+        "PAR-START-non_ascii"
+      ]
+    },
+    {
+      "id": "RC-参数异常-API参数",
+      "title": "参数异常/API参数: PAR-NOPROC-bool_false",
+      "severity": "P1",
+      "case_count": 2,
+      "cases": [
+        "PAR-NOPROC-bool_false",
+        "PAR-NOPROC-non_ascii"
+      ]
+    },
+    {
+      "id": "RC-参数异常-结果查询",
+      "title": "参数异常/结果查询: PAR-NA-API-bool_false",
+      "severity": "P1",
+      "case_count": 2,
+      "cases": [
+        "PAR-NA-API-bool_false",
+        "PAR-NA-API-non_ascii"
+      ]
+    },
+    {
+      "id": "RC-CAT-DEDUP",
+      "title": "类目展开未按 site+node_id 去重",
+      "severity": "P1",
+      "case_count": 3,
+      "cases": [
+        "CAT2-DEDUP-PARENT-CHILD",
+        "CAT2-OVERLAP",
+        "CAT2-DUP-ROOTS-DESC"
+      ]
+    },
+    {
+      "id": "RC-COO-COO-TD-SPLIT-TWO",
+      "title": "产地解析: COO-TD-SPLIT-TWO",
+      "severity": "P2",
+      "case_count": 1,
+      "cases": [
+        "COO-TD-SPLIT-TWO"
+      ]
+    },
+    {
+      "id": "RC-COO-COO-CASE",
+      "title": "产地解析: COO-CASE",
+      "severity": "P2",
+      "case_count": 1,
+      "cases": [
+        "COO-CASE"
+      ]
+    }
+  ],
+  "snapshot_diff": {
+    "hash_changed": false,
+    "table_diffs": {}
+  },
+  "fails": [
+    {
+      "case_id": "VAL-NAN-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "'拒绝 NaN/Infinity'",
+      "actual": "None",
+      "detail": "输入 nan → None"
+    },
+    {
+      "case_id": "VAL-INF-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "'拒绝 NaN/Infinity'",
+      "actual": "None",
+      "detail": "输入 inf → None"
+    },
+    {
+      "case_id": "PRS-US-COO-COMBINED",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'China'",
+      "actual": "'Country of Origin : China'",
+      "detail": "单格文本含标签时是否剥离前缀"
+    },
+    {
+      "case_id": "PAR-START-nan",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_min=nan"
+    },
+    {
+      "case_id": "PAR-NOPROC-nan",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-nan",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-CLI-nan",
+      "dimension": "参数异常",
+      "layer": "CLI参数",
+      "expected": "'异常不进入CLI或被拦截'",
+      "actual": "['--price-min', 'nan']",
+      "detail": ""
+    },
+    {
+      "case_id": "PAR-START-pos_inf",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_max=inf"
+    },
+    {
+      "case_id": "PAR-NOPROC-pos_inf",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-pos_inf",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-CLI-pos_inf",
+      "dimension": "参数异常",
+      "layer": "CLI参数",
+      "expected": "'异常不进入CLI或被拦截'",
+      "actual": "['--price-max', 'inf']",
+      "detail": ""
+    },
+    {
+      "case_id": "PAR-CLI-neg_inf",
+      "dimension": "参数异常",
+      "layer": "CLI参数",
+      "expected": "'异常不进入CLI或被拦截'",
+      "actual": "['--weight-min', '-inf']",
+      "detail": ""
+    },
+    {
+      "case_id": "PAR-START-str_nan",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_min='nan'"
+    },
+    {
+      "case_id": "PAR-NOPROC-str_nan",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-str_nan",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-START-str_inf",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_max='inf'"
+    },
+    {
+      "case_id": "PAR-NOPROC-str_inf",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-str_inf",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-START-str_NaN",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_min='NaN'"
+    },
+    {
+      "case_id": "PAR-NOPROC-str_NaN",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-str_NaN",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-START-str_Infinity",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_max='Infinity'"
+    },
+    {
+      "case_id": "PAR-NOPROC-str_Infinity",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-str_Infinity",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-START-exp_overflow",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_max='1e309'"
+    },
+    {
+      "case_id": "PAR-NOPROC-exp_overflow",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-exp_overflow",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-CLI-bool_true",
+      "dimension": "参数异常",
+      "layer": "CLI参数",
+      "expected": "'异常不进入CLI或被拦截'",
+      "actual": "['--price-min', 'True']",
+      "detail": ""
+    },
+    {
+      "case_id": "PAR-START-bool_false",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 review_min=False"
+    },
+    {
+      "case_id": "PAR-NOPROC-bool_false",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-bool_false",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "PAR-START-non_ascii",
+      "dimension": "参数异常",
+      "layer": "参数校验",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "启动API校验 price_min='１２'"
+    },
+    {
+      "case_id": "PAR-NOPROC-non_ascii",
+      "dimension": "参数异常",
+      "layer": "API参数",
+      "expected": "'校验拒绝后不创建子进程'",
+      "actual": "{'validate_msg': None, 'would_popopen': True}",
+      "detail": "start_products 在 _validate_start_filters 失败时直接 return error"
+    },
+    {
+      "case_id": "PAR-NA-API-non_ascii",
+      "dimension": "参数异常",
+      "layer": "结果查询",
+      "expected": "'拒绝=True'",
+      "actual": "None",
+      "detail": "最新到货结果API校验"
+    },
+    {
+      "case_id": "CAT2-DEDUP-PARENT-CHILD",
+      "dimension": "类目范围",
+      "layer": "类目展开",
+      "expected": "{'dup': 0, 'set': {'L2A', 'L4A12', 'L3A1', 'L4A11', 'L5DEEP', 'L3A2'}}",
+      "actual": "{'list': ['L2A', 'L4A11', 'L3A1', 'L3A2', 'L5DEEP', 'L4A11', 'L4A12', 'L5DEEP'], 'set': {'L4A12', 'L3A2', 'L2A', 'L3A1', 'L4A11', 'L5DEEP'}, 'dup': 2}",
+      "detail": "父子同选必须按 site+node_id 去重；当前预期可能 FAIL"
+    },
+    {
+      "case_id": "CAT2-OVERLAP",
+      "dimension": "类目范围",
+      "layer": "类目展开",
+      "expected": "0",
+      "actual": "4",
+      "detail": "list=['L2A', 'L3A1', 'L3A1', 'L3A2', 'L4A11', 'L4A12', 'L4A11', 'L4A12', 'L5DEEP', 'L5DEEP']"
+    },
+    {
+      "case_id": "CAT2-DUP-ROOTS-DESC",
+      "dimension": "类目范围",
+      "layer": "类目展开",
+      "expected": "'无重复'",
+      "actual": "{'list': ['L2A', 'L4A11', 'L3A1', 'L3A2', 'L5DEEP', 'L4A11', 'L4A12', 'L5DEEP'], 'dup': 2}",
+      "detail": ""
+    },
+    {
+      "case_id": "COO-TD-COLON-SPACE",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'China'",
+      "actual": "'Country of Origin : China'",
+      "detail": "site=US expect_pass_quality=False"
+    },
+    {
+      "case_id": "COO-TD-COLON",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'China'",
+      "actual": "'Country of Origin: China'",
+      "detail": "site=US expect_pass_quality=False"
+    },
+    {
+      "case_id": "COO-TD-FULLWIDTH",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'China'",
+      "actual": "'Country of Origin：China'",
+      "detail": "site=US expect_pass_quality=False"
+    },
+    {
+      "case_id": "COO-TD-SPLIT-TWO",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'China'",
+      "actual": "'Country of Origin'",
+      "detail": "site=US expect_pass_quality=True"
+    },
+    {
+      "case_id": "COO-CASE",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "'china'",
+      "actual": "None",
+      "detail": "site=US expect_pass_quality=True"
+    }
+  ]
+}

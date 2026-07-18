@@ -976,7 +976,7 @@ def process_node(node: dict, lists: list, review_max: int,
                  rating_min: float = 0.0, rating_max: float = 0.0,
                  max_pages: int = 2, delay: float = 2.0,
                  detail_filters: dict = None,
-                 list_limit: int = 10):
+                 list_limit: int = 0):
     """处理单个节点的所有榜单。"""
     node_id = node["node_id"]
     slug    = extract_slug(node["url"])
@@ -985,9 +985,9 @@ def process_node(node: dict, lists: list, review_max: int,
     try:
         list_limit = int(list_limit)
     except (TypeError, ValueError):
-        list_limit = 10
-    list_limit = max(1, min(list_limit, 100))
-    max_pages = max(max_pages, 5, (list_limit + 23) // 24)
+        list_limit = 0
+    list_limit = max(0, min(list_limit, 100))
+    max_pages = max(1, min(int(max_pages), 2))
 
     for list_type in lists:
         url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
@@ -1058,7 +1058,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
               max_pages: int = 2,
               slugs: list = None,
               detail_filters: dict = None,
-              list_limit: int = 10,
+              list_limit: int = 0,
               include_descendants: bool = True):
     """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
     if slugs:
@@ -1075,9 +1075,9 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     try:
         list_limit = int(list_limit)
     except (TypeError, ValueError):
-        list_limit = 10
-    list_limit = max(1, min(list_limit, 100))
-    max_pages = max(max_pages, 5, (list_limit + 23) // 24)
+        list_limit = 0
+    list_limit = max(0, min(list_limit, 100))
+    max_pages = max(1, min(int(max_pages), 2))
 
     if not nodes:
         _log.warning("[fetch_products] 无目标节点，退出")
@@ -1213,7 +1213,7 @@ if __name__ == "__main__":
     parser.add_argument("--dim-l", type=float, default=0)
     parser.add_argument("--dim-w", type=float, default=0)
     parser.add_argument("--dim-h", type=float, default=0)
-    parser.add_argument("--list-limit", type=int, default=10)
+    parser.add_argument("--list-limit", type=int, default=0)
     parser.add_argument("--fba-fee-min", type=float, default=0)
     parser.add_argument("--fba-fee-max", type=float, default=0)
     parser.add_argument("--fulfillment-type", default="")
@@ -1223,7 +1223,7 @@ if __name__ == "__main__":
     parser.add_argument("--date-to",    default="")
     parser.add_argument("--amazons-choice", action="store_true")
     parser.add_argument("--bestseller",     action="store_true")
-    parser.add_argument("--max-pages", type=int, default=5)
+    parser.add_argument("--max-pages", type=int, default=2)
     parser.add_argument("--delay",      type=float, default=DEFAULT_DELAY)
     parser.add_argument("--lists", nargs="+", default=DEFAULT_LISTS)
     parser.add_argument(
@@ -1231,8 +1231,8 @@ if __name__ == "__main__":
         help="仅抓 --roots 所选类目本身，不展开全部下级（默认会展开）",
     )
     args = parser.parse_args()
-    args.list_limit = max(1, min(args.list_limit, 100))
-    args.max_pages = max(args.max_pages, 5, (args.list_limit + 23) // 24)
+    args.list_limit = max(0, min(args.list_limit, 100))
+    args.max_pages = max(1, min(args.max_pages, 2))
 
     mp = get_marketplace(args.site)
     _SITE   = args.site.upper()

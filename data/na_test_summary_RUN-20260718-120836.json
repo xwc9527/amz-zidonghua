@@ -1,0 +1,129 @@
+{
+  "run_id": "RUN-20260718-120836",
+  "counts": {
+    "PASS": 284,
+    "FAIL": 4,
+    "BLOCKED": 2,
+    "NOT_RUN": 1,
+    "CONDITIONAL_PASS": 0
+  },
+  "ship": "暂不可上线",
+  "fails": [
+    {
+      "case_id": "VAL-NAN-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "拒绝 NaN/Infinity",
+      "actual": null,
+      "detail": "输入 nan → None",
+      "severity": "P1"
+    },
+    {
+      "case_id": "VAL-INF-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "拒绝 NaN/Infinity",
+      "actual": null,
+      "detail": "输入 inf → None",
+      "severity": "P1"
+    },
+    {
+      "case_id": "PRS-US-COO-COMBINED",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "China",
+      "actual": "Country of Origin : China",
+      "detail": "单格文本含标签时是否剥离前缀",
+      "severity": "P2"
+    },
+    {
+      "case_id": "CAT-DEDUP",
+      "dimension": "类目范围",
+      "layer": "类目展开",
+      "expected": [
+        "L2A",
+        "L3A1",
+        "L3A2",
+        "L4A11"
+      ],
+      "actual": {
+        "list": [
+          "L2A",
+          "L4A11",
+          "L3A1",
+          "L3A2",
+          "L4A11"
+        ],
+        "set": [
+          "L2A",
+          "L3A1",
+          "L3A2",
+          "L4A11"
+        ]
+      },
+      "detail": "原始选择2，展开后应去重，L4A11仅一次",
+      "severity": "P1"
+    }
+  ],
+  "issues": [
+    {
+      "id": "BUG-001",
+      "case_id": "VAL-NAN-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "拒绝 NaN/Infinity",
+      "actual": null,
+      "detail": "输入 nan → None",
+      "severity": "P1"
+    },
+    {
+      "id": "BUG-002",
+      "case_id": "VAL-INF-01",
+      "dimension": "价格",
+      "layer": "参数校验",
+      "expected": "拒绝 NaN/Infinity",
+      "actual": null,
+      "detail": "输入 inf → None",
+      "severity": "P1"
+    },
+    {
+      "id": "BUG-003",
+      "case_id": "PRS-US-COO-COMBINED",
+      "dimension": "产地",
+      "layer": "详情解析",
+      "expected": "China",
+      "actual": "Country of Origin : China",
+      "detail": "单格文本含标签时是否剥离前缀",
+      "severity": "P2"
+    },
+    {
+      "id": "BUG-004",
+      "case_id": "CAT-DEDUP",
+      "dimension": "类目范围",
+      "layer": "类目展开",
+      "expected": [
+        "L2A",
+        "L3A1",
+        "L3A2",
+        "L4A11"
+      ],
+      "actual": {
+        "list": [
+          "L2A",
+          "L4A11",
+          "L3A1",
+          "L3A2",
+          "L4A11"
+        ],
+        "set": [
+          "L2A",
+          "L3A1",
+          "L3A2",
+          "L4A11"
+        ]
+      },
+      "detail": "原始选择2，展开后应去重，L4A11仅一次",
+      "severity": "P1"
+    }
+  ]
+}

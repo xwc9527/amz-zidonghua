@@ -14,6 +14,34 @@ from bs4 import BeautifulSoup
 from fba_fees_us import estimate_fba_fees, parse_weight_lb, parse_dims_inches
 
 
+_ORIGIN_LABEL_RE = re.compile(r"(?:country\s+of\s+origin|herkunftsland|原産国)\s*[:：]?\s*", re.I)
+_DIRECTIONAL_CONTROLS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _country_of_origin_from_row(row) -> str | None:
+    cells = row.select("th, td")
+    for index, cell in enumerate(cells):
+        cell_text = _DIRECTIONAL_CONTROLS_RE.sub("", cell.get_text(" ", strip=True)).strip()
+        match = _ORIGIN_LABEL_RE.search(cell_text)
+        if not match:
+            continue
+        inline_value = (cell_text[:match.start()] + cell_text[match.end():]).strip(" :：")
+        if inline_value:
+            return inline_value
+        for following in cells[index + 1:]:
+            value = _DIRECTIONAL_CONTROLS_RE.sub("", following.get_text(" ", strip=True)).strip()
+            if value and not _ORIGIN_LABEL_RE.fullmatch(value):
+                return value
+
+    text = _DIRECTIONAL_CONTROLS_RE.sub("", row.get_text(" ", strip=True)).strip()
+    match = _ORIGIN_LABEL_RE.search(text)
+    if match:
+        value = (text[:match.start()] + text[match.end():]).strip(" :：")
+        if value:
+            return value
+    return None
+
+
 def _dynamic_image_best_url(raw: str) -> str | None:
     """data-a-dynamic-image 是 JSON: {url: [w, h], ...}；取宽度最大的一项。"""
     try:
@@ -270,6 +298,12 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
                     " cm" if "cm" in text.lower() else ""
                 )
                 d["item_dimensions"] = " x ".join(parts) + unit
+
+        origin_value = _country_of_origin_from_row(row)
+        if origin_value:
+            if "country_of_origin" not in d:
+                d["country_of_origin"] = origin_value
+            continue
 
         if any(k in text for k in ["Country of Origin", "Herkunftsland", "原産国"]):
             val = None

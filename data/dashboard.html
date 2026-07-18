@@ -367,27 +367,27 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label" id="f_limit_label">每类目每榜单抓取数</span>
+              <span class="filter-label" id="f_limit_label">抓取页数</span>
               <div class="filter-inputs">
-                <input type="number" id="f_list_limit" value="10" placeholder="10" min="1" max="100" oninput="syncLimitControl(false)">
+                <input type="number" id="f_max_pages" value="2" placeholder="2" min="1" max="2" oninput="syncPageControl(false)">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">上架日期</span>
               <div class="filter-inputs">
-                <select id="f_date_range" onchange="document.getElementById('f_date_custom').style.display=this.value==='custom'?'flex':'none';">
+                <select id="f_date_range" onchange="toggleCustomDays();">
                   <option value="">不限</option>
                   <option value="30">近30天</option>
                   <option value="90">近90天</option>
                   <option value="180">近半年</option>
                   <option value="365">近1年</option>
-                  <option value="custom">自定义</option>
+                  <option value="custom">自定义天数</option>
                 </select>
-              </div>
-              <div id="f_date_custom" class="filter-inputs" style="display:none; margin-top:3px;">
-                <input type="date" id="f_date_from">
-                <span class="filter-sep">~</span>
-                <input type="date" id="f_date_to">
+                <div id="f_date_custom" style="display:none; align-items:center; width:100%; gap:6px;">
+                  <input type="number" id="f_date_days" placeholder="输入天数" min="1" step="1" style="min-width:0; flex:1;">
+                  <span class="filter-unit">天</span>
+                  <button type="button" onclick="clearCustomDays()" title="取消自定义" style="border:0;background:transparent;color:#9CA3AF;font-size:16px;line-height:1;cursor:pointer;padding:2px 3px;">×</button>
+                </div>
               </div>
             </div>
             <div class="filter-item">
@@ -423,7 +423,6 @@
               </div>
             </div>
             <div style="position:absolute; right:16px; bottom:12px; display:flex; align-items:center; gap:6px;">
-              <input type="hidden" id="f_max_pages" value="5" min="1">
               <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:36px; text-align:right;">0</span>
               <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
             </div>
@@ -595,7 +594,7 @@
       el.classList.add('active');
       _currentChart = key;
       document.getElementById('chartDrop').style.display = 'none';
-      syncLimitControl(prev !== key);
+      syncPageControl(prev !== key);
       updateFbaSupportUI();
       if (prev !== key) {
         _clearSelectionOnContextSwitch();
@@ -604,34 +603,46 @@
         loadLiveProducts();
       }
     }
-    function getLimitValue() {
-      const el = document.getElementById('f_list_limit');
+    function getPageValue() {
+      const el = document.getElementById('f_max_pages');
       let v = parseInt(el.value, 10);
-      if (!v || v < 1) v = 10;
-      if (_currentChart !== 'la' && v > 100) v = 100;
+      if (!v || v < 1) v = 1;
+      const max = _currentChart === 'la' ? 999 : 2;
+      if (v > max) v = max;
       return v;
     }
-    function syncLimitControl(resetValue) {
-      const input = document.getElementById('f_list_limit');
+    function syncPageControl(resetValue) {
+      const input = document.getElementById('f_max_pages');
       const label = document.getElementById('f_limit_label');
-      const pages = document.getElementById('f_max_pages');
-      if (!input || !label || !pages) return;
-      if (resetValue || !input.value) input.value = 10;
+      if (!input || !label) return;
+      if (resetValue || !input.value) input.value = 2;
+      label.textContent = '抓取页数';
+      input.placeholder = '2';
+      input.min = 1;
       if (_currentChart === 'la') {
-        label.textContent = '抓取页数';
-        input.placeholder = '10';
-        input.min = 1;
-        input.removeAttribute('max');
-        pages.value = getLimitValue();
+        input.max = 999;
       } else {
-        label.textContent = '每类目每榜单抓取数';
-        input.placeholder = '10';
-        input.min = 1;
-        input.max = 100;
-        input.value = getLimitValue();
-        // 榜单模式只按商品数限流；页数仅用于爬虫翻页上限估算
-        pages.value = Math.max(1, Math.ceil(getLimitValue() / 24));
+        input.max = 2;
       }
+      input.value = getPageValue();
+    }
+    function toggleCustomDays() {
+      const select = document.getElementById('f_date_range');
+      const custom = document.getElementById('f_date_custom');
+      if (!select || !custom || select.value !== 'custom') return;
+      select.style.display = 'none';
+      custom.style.display = 'flex';
+      const input = document.getElementById('f_date_days');
+      if (input) input.focus();
+    }
+    function clearCustomDays() {
+      const select = document.getElementById('f_date_range');
+      const custom = document.getElementById('f_date_custom');
+      const input = document.getElementById('f_date_days');
+      if (input) input.value = '';
+      select.value = '';
+      select.style.display = '';
+      custom.style.display = 'none';
     }
     function updateChartAvailability() {
       const la = document.getElementById('chartItemLA');
@@ -693,8 +704,8 @@
 
     // ── 筛选值收集 ──
     function getFilterValues() {
-      syncLimitControl(false);
-      const limitValue = getLimitValue();
+      syncPageControl(false);
+      const pageValue = getPageValue();
       return {
         price_min: +document.getElementById('f_price_min').value || 0,
         price_max: +document.getElementById('f_price_max').value || 0,
@@ -716,17 +727,16 @@
         dim_l: toBackendDim(document.getElementById('f_dim_l').value),
         dim_w: toBackendDim(document.getElementById('f_dim_w').value),
         dim_h: toBackendDim(document.getElementById('f_dim_h').value),
-        list_limit: _currentChart === 'la' ? 0 : limitValue,
-        date_range: document.getElementById('f_date_range').value || '',
-        date_from: document.getElementById('f_date_from').value || '',
-        date_to: document.getElementById('f_date_to').value || '',
+        date_range: document.getElementById('f_date_range').value === 'custom'
+          ? String(+document.getElementById('f_date_days').value || 0)
+          : (document.getElementById('f_date_range').value || ''),
         amazons_choice: document.getElementById('f_amazons_choice').checked,
         bestseller: document.getElementById('f_bestseller').checked,
         fba_fee_min: +document.getElementById('f_fba_fee_min').value || 0,
         fba_fee_max: +document.getElementById('f_fba_fee_max').value || 0,
         fulfillment_type: document.getElementById('f_fulfillment_type').value || '',
         country: (document.getElementById('f_country').value || '').trim(),
-        max_pages: _currentChart === 'la' ? limitValue : Math.max(5, Math.ceil(limitValue / 24)),
+        max_pages: pageValue,
         site: (_currentSite || 'us').toUpperCase(),
       };
     }
@@ -1177,9 +1187,11 @@
       if (filters.rating_min > 5 || filters.rating_max > 5) {
         return '评分筛选超出合理范围 (0~5)，请修正后再启动';
       }
-      if (filters.date_range === 'custom' && filters.date_from && filters.date_to
-          && filters.date_from > filters.date_to) {
-        return '上架日期：起始日期晚于结束日期，请修正后再启动';
+      if (document.getElementById('f_date_range').value === 'custom') {
+        const rawDays = String(document.getElementById('f_date_days').value || '').trim();
+        if (!/^\d+$/.test(rawDays) || Number(rawDays) < 1) {
+          return '上架日期：自定义天数必须是大于等于 1 的整数，请修正后再启动';
+        }
       }
       return null;
     }
@@ -1293,7 +1305,7 @@
     updateCurrencyLabels();
     updateMeasureUnitLabels();
     updateFbaSupportUI();
-    syncLimitControl(false);
+    syncPageControl(false);
     loadTaskDrillDown();
     refreshProductStats();
     loadLiveProducts();
