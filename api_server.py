@@ -31,6 +31,103 @@ def _positive_int(value, default):
         return default
     return v if v > 0 else default
 
+_RANGE_CHECKS = [
+    ("price_min", "price_max", "现价"),
+    ("rating_min", "rating_max", "评分"),
+    ("review_min", "review_max", "评论数"),
+    ("bsr_main_min", "bsr_main_max", "BSR大类排名"),
+    ("bsr_sub_min", "bsr_sub_max", "BSR子类排名"),
+    ("variant_min", "variant_max", "变体选项数"),
+    ("sellers_min", "sellers_max", "其他卖家数"),
+    ("weight_min", "weight_max", "商品重量"),
+    ("fba_fee_min", "fba_fee_max", "FBA运费"),
+]
+
+# 不允许为负的筛选字段（含区间两端与尺寸上限）
+_NONNEG_FILTER_KEYS = [
+    ("price_min", "现价最小"), ("price_max", "现价最大"),
+    ("rating_min", "评分最小"), ("rating_max", "评分最大"),
+    ("review_min", "评论数最小"), ("review_max", "评论数最大"),
+    ("bsr_main_min", "BSR大类排名最小"), ("bsr_main_max", "BSR大类排名最大"),
+    ("bsr_sub_min", "BSR子类排名最小"), ("bsr_sub_max", "BSR子类排名最大"),
+    ("variant_min", "变体选项数最小"), ("variant_max", "变体选项数最大"),
+    ("sellers_min", "其他卖家数最小"), ("sellers_max", "其他卖家数最大"),
+    ("weight_min", "商品重量最小"), ("weight_max", "商品重量最大"),
+    ("fba_fee_min", "FBA运费最小"), ("fba_fee_max", "FBA运费最大"),
+    ("dim_l", "尺寸长"), ("dim_w", "尺寸宽"), ("dim_h", "尺寸高"),
+]
+
+# 与 argparse type=int 对齐：评论数 / BSR / 变体 / 卖家
+_INT_FILTER_KEYS = {
+    "review_min", "review_max",
+    "bsr_main_min", "bsr_main_max",
+    "bsr_sub_min", "bsr_sub_max",
+    "variant_min", "variant_max",
+    "sellers_min", "sellers_max",
+}
+
+
+def _parse_filter_number(raw, *, as_int: bool, label: str):
+    """解析数值筛选；失败返回错误文案，成功返回 (None, number)。"""
+    if isinstance(raw, bool):
+        return (f"{label}必须是{'整数' if as_int else '数字'}（收到 {raw!r}）", None)
+    if as_int:
+        if isinstance(raw, float):
+            if not raw.is_integer():
+                return (f"{label}必须是整数（收到 {raw!r}）", None)
+            return (None, int(raw))
+        if isinstance(raw, int):
+            return (None, raw)
+        try:
+            return (None, int(str(raw).strip()))
+        except (TypeError, ValueError):
+            return (f"{label}必须是整数（收到 {raw!r}）", None)
+    if isinstance(raw, (int, float)):
+        return (None, float(raw))
+    try:
+        return (None, float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return (f"{label}必须是数字（收到 {raw!r}）", None)
+
+
+def _validate_start_filters(body: dict) -> str | None:
+    """校验筛选区间合法性，返回错误信息；合法返回 None。
+    与前端 validateFilterRanges 逻辑保持一致，防止绕过前端直接调用 API。
+    数值转换失败必须拒绝（禁止假成功启动子进程）。"""
+    for key, label in _NONNEG_FILTER_KEYS:
+        raw = body.get(key)
+        if raw is None or raw == "" or raw is False:
+            continue
+        err, v = _parse_filter_number(raw, as_int=(key in _INT_FILTER_KEYS), label=label)
+        if err:
+            return err
+        if v < 0:
+            return f"{label}不能为负数 ({v:g})"
+
+    for min_key, max_key, label in _RANGE_CHECKS:
+        raw_min, raw_max = body.get(min_key), body.get(max_key)
+        # 空值按 0；非空已在上面校验过类型
+        try:
+            vmin = float(raw_min) if raw_min not in (None, "", False) else 0.0
+            vmax = float(raw_max) if raw_max not in (None, "", False) else 0.0
+        except (TypeError, ValueError):
+            return f"{label}必须是数字"
+        if vmin > 0 and vmax > 0 and vmin > vmax:
+            return f"{label}：最小值 ({vmin:g}) 大于最大值 ({vmax:g})"
+    rmin, rmax = body.get("rating_min"), body.get("rating_max")
+    try:
+        if (rmin not in (None, "", False) and float(rmin) > 5) or (
+            rmax not in (None, "", False) and float(rmax) > 5
+        ):
+            return "评分筛选超出合理范围 (0~5)"
+    except (TypeError, ValueError):
+        return "评分必须是数字"
+    if body.get("date_range") == "custom":
+        df, dt = body.get("date_from"), body.get("date_to")
+        if df and dt and str(df) > str(dt):
+            return "上架日期：起始日期晚于结束日期"
+    return None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
@@ -445,6 +542,9 @@ async def products(
         date_range=date_range, date_from=date_from, date_to=date_to,
         site=site.upper(), detail_only=detail_only,
     )
+    range_err = _validate_start_filters(filters)
+    if range_err:
+        return JSONResponse({"status": "error", "msg": f"筛选条件不合法: {range_err}"}, status_code=400)
     if DB_BACKEND == "pg":
         return await _products_pg(**filters)
     return await _products_sqlite(**filters)
@@ -570,35 +670,170 @@ async def _products_sqlite(**filters):
         logging.warning(f"_products_sqlite query failed: {e}")
         return []
 
-@app.get("/api/v2/new_arrivals")
-async def new_arrivals_api(
-    limit: int = Query(50, le=200), offset: int = 0,
-    site: str = None, signal_only: bool = False,
-):
-    """读取 fetch_new_arrivals.py 写入的 new_arrivals 表，打通看板展示链路。"""
-    if DB_BACKEND == "pg":
-        # PG 路径尚未建 new_arrivals 表；短期仅 SQLite 闭环
-        return []
-    cond = "WHERE 1=1"
+def _build_new_arrivals_where(filters: dict, style: str = "sqlite"):
+    """new_arrivals 查询 WHERE：字段与 product_sightings 略有差异（price_value / listing_date）。
+    style=sqlite 用 ?；pg 用 $n。"""
+    sql = " WHERE 1=1"
     params = []
-    if site:
-        cond += " AND site=?"
-        params.append(site.upper())
-    if signal_only:
-        cond += " AND is_signal=1"
-    # 字段别名对齐看板 /api/v2/products 渲染（name / date_first_available）
-    sql = f"""SELECT asin, title AS name, title, price, price_value, rating, review_count,
+    ph = lambda: "?" if style == "sqlite" else f"${len(params)+1}"
+
+    if filters.get("site"):
+        sql += f" AND site = {ph()}"
+        params.append(filters["site"])
+
+    for key, op, col in [
+        ("price_min", ">=", "price_value"), ("price_max", "<=", "price_value"),
+        ("rating_min", ">=", "rating"), ("rating_max", "<=", "rating"),
+        ("review_min", ">=", "review_count"), ("review_max", "<=", "review_count"),
+        ("bsr_main_min", ">=", "bsr_main_rank"), ("bsr_main_max", "<=", "bsr_main_rank"),
+        ("bsr_sub_min", ">=", "bsr_sub_rank"), ("bsr_sub_max", "<=", "bsr_sub_rank"),
+        ("variant_min", ">=", "variant_option_count"), ("variant_max", "<=", "variant_option_count"),
+        ("sellers_min", ">=", "other_sellers_count"), ("sellers_max", "<=", "other_sellers_count"),
+        ("fba_fee_min", ">=", "fba_fee"), ("fba_fee_max", "<=", "fba_fee"),
+        ("weight_min", ">=", "weight_lb"), ("weight_max", "<=", "weight_lb"),
+    ]:
+        val = filters.get(key)
+        if val is not None and val != 0 and val is not False:
+            sql += f" AND {col} IS NOT NULL AND {col} {op} {ph()}"
+            params.append(val)
+
+    for key, col in (("dim_l", "dim_l_in"), ("dim_w", "dim_w_in"), ("dim_h", "dim_h_in")):
+        val = filters.get(key)
+        if val is not None and val != 0:
+            sql += f" AND {col} IS NOT NULL AND {col} <= {ph()}"
+            params.append(val)
+
+    ft = filters.get("fulfillment_type") or ""
+    if ft:
+        sql += f" AND fulfillment_type = {ph()}"
+        params.append(ft)
+
+    country = (filters.get("country") or "").strip()
+    if country:
+        sql += f" AND country_of_origin IS NOT NULL AND LOWER(country_of_origin) LIKE {ph()}"
+        params.append(f"%{country.lower()}%")
+
+    if filters.get("amazons_choice"):
+        sql += f" AND is_amazon_choice = {ph()}"
+        params.append(1)
+    if filters.get("bestseller"):
+        sql += f" AND is_bestseller = {ph()}"
+        params.append(1)
+
+    date_range = filters.get("date_range") or ""
+    if date_range:
+        sql += " AND listing_date IS NOT NULL"
+        if date_range == "custom":
+            if filters.get("date_from"):
+                sql += f" AND listing_date >= {ph()}"
+                params.append(filters["date_from"])
+            if filters.get("date_to"):
+                sql += f" AND listing_date <= {ph()}"
+                params.append(filters["date_to"])
+        else:
+            try:
+                days = int(date_range)
+                from datetime import datetime, timedelta
+                cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                sql += f" AND listing_date >= {ph()}"
+                params.append(cutoff)
+            except ValueError:
+                pass
+
+    return sql, params
+
+
+_NA_SELECT = """SELECT asin, title AS name, title, price, price_value, rating, review_count,
               listing_date, listing_date AS date_first_available, listing_age_days,
-              bsr_main_category, bsr_main_rank, bsr_sub, bsr_sub AS bsr_sub_category,
+              bsr_main_category, bsr_main_rank, bsr_sub_rank, bsr_sub_category,
               image_url, product_url, node_id, category_name, category_depth,
-              site, is_signal, scraped_at
-              FROM new_arrivals {cond}
-              ORDER BY scraped_at DESC LIMIT {int(limit)} OFFSET {int(offset)}"""
+              site, item_weight, item_dimensions, weight_lb, dim_l_in, dim_w_in, dim_h_in,
+              fba_fee, placement_fee, fulfillment_type, country_of_origin,
+              is_amazon_choice, is_bestseller, scraped_at
+              FROM new_arrivals"""
+
+
+async def _new_arrivals_sqlite(filters: dict):
+    try:
+        import fetch_new_arrivals as _na_mod
+        _na_mod._init_db()
+    except Exception as e:
+        logging.warning(f"new_arrivals schema ensure failed: {e}")
+    where, params = _build_new_arrivals_where(filters, style="sqlite")
+    limit = int(filters.get("limit") or 50)
+    offset = int(filters.get("offset") or 0)
+    sql = f"{_NA_SELECT}{where} ORDER BY scraped_at DESC LIMIT {limit} OFFSET {offset}"
     try:
         return await _sqlite_query(sql, params)
     except Exception as e:
-        logging.warning(f"new_arrivals query failed: {e}")
+        logging.warning(f"new_arrivals sqlite query failed: {e}")
         return []
+
+
+async def _new_arrivals_pg(filters: dict):
+    try:
+        import fetch_new_arrivals as _na_mod
+        # 确保 PG 端表存在（与 sqlite 分支 _init_db 对齐）
+        _na_mod._init_db()
+    except Exception as e:
+        logging.warning(f"new_arrivals pg schema ensure failed: {e}")
+    where, params = _build_new_arrivals_where(filters, style="pg")
+    limit = int(filters.get("limit") or 50)
+    offset = int(filters.get("offset") or 0)
+    sql = (
+        f"{_NA_SELECT}{where} ORDER BY scraped_at DESC "
+        f"LIMIT ${len(params)+1} OFFSET ${len(params)+2}"
+    )
+    params.extend([limit, offset])
+    try:
+        return await pg_query(sql, *params)
+    except Exception as e:
+        logging.warning(f"new_arrivals pg query failed: {e}")
+        return []
+
+
+@app.get("/api/v2/new_arrivals")
+async def new_arrivals_api(
+    limit: int = Query(50, le=200), offset: int = 0,
+    price_min: float = None, price_max: float = None,
+    rating_min: float = None, rating_max: float = None,
+    review_min: int = None, review_max: int = None,
+    bsr_main_min: int = None, bsr_main_max: int = None,
+    bsr_sub_min: int = None, bsr_sub_max: int = None,
+    variant_min: int = None, variant_max: int = None,
+    sellers_min: int = None, sellers_max: int = None,
+    weight_min: float = None, weight_max: float = None,
+    dim_l: float = None, dim_w: float = None, dim_h: float = None,
+    fba_fee_min: float = None, fba_fee_max: float = None,
+    fulfillment_type: str = None, country: str = None,
+    amazons_choice: bool = False, bestseller: bool = False,
+    date_range: str = None, date_from: str = None, date_to: str = None,
+    site: str = None,
+):
+    """读取 new_arrivals；筛选参数与 /api/v2/products 对齐。"""
+    filters = dict(
+        limit=limit, offset=offset,
+        price_min=price_min, price_max=price_max,
+        rating_min=rating_min, rating_max=rating_max,
+        review_min=review_min, review_max=review_max,
+        bsr_main_min=bsr_main_min, bsr_main_max=bsr_main_max,
+        bsr_sub_min=bsr_sub_min, bsr_sub_max=bsr_sub_max,
+        variant_min=variant_min, variant_max=variant_max,
+        sellers_min=sellers_min, sellers_max=sellers_max,
+        weight_min=weight_min, weight_max=weight_max,
+        dim_l=dim_l, dim_w=dim_w, dim_h=dim_h,
+        fba_fee_min=fba_fee_min, fba_fee_max=fba_fee_max,
+        fulfillment_type=fulfillment_type, country=country,
+        amazons_choice=amazons_choice, bestseller=bestseller,
+        date_range=date_range, date_from=date_from, date_to=date_to,
+        site=site.upper() if site else None,
+    )
+    range_err = _validate_start_filters(filters)
+    if range_err:
+        return JSONResponse({"status": "error", "msg": f"筛选条件不合法: {range_err}"}, status_code=400)
+    if DB_BACKEND == "pg":
+        return await _new_arrivals_pg(filters)
+    return await _new_arrivals_sqlite(filters)
 
 @app.get("/api/v2/product_stats")
 async def product_stats():
@@ -611,6 +846,10 @@ async def product_stats():
             multi = await pg_scalar(
                 "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t"
             )
+            try:
+                na_total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
+            except Exception as e:
+                logging.warning(f"new_arrivals pg stats failed: {e}")
         else:
             try:
                 total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
@@ -634,7 +873,14 @@ async def product_progress():
     ps, na = 0, 0
     try:
         if DB_BACKEND == "pg":
-            ps = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            try:
+                ps = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+            except Exception:
+                ps = 0
+            try:
+                na = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
+            except Exception:
+                na = 0
         else:
             try:
                 ps = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
@@ -650,13 +896,58 @@ async def product_progress():
 
 # ── 爬虫控制 ──
 
+_FILTER_PARAM_FLAGS = [
+    ("review_max", "--review-max"), ("review_min", "--review-min"),
+    ("min_list", "--min-list"),
+    ("price_min", "--price-min"), ("price_max", "--price-max"),
+    ("rating_min", "--rating-min"), ("rating_max", "--rating-max"),
+    ("bsr_main_min", "--bsr-main-min"), ("bsr_main_max", "--bsr-main-max"),
+    ("bsr_sub_min", "--bsr-sub-min"), ("bsr_sub_max", "--bsr-sub-max"),
+    ("variant_min", "--variant-min"), ("variant_max", "--variant-max"),
+    ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
+    ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
+    ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
+    ("fba_fee_min", "--fba-fee-min"), ("fba_fee_max", "--fba-fee-max"),
+    ("fulfillment_type", "--fulfillment-type"),
+    ("country", "--country"),
+    ("date_range", "--date-range"), ("date_from", "--date-from"), ("date_to", "--date-to"),
+    ("delay", "--delay"),
+]
+
+# 最新到货脚本不接受的 CLI（榜单专用）
+_LA_SKIP_FLAGS = {"min_list", "delay"}
+
+
+def _append_filter_flags(cmd: list, body: dict, *, for_la: bool = False):
+    for key, flag in _FILTER_PARAM_FLAGS:
+        if for_la and key in _LA_SKIP_FLAGS:
+            continue
+        v = body.get(key)
+        if v and str(v) != "0":
+            cmd += [flag, str(v)]
+    if body.get("amazons_choice"):
+        cmd += ["--amazons-choice"]
+    if body.get("bestseller"):
+        cmd += ["--bestseller"]
+
+
 @app.post("/api/v2/start_products")
 async def start_products(body: dict):
     global _product_proc
     with _product_lock:
         if _product_proc is not None and _product_proc.poll() is None:
             return {"status": "already_running"}
+        range_err = _validate_start_filters(body)
+        if range_err:
+            return {"status": "error", "msg": f"筛选条件不合法: {range_err}"}
         chart = body.get("chart", "")
+        # include_descendants 默认 True（兼容旧行为：所选 + 全部下级）
+        include_descendants = body.get("include_descendants", True)
+        if isinstance(include_descendants, str):
+            include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
+        else:
+            include_descendants = bool(include_descendants)
+
         if chart == "la":
             cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
             if body.get("roots"):
@@ -666,8 +957,13 @@ async def start_products(body: dict):
             if body.get("site"):
                 cmd += ["--site", body["site"]]
             cmd += ["--max-pages", str(_positive_int(body.get("max_pages"), 10))]
-            _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR)
-            return {"status": "started", "pid": _product_proc.pid}
+            if not include_descendants:
+                cmd += ["--exact-roots"]
+            _append_filter_flags(cmd, body, for_la=True)
+            env = os.environ.copy()
+            env["DB_BACKEND"] = DB_BACKEND
+            _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
+            return {"status": "started", "pid": _product_proc.pid, "backend": DB_BACKEND}
 
         cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_products.py")]
         if body.get("slugs"):
@@ -683,33 +979,13 @@ async def start_products(body: dict):
         list_limit = min(_positive_int(body.get("list_limit"), 10), 100)
         page_cap = max(5, (list_limit + 23) // 24)
         cmd += ["--list-limit", str(list_limit), "--max-pages", str(page_cap)]
-        param_flags = [
-            ("review_max", "--review-max"), ("review_min", "--review-min"),
-            ("min_list", "--min-list"),
-            ("price_min", "--price-min"), ("price_max", "--price-max"),
-            ("rating_min", "--rating-min"), ("rating_max", "--rating-max"),
-            ("bsr_main_min", "--bsr-main-min"), ("bsr_main_max", "--bsr-main-max"),
-            ("bsr_sub_min", "--bsr-sub-min"), ("bsr_sub_max", "--bsr-sub-max"),
-            ("variant_min", "--variant-min"), ("variant_max", "--variant-max"),
-            ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
-            ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
-            ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
-            ("fba_fee_min", "--fba-fee-min"), ("fba_fee_max", "--fba-fee-max"),
-            ("fulfillment_type", "--fulfillment-type"),
-            ("country", "--country"),
-            ("date_range", "--date-range"), ("date_from", "--date-from"), ("date_to", "--date-to"),
-            ("delay", "--delay"),
-        ]
-        for key, flag in param_flags:
-            v = body.get(key)
-            if v and str(v) != "0":
-                cmd += [flag, str(v)]
-        if body.get("amazons_choice"):
-            cmd += ["--amazons-choice"]
-        if body.get("bestseller"):
-            cmd += ["--bestseller"]
-        _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR)
-    return {"status": "started", "pid": _product_proc.pid}
+        if not include_descendants:
+            cmd += ["--exact-roots"]
+        _append_filter_flags(cmd, body, for_la=False)
+        env = os.environ.copy()
+        env["DB_BACKEND"] = DB_BACKEND
+        _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
+    return {"status": "started", "pid": _product_proc.pid, "backend": DB_BACKEND}
 
 @app.post("/api/v2/stop_products")
 async def stop_products():

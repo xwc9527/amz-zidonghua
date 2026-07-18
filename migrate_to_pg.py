@@ -88,8 +88,12 @@ def migrate():
         cur.execute(f.read())
 
     # 清空旧数据（幂等迁移）
-    cur.execute("TRUNCATE categories, product_sightings, run_status RESTART IDENTITY CASCADE")
+    # new_arrivals：按产品决策不迁 SQLite 历史，统一清空后由后续抓取重建
+    cur.execute(
+        "TRUNCATE categories, product_sightings, new_arrivals, run_status RESTART IDENTITY CASCADE"
+    )
     cur.execute("INSERT INTO run_status(id, phase, paused) VALUES(1, 'idle', 0) ON CONFLICT(id) DO NOTHING")
+    print("  已清空 new_arrivals（不迁移最新到货历史，需重新抓取）")
 
     # 批量插入类目（禁用触发器，手动维护 child_count）
     print("写入类目 ...")
@@ -180,6 +184,12 @@ def migrate():
     cur.execute("SELECT COUNT(*) FROM product_sightings")
     pg_prods = cur.fetchone()[0]
     print(f"  PG 商品: {pg_prods} (SQLite: {len(prods)})")
+
+    cur.execute("SELECT COUNT(*) FROM new_arrivals")
+    pg_na = cur.fetchone()[0]
+    print(f"  PG 最新到货: {pg_na}（策略：不迁移历史，期望 0）")
+    if pg_na != 0:
+        print("  警告: new_arrivals 未清空干净，请检查 TRUNCATE")
 
     # ltree 查询测试
     cur.execute("SELECT COUNT(*) FROM categories WHERE path IS NOT NULL")

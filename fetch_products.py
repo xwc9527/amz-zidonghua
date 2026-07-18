@@ -9,7 +9,13 @@ from curl_cffi.requests import RequestsError
 from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
-from fba_fees_us import estimate_fba_fees, parse_weight_lb, parse_dims_inches
+from fba_fees_us import estimate_fba_fees
+from detail_parser import (
+    parse_detail_fields as _parse_detail_fields_shared,
+    check_detail_filters as _check_detail_filters_shared,
+    attach_normalized_dims,
+    extract_image_url,
+)
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -243,12 +249,6 @@ def _safe_get(session: requests.Session, url: str,
 
 # ── DB 工具 ─────────────────────────────────────────────────────────
 
-DE_MONTHS = {
-    "Januar": 1, "Februar": 2, "März": 3, "April": 4,
-    "Mai": 5, "Juni": 6, "Juli": 7, "August": 8,
-    "September": 9, "Oktober": 10, "November": 11, "Dezember": 12,
-}
-
 _DETAIL_COLS = [
     ("bsr_main_rank", "INTEGER"),
     ("bsr_main_category", "TEXT"),
@@ -275,16 +275,16 @@ _DETAIL_COLS = [
 
 
 def _attach_normalized_dims(d: dict) -> dict:
-    """从文本重量/尺寸写入可 SQL 筛选的数值字段（lb / inch，长≥宽≥高）。"""
-    w = parse_weight_lb(d.get("item_weight"))
-    if w is not None:
-        d["weight_lb"] = round(w, 4)
-    dims = parse_dims_inches(d.get("item_dimensions"))
-    if dims is not None:
-        d["dim_l_in"], d["dim_w_in"], d["dim_h_in"] = (
-            round(dims[0], 4), round(dims[1], 4), round(dims[2], 4)
-        )
-    return d
+    return attach_normalized_dims(d)
+
+
+def parse_detail_fields(html: str) -> dict:
+    """兼容原调用：内部转发到共享模块并注入当前站点。"""
+    return _parse_detail_fields_shared(html, _SITE)
+
+
+def _check_detail_filters(detail: dict, filters: dict) -> bool:
+    return _check_detail_filters_shared(detail, filters)
 
 
 def _pg_fetchall(sql, params=()):
@@ -318,39 +318,77 @@ def db_conn():
     return c
 
 
-def get_descendant_nodes(root_ids: list, lists: list) -> list:
-    """根据选中的根节点 node_id，查出所有后代叶子节点。"""
+def get_descendant_nodes(root_ids: list, lists: list, site: str = None,
+                         include_descendants: bool = True) -> list:
+    """根据选中的根节点 node_id 查抓取目标节点。
+
+    include_descendants=True（默认）：所选节点 + 全部下级（现有行为）。
+    include_descendants=False：仅所选节点本身（不展开下级）。
+
+    node_id 仅在 (node_id, site) 组合下唯一，不同站点可能出现相同 node_id
+    （例如 L1 根节点直接用 slug 字符串作 node_id）。所有查询必须显式带 site
+    过滤，否则会把其它站点的同名节点及其全部后代一起选中并抓取
+    （跨站点混抓）。
+    """
+    if not root_ids:
+        return []
     if DB_BACKEND == "pg":
-        return _get_descendant_nodes_pg(root_ids)
+        return _get_descendant_nodes_pg(root_ids, include_descendants=include_descendants)
+    site = (site or _SITE).upper()
     conn = db_conn()
     placeholders = ",".join("?" * len(root_ids))
+    if not include_descendants:
+        rows = conn.execute(
+            f"""SELECT node_id, url, name, depth FROM categories
+                WHERE node_id IS NOT NULL AND site = ?
+                  AND node_id IN ({placeholders})
+                ORDER BY depth DESC, name""",
+            [site, *root_ids],
+        ).fetchall()
+        conn.close()
+        result = [dict(r) for r in rows]
+        _log.info(f"[fetch_products] [{site}] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
+        return result
+
     roots = conn.execute(
-        f"SELECT node_id, url FROM categories WHERE node_id IN ({placeholders})",
-        root_ids
+        f"SELECT node_id, url FROM categories WHERE node_id IN ({placeholders}) AND site = ?",
+        [*root_ids, site]
     ).fetchall()
     if not roots:
         conn.close()
         return []
     like_clauses = []
+    like_params = []
     for r in roots:
         prefix = r["url"].rstrip("/") + "/"
-        like_clauses.append(f"url LIKE '{prefix}%'")
+        like_clauses.append("url LIKE ?")
+        like_params.append(f"{prefix}%")
     like_clauses.append(f"node_id IN ({placeholders})")
     sql = f"""
         SELECT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL
+        WHERE node_id IS NOT NULL AND site = ?
           AND ({" OR ".join(like_clauses)})
         ORDER BY depth DESC, name
     """
-    rows = conn.execute(sql, root_ids).fetchall()
+    rows = conn.execute(sql, [site, *like_params, *root_ids]).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
-    _log.info(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
+    _log.info(f"[fetch_products] [{site}] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
     return result
 
 
-def _get_descendant_nodes_pg(root_ids):
+def _get_descendant_nodes_pg(root_ids, include_descendants: bool = True):
     ph = ",".join(["%s"] * len(root_ids))
+    if not include_descendants:
+        result = _pg_fetchall(
+            f"""SELECT node_id, url, name, depth FROM categories
+                WHERE node_id IS NOT NULL AND site = %s AND node_id IN ({ph})
+                ORDER BY depth DESC, name""",
+            [_SITE, *root_ids],
+        )
+        _log.info(f"[fetch_products] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
+        return result
+
     roots = _pg_fetchall(
         f"SELECT node_id, path FROM categories WHERE site = %s AND node_id IN ({ph})",
         [_SITE, *root_ids],
@@ -390,11 +428,13 @@ def _validate_slugs(slugs: list) -> list:
     return cleaned
 
 
-def get_nodes_by_slugs(slugs: list, lists: list) -> list:
-    """根据 L1 slug 查出所有后代节点。"""
+def get_nodes_by_slugs(slugs: list, lists: list, site: str = None) -> list:
+    """根据 L1 slug 查出所有后代节点。同一 slug 在不同站点的 URL 前缀不同，
+    但仍需显式限定 site，避免历史数据里其它站点残留同名 slug 时混入。"""
     slugs = _validate_slugs(slugs)
     if DB_BACKEND == "pg":
         return _get_nodes_by_slugs_pg(slugs)
+    site = (site or _SITE).upper()
     conn = db_conn()
     like_clauses = []
     params = []
@@ -411,11 +451,11 @@ def get_nodes_by_slugs(slugs: list, lists: list) -> list:
         return []
     sql = f"""
         SELECT DISTINCT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL
+        WHERE node_id IS NOT NULL AND site = ?
           AND ({" OR ".join(like_clauses)})
         ORDER BY depth DESC, name
     """
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, [site, *params]).fetchall()
     conn.close()
     result = [dict(r) for r in rows]
     _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
@@ -588,11 +628,36 @@ def extract_list_total(html: str) -> int:
     return len(asins)
 
 
+# 主选择器为线上已验证有效的两种榜单模板；下面几个是防御性兜底，
+# 仅在主选择器 0 匹配时才会尝试，不影响现有已验证行为。
+# 顺序按"误命中风险"从低到高排列：越靠后越宽泛（例如 [data-asin] 几乎会
+# 命中页面上所有"赞助商品/其他人还买了"等不相关卡片），只在前面更精确的
+# 选择器都未命中时才作为最后手段使用，避免把不相关内容当榜单商品抓入库。
+_FALLBACK_ITEM_SELECTORS = [
+    ".zg-item-immersion",
+    "[id^='p13n-asin-index']",
+    ".p13n-sc-uncoverable-faceout",
+    "[data-asin]:has(a[href*='/dp/'])",
+]
+
+
 def _select_product_items(soup: BeautifulSoup) -> list:
     items = soup.select("[id^='gridItemRoot']")
-    if not items:
-        items = soup.select(".zg-grid-general-faceout")
-    return items
+    if items:
+        return items
+    items = soup.select(".zg-grid-general-faceout")
+    if items:
+        return items
+    for sel in _FALLBACK_ITEM_SELECTORS:
+        try:
+            items = soup.select(sel)
+        except NotImplementedError:
+            # 部分 bs4/soupsieve 版本不支持 :has()，跳过该兜底选择器
+            continue
+        if items:
+            _log.warning(f"[fetch_products] 主选择器未命中，使用兜底选择器: {sel} ({len(items)} 项)")
+            return items
+    return []
 
 
 def _count_product_items(html: str) -> int:
@@ -636,10 +701,9 @@ def parse_products(html: str, node_id: str, category_name: str,
                    or item.select_one("a > span > div"))
         p["name"] = name_el.get_text(strip=True) if name_el else ""
 
-        # 图片
+        # 图片：data-a-dynamic-image → srcset → data-src → src（跳过占位图）
         img = item.select_one("img")
-        if img:
-            p["image_url"] = img.get("src", "")
+        p["image_url"] = extract_image_url(img)
 
         # 价格
         price_el = item.select_one(".a-price .a-offscreen")
@@ -780,333 +844,6 @@ def parse_products(html: str, node_id: str, category_name: str,
 _log.info("[fetch_products] 模块加载完成")
 
 
-# ── 详情页解析 ─────────────────────────────────────────────────────
-
-def parse_detail_fields(html: str) -> dict:
-    """从详情页HTML提取补全字段。"""
-    soup = BeautifulSoup(html, "html.parser")
-    d = {}
-
-    badge_blob = " ".join(
-        el.get_text(" ", strip=True)
-        for el in soup.select(
-            ".a-badge, .a-badge-label, .a-badge-label-inner, "
-            "[data-a-badge-type], #acBadge_feature_div, #zeitgeistBadge_feature_div, "
-            "#badge_feature_div"
-        )
-    )
-    badge_blob = f"{badge_blob} " + " ".join(
-        el.get("data-a-badge-type", "")
-        for el in soup.select("[data-a-badge-type]")
-    )
-    badge_blob_l = badge_blob.lower()
-    d["is_amazon_choice"] = 1 if (
-        "amazons-choice" in badge_blob_l
-        or "amazon's choice" in badge_blob_l
-        or "amazon choice" in badge_blob_l
-        or "amazon\u304a\u3059\u3059\u3081" in badge_blob_l
-    ) else 0
-    d["is_bestseller"] = 1 if re.search(
-        r"#\s*1\s+best\s+seller|best\s+seller\s+in|\u30d9\u30b9\u30c8\u30bb\u30e9\u30fc|\u58f2\u308c\u7b4b",
-        badge_blob,
-        re.I,
-    ) else 0
-
-    # BSR
-    bsr_section = (
-        soup.select_one("#prodDetails")
-        or soup.select_one("#detailBulletsWrapper_feature_div")
-        or soup.select_one("#productDetails_db_sections")
-    )
-    if bsr_section:
-        bsr_text = bsr_section.get_text(" ")
-        bsr_matches = []
-        # 终止条件用 lookahead，避免吞掉下一个 #，否则子类 BSR 会丢
-        for pat in [
-            r"Nr\.\s*([\d\.]+)\s+in\s+(.+?)(?=\s*\(|\s{2,}|\s*#|\s*$)",
-            r"#([\d,]+)\s+in\s+(.+?)(?=\s*\(|\s{2,}|\s*#|\s*$)",
-        ]:
-            for m in re.finditer(pat, bsr_text):
-                rank_str = m.group(1).replace(".", "").replace(",", "")
-                cat = m.group(2).strip().rstrip("( ,")
-                if not cat or len(cat) < 2:
-                    continue
-                try:
-                    bsr_matches.append((int(rank_str), cat))
-                except ValueError:
-                    pass
-        # 去重保序（德/英双正则可能重复）
-        seen = set()
-        uniq = []
-        for item in bsr_matches:
-            if item in seen:
-                continue
-            seen.add(item)
-            uniq.append(item)
-        bsr_matches = uniq
-        if bsr_matches:
-            d["bsr_main_rank"] = bsr_matches[0][0]
-            d["bsr_main_category"] = bsr_matches[0][1]
-        if len(bsr_matches) > 1:
-            d["bsr_sub_rank"] = bsr_matches[1][0]
-            d["bsr_sub_category"] = bsr_matches[1][1]
-
-    # 商品属性表
-    detail_rows = soup.select(
-        "#detailBullets_feature_div li, "
-        "#productDetails_techSpec_section_1 tr, "
-        "#productDetails_detailBullets_sections1 tr, "
-        "#prodDetails tr"
-    )
-    for row in detail_rows:
-        text = row.get_text(" ", strip=True)
-
-        # 上架日期
-        if any(k in text for k in ["Date First Available", "Datum der Ersten",
-                                     "Erstmals verfügbar", "発売日"]):
-            dm = re.search(r"(\d{1,2})\.\s*(Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*(\d{4})", text)
-            if dm:
-                try:
-                    dt = datetime(int(dm.group(3)), DE_MONTHS[dm.group(2)], int(dm.group(1)))
-                    d["date_first_available"] = dt.strftime("%Y-%m-%d")
-                except (ValueError, KeyError):
-                    pass
-            if "date_first_available" not in d:
-                # US: July 1, 2026
-                em = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})", text)
-                if em:
-                    try:
-                        dt = datetime.strptime(f"{em.group(1)} {em.group(2)} {em.group(3)}", "%B %d %Y")
-                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-            if "date_first_available" not in d:
-                # UK/EU English: 1 July 2026
-                uk = re.search(r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})", text)
-                if uk:
-                    try:
-                        dt = datetime.strptime(f"{uk.group(2)} {uk.group(1)} {uk.group(3)}", "%B %d %Y")
-                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-            if "date_first_available" not in d:
-                jm = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", text)
-                if jm:
-                    try:
-                        dt = datetime(int(jm.group(1)), int(jm.group(2)), int(jm.group(3)))
-                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-
-        # 重量
-        if any(k in text for k in ["Item Weight", "Artikelgewicht", "商品の重量"]):
-            wm = re.search(r"([\d,.]+)\s*(pounds?|ounces?|kg|g|Kilogramm|Gramm|lbs?|oz)\b", text, re.I)
-            if wm:
-                d["item_weight"] = wm.group(0).strip()
-
-        # 尺寸
-        if any(k in text for k in ["Item Dimensions", "Produktabmessungen",
-                                     "Artikelabmessungen", "Package Dimensions"]):
-            dim_m = re.search(r"[\d,.]+\s*x\s*[\d,.]+(?:\s*x\s*[\d,.]+)?(?:\s*(?:inches|cm|mm|Zoll|zoll))?", text, re.I)
-            if dim_m:
-                d["item_dimensions"] = dim_m.group(0).strip()
-
-        # 产地：优先取 th/td 或 li 内最后一个值节点，避免无冒号结构失败
-        if any(k in text for k in ["Country of Origin", "Herkunftsland", "原産国"]):
-            val = None
-            td = row.select_one("td")
-            if td and td.get_text(strip=True):
-                val = td.get_text(strip=True)
-            if not val:
-                spans = row.select("span.a-list-item, span.a-text-bold + span, span")
-                texts = [s.get_text(strip=True) for s in spans if s.get_text(strip=True)]
-                # drop the label-like tokens
-                texts = [t for t in texts if t and not any(k in t for k in ["Country of Origin", "Herkunftsland", "原産国", ":"])]
-                if texts:
-                    val = texts[-1]
-            if not val:
-                parts = re.split(r"[:‏‎]+", text)
-                if len(parts) >= 2:
-                    val = parts[-1].strip()
-            if val:
-                d["country_of_origin"] = val
-
-    # 变体数
-    variants = soup.select("#twister_feature_div li[data-defaultasin]")
-    if variants:
-        d["variant_option_count"] = len(variants)
-
-    # 其他卖家
-    olp = soup.select_one("#olp_feature_div, #aod-offer-list")
-    if olp:
-        om = re.search(r"(\d+)\s+(?:new|neu|nouveau)", olp.get_text(), re.I)
-        if om:
-            d["other_sellers_count"] = int(om.group(1))
-
-    # 运费（页面配送文案，仅作参考；筛选以 FBA 履约费为准）
-    delivery_el = soup.select_one("#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage")
-    if delivery_el:
-        dtxt = delivery_el.get_text(" ", strip=True)
-        if re.search(r"\bFREE\b|Kostenlose|KOSTENLOS", dtxt, re.I):
-            d["shipping_fee"] = "FREE"
-            d["shipping_fee_value"] = 0.0
-        else:
-            fee_m = re.search(
-                r"(?:für|for|:)\s*([\d,.]+)\s*(?:\xa0)?([€$£])|([€$£])\s*([\d,.]+)", dtxt)
-            if fee_m:
-                raw = (fee_m.group(1) or fee_m.group(4)).replace(",", ".")
-                try:
-                    d["shipping_fee_value"] = float(raw)
-                    d["shipping_fee"] = fee_m.group(0).strip()
-                except ValueError:
-                    pass
-
-    # 规范化数值字段（供结果 API SQL 筛选，避免 500 截断后滤）
-    _attach_normalized_dims(d)
-
-    # 多站点 FBA：体积重/实重取高 → 查对应站点费表；配置费（US）单独估算
-    price_for_fee = d.get("price")
-    fees = estimate_fba_fees(_SITE, d.get("item_weight"), d.get("item_dimensions"), price_for_fee)
-    if fees.get("fba_fee") is not None:
-        d["fba_fee"] = fees["fba_fee"]
-    if fees.get("placement_fee") is not None:
-        d["placement_fee"] = fees["placement_fee"]
-
-    # 配送模式：Amazon 自营/发货视为 FBA
-    for sel in ("#merchant-info", "#merchantInfoFeature",
-                ".offer-display-feature-text", "#tabular-buybox"):
-        mel = soup.select_one(sel)
-        if mel:
-            mtxt = mel.get_text(" ", strip=True)
-            if re.search(
-                r"Fulfilled by Amazon|Versand durch Amazon|Expédié par Amazon|Amazonが発送|"
-                r"Ships from Amazon\.com|Ships from and sold by Amazon|"
-                r"Verkauf und Versand durch Amazon|Amazon\.de|"
-                r"Amazon\.co\.jpが発送|Amazon\.co\.uk",
-                mtxt, re.I,
-            ):
-                d["fulfillment_type"] = "FBA"
-            else:
-                d["fulfillment_type"] = "FBM"
-            break
-
-    return d
-
-
-def _check_detail_filters(detail: dict, filters: dict) -> bool:
-    """检查详情页字段是否满足筛选条件。返回True=通过，False=不符合。"""
-    def _range_check(val, fmin_key, fmax_key):
-        fmin = filters.get(fmin_key, 0)
-        fmax = filters.get(fmax_key, 0)
-        if not fmin and not fmax:
-            return True
-        if val is None:
-            return False
-        if fmin and val < fmin:
-            return False
-        if fmax and val > fmax:
-            return False
-        return True
-
-    if not _range_check(detail.get("bsr_main_rank"), "bsr_main_min", "bsr_main_max"):
-        return False
-    if not _range_check(detail.get("bsr_sub_rank"), "bsr_sub_min", "bsr_sub_max"):
-        return False
-    if not _range_check(detail.get("variant_option_count"), "variant_min", "variant_max"):
-        return False
-    if not _range_check(detail.get("other_sellers_count"), "sellers_min", "sellers_max"):
-        return False
-
-    # 重量 (解析数值，统一为 lb)
-    wmin = filters.get("weight_min", 0)
-    wmax = filters.get("weight_max", 0)
-    if wmin or wmax:
-        w = detail.get("item_weight")
-        if not w:
-            return False
-        wm = re.search(r"([\d,.]+)", w)
-        if not wm:
-            return False
-        wv = float(wm.group(1).replace(",", "."))
-        if "kg" in w.lower() or "kilogramm" in w.lower():
-            wv *= 2.205
-        elif "ounce" in w.lower() or "oz" in w.lower():
-            wv /= 16
-        elif "gramm" in w.lower() or (" g" in w.lower() and "kg" not in w.lower()):
-            wv *= 0.0022
-        if wmin and wv < wmin:
-            return False
-        if wmax and wv > wmax:
-            return False
-
-    # 尺寸（严格：不足三维直接不通过，禁止补 0）
-    dl = filters.get("dim_l", 0)
-    dw = filters.get("dim_w", 0)
-    dh = filters.get("dim_h", 0)
-    if dl or dw or dh:
-        dims_raw = detail.get("item_dimensions", "")
-        if not dims_raw:
-            return False
-        nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", dims_raw)]
-        if "cm" in dims_raw.lower():
-            nums = [n / 2.54 for n in nums]
-        if len(nums) < 3:
-            return False
-        nums = sorted(nums[:3], reverse=True)
-        if dl and nums[0] > dl:
-            return False
-        if dw and nums[1] > dw:
-            return False
-        if dh and nums[2] > dh:
-            return False
-
-    # FBA 履约费（US 估算）
-    if not _range_check(detail.get("fba_fee"), "fba_fee_min", "fba_fee_max"):
-        return False
-
-    # 配送模式
-    ft = filters.get("fulfillment_type", "")
-    if ft:
-        if not detail.get("fulfillment_type"):
-            return False
-        if detail["fulfillment_type"] != ft:
-            return False
-
-    # 产地
-    country = filters.get("country", "")
-    if country:
-        if not detail.get("country_of_origin"):
-            return False
-        if country.lower() not in detail["country_of_origin"].lower():
-            return False
-
-    if filters.get("amazons_choice") and detail.get("is_amazon_choice") != 1:
-        return False
-    if filters.get("bestseller") and detail.get("is_bestseller") != 1:
-        return False
-
-    # 上架日期
-    date_range = filters.get("date_range", "")
-    if date_range:
-        if not detail.get("date_first_available"):
-            return False
-        try:
-            dfa = datetime.strptime(detail["date_first_available"], "%Y-%m-%d")
-            if date_range == "custom":
-                df = filters.get("date_from", "")
-                dt = filters.get("date_to", "")
-                if df and dfa < datetime.strptime(df, "%Y-%m-%d"):
-                    return False
-                if dt and dfa > datetime.strptime(dt, "%Y-%m-%d"):
-                    return False
-            else:
-                days = int(date_range)
-                if (datetime.now() - dfa).days > days:
-                    return False
-        except (ValueError, TypeError):
-            return False
-
-    return True
 
 
 def enrich_with_details(products: list, session: requests.Session,
@@ -1321,12 +1058,16 @@ def run_batch(root_ids: list, lists: list, review_max: int,
               max_pages: int = 2,
               slugs: list = None,
               detail_filters: dict = None,
-              list_limit: int = 10):
+              list_limit: int = 10,
+              include_descendants: bool = True):
     """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
     if slugs:
-        nodes = get_nodes_by_slugs(slugs, lists)
+        # --slugs 语义本身就是 L1 下全部后代；exact 模式对 slug 入口不适用，仍展开
+        nodes = get_nodes_by_slugs(slugs, lists, site=_SITE)
     else:
-        nodes = get_descendant_nodes(root_ids, lists)
+        nodes = get_descendant_nodes(
+            root_ids, lists, site=_SITE, include_descendants=include_descendants
+        )
     _stats["total_nodes"] = len(nodes)
     _stats["products_dup"] = 0
     with _seen_lock:
@@ -1485,6 +1226,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-pages", type=int, default=5)
     parser.add_argument("--delay",      type=float, default=DEFAULT_DELAY)
     parser.add_argument("--lists", nargs="+", default=DEFAULT_LISTS)
+    parser.add_argument(
+        "--exact-roots", action="store_true",
+        help="仅抓 --roots 所选类目本身，不展开全部下级（默认会展开）",
+    )
     args = parser.parse_args()
     args.list_limit = max(1, min(args.list_limit, 100))
     args.max_pages = max(args.max_pages, 5, (args.list_limit + 23) // 24)
@@ -1531,4 +1276,5 @@ if __name__ == "__main__":
         slugs=args.slugs,
         detail_filters=detail_filters,
         list_limit=args.list_limit,
+        include_descendants=not args.exact_roots,
     )

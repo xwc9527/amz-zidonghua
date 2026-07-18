@@ -181,3 +181,56 @@ CREATE TABLE IF NOT EXISTS run_status (
 
 INSERT INTO run_status(id, phase, paused) VALUES(1, 'idle', 0)
 ON CONFLICT(id) DO NOTHING;
+
+-- ── 最新到货（与 fetch_new_arrivals.py / SQLite new_arrivals 对齐）──
+CREATE TABLE IF NOT EXISTS new_arrivals (
+    id                   SERIAL PRIMARY KEY,
+    asin                 TEXT NOT NULL,
+    title                TEXT,
+    price                TEXT,
+    price_value          REAL,
+    rating               REAL,
+    review_count         INTEGER DEFAULT 0,
+    listing_date         TEXT,
+    listing_age_days     INTEGER,
+    bsr_main_category    TEXT,
+    bsr_main_rank        INTEGER,
+    bsr_sub              TEXT,
+    bsr_sub_rank         INTEGER,
+    bsr_sub_category     TEXT,
+    image_url            TEXT,
+    product_url          TEXT,
+    node_id              TEXT,
+    category_name        TEXT,
+    category_depth       INTEGER,
+    site                 TEXT DEFAULT 'US',
+    item_weight          TEXT,
+    item_dimensions      TEXT,
+    weight_lb            REAL,
+    dim_l_in             REAL,
+    dim_w_in             REAL,
+    dim_h_in             REAL,
+    variant_option_count INTEGER,
+    other_sellers_count  INTEGER,
+    fba_fee              REAL,
+    placement_fee        REAL,
+    fulfillment_type     TEXT,
+    country_of_origin    TEXT,
+    is_amazon_choice     INTEGER DEFAULT 0,
+    is_bestseller        INTEGER DEFAULT 0,
+    scraped_at           TIMESTAMPTZ DEFAULT now()
+);
+
+DO $$ BEGIN
+    ALTER TABLE new_arrivals
+        ADD CONSTRAINT uq_na_asin_node_site
+        UNIQUE NULLS NOT DISTINCT (asin, node_id, site);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_na_asin      ON new_arrivals(asin);
+CREATE INDEX IF NOT EXISTS idx_na_site      ON new_arrivals(site);
+CREATE INDEX IF NOT EXISTS idx_na_scraped   ON new_arrivals(scraped_at DESC);
+CREATE INDEX IF NOT EXISTS idx_na_asin_site ON new_arrivals(asin, site);
+CREATE INDEX IF NOT EXISTS idx_na_price     ON new_arrivals(price_value);
+CREATE INDEX IF NOT EXISTS idx_na_bsr_main  ON new_arrivals(bsr_main_rank);

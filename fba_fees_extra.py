@@ -1,20 +1,23 @@
 """
-额外站点 FBA 运费估算（均来自 Amazon 公开费率页/PDF，联网核对后录入）。
+额外站点 FBA 运费估算（仅 Amazon 官方公开页/PDF + Seller Central 公告）。
 
-来源：
-  SG — https://m.media-amazon.com/images/G/65/SG3P/FBA_fulfilment_fees_for_Amazon.sg_orders.pdf
-  SA — https://sell.amazon.sa/pricing (Aug 1, 2025)
-  AE — https://sell.amazon.ae/pricing (Aug 1, 2025)
-  EG — https://sell.amazon.eg/pricing
+官方信源：
+  SG — https://m.media-amazon.com/images/G/65/SG3P/FBA_Fulfilment_fees_for_Amazon.sg_orders.pdf
+  SA — https://sell.amazon.sa/en/pricing（2025-08-01）
+  AE — https://sell.amazon.ae/en/pricing（2025-08-01）
+  EG — https://sell.amazon.eg/en/pricing
   AU — https://sell.amazon.com.au/pricing
   TR — https://m.media-amazon.com/images/G/41/SOA/PricingFiles/FBA_Domestic_Rate_Card_202604_Final.pdf
-  BR — https://m.media-amazon.com/images/G/32/fee/PDFv4.pdf (Aug 1, 2025)
-  MX — https://vender.amazon.com.mx/terminos/promocion (2026 费率)
-  IN — https://sell.amazon.in/.../fba-faq (Pick&Pack + National weight handling)
-  CA — Amazon.ca 公开 CAD 分档结构（Seller Central 明细页需登录；采用公开文档化的 envelope/standard/oversize 表）+ 3.5% surcharge
+  BR — https://m.media-amazon.com/images/G/32/fee/PDFv4.pdf（2025-08-01；<R$79 促销至 2026-01-31，其后用 Novas 重量表）
+  MX — https://vender.amazon.com.mx/precios（2026-06-04）
+  IN — https://sell.amazon.in/shipping-and-fulfillment/fulfillment-by-amazon/fba-faq
+  CA — https://sell.amazon.ca/pricing
+        + 3.5% surcharge（Seller Central 公告 2026-04-17）
+        https://sellercentral.amazon.com/seller-forums/discussions/t/7cbc0233-ee5b-4359-978a-dee7cad5c6f4
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from fba_fees_us import parse_dims_cm, parse_weight_kg, _lookup_ceil
@@ -301,9 +304,36 @@ def estimate_au(weight_text, dims_text, price=None) -> dict:
                 (15000, 15.86), (20000, 16.42), (22000, 16.42),
             ]
         )
-        fee = _ceil_band(bands, ship_g)
+        if ship_g <= 22000:
+            fee = _ceil_band(bands, ship_g)
+        else:
+            base = 15.52 if low else 16.43
+            fee = base + 0.01 * max(0.0, ship_g / 1000 - 22.0)
+    elif unit <= 35:
+        # Large oversize：sell.amazon.com.au/pricing
+        tier = "large_oversize"
+        ship_g = max(ug, dim_kg * 1000)
+        bands = (
+            [
+                (5000, 13.80), (10000, 14.21), (15000, 15.11), (20000, 15.61),
+                (25000, 15.65), (30000, 22.09), (35000, 23.09),
+            ] if low else [
+                (5000, 14.71), (10000, 15.12), (15000, 16.02), (20000, 16.52),
+                (25000, 16.56), (30000, 23.00), (35000, 24.00),
+            ]
+        )
+        if ship_g <= 35000:
+            fee = _ceil_band(bands, ship_g)
+        else:
+            base = 33.09 if low else 34.00
+            fee = base + 0.10 * max(0.0, ship_g / 1000 - 35.0)
+    elif unit < 250:
+        tier = "extra_large"
+        ship_g = max(ug, dim_kg * 1000)
+        base = 71.09 if low else 72.00
+        fee = base if ship_g <= 35000 else base + 0.10 * max(0.0, ship_g / 1000 - 35.0)
     else:
-        return _out("AU", "A$", size_tier="oversize_heavy")
+        return _out("AU", "A$", size_tier="not_eligible")
     return _out("AU", "A$", fba_fee=round(fee, 2), size_tier=tier,
                 shipping_weight=round(ship_g / 1000, 3), dim_weight=round(dim_kg, 3))
 
@@ -357,23 +387,39 @@ def estimate_tr(weight_text, dims_text, price=None) -> dict:
 
 
 # ── BR ─────────────────────────────────────────────────────────────
+# PDFv4「Novas Tarifas」重量表（<R$79 促销 5.65/5.85/6.05 已于 2026-01-31 失效）
+# col: 0=<79(Todos), 1=79-100, 2=100-120, 3=120-150, 4=150-200, 5=200+
 
-_BR_GE79 = [
-    # max_kg -> (79-100, 100-120, 120-150, 150-200, 200+)
-    (0.25, (11.95, 13.95, 15.95, 17.95, 19.90)),
-    (0.50, (12.85, 15.00, 17.15, 19.30, 20.40)),
-    (1.0, (13.45, 15.70, 17.95, 20.20, 21.40)),
-    (2.0, (14.00, 16.35, 18.75, 21.10, 22.90)),
-    (3.0, (14.95, 17.45, 19.95, 22.40, 23.90)),
-    (4.0, (16.15, 18.85, 21.55, 24.20, 24.90)),
-    (5.0, (17.00, 19.90, 22.75, 25.60, 25.90)),
-    (6.0, (25.00, 30.00, 34.00, 38.00, 41.40)),
-    (7.0, (26.00, 31.00, 35.00, 39.00, 41.90)),
-    (8.0, (27.00, 32.00, 36.00, 40.00, 41.90)),
-    (9.0, (28.00, 33.00, 37.00, 41.00, 41.90)),
-    (10.0, (39.50, 46.00, 52.75, 59.00, 65.90)),
+_BR_NOVAS = [
+    (0.25, (19.90, 11.95, 13.95, 15.95, 17.95, 19.90)),
+    (0.50, (20.40, 12.85, 15.00, 17.15, 19.30, 20.40)),
+    (1.0, (21.40, 13.45, 15.70, 17.95, 20.20, 21.40)),
+    (2.0, (22.90, 14.00, 16.35, 18.75, 21.10, 22.90)),
+    (3.0, (23.90, 14.95, 17.45, 19.95, 22.40, 23.90)),
+    (4.0, (24.90, 16.15, 18.85, 21.55, 24.20, 24.90)),
+    (5.0, (25.90, 17.00, 19.90, 22.75, 25.60, 25.90)),
+    (6.0, (41.40, 25.00, 30.00, 34.00, 38.00, 41.40)),
+    (7.0, (41.90, 26.00, 31.00, 35.00, 39.00, 41.90)),
+    (8.0, (41.90, 27.00, 32.00, 36.00, 40.00, 41.90)),
+    (9.0, (41.90, 28.00, 33.00, 37.00, 41.00, 41.90)),
+    (10.0, (65.90, 39.50, 46.00, 52.75, 59.00, 65.90)),
 ]
-_BR_EXTRA = (3.05, 3.05, 3.05, 3.50, 4.00)
+_BR_EXTRA = (4.00, 3.05, 3.05, 3.05, 3.50, 4.00)
+
+
+def _br_price_col(price: Optional[float]) -> int:
+    p = 100.0 if price is None else price
+    if p < 79:
+        return 0
+    if p < 100:
+        return 1
+    if p < 120:
+        return 2
+    if p < 150:
+        return 3
+    if p < 200:
+        return 4
+    return 5
 
 
 def estimate_br(weight_text, dims_text, price=None) -> dict:
@@ -384,31 +430,14 @@ def estimate_br(weight_text, dims_text, price=None) -> dict:
     L, W, H = dims
     dim = (L * W * H) / 6000.0
     ship = max(unit, dim) + 0.02  # +20g packaging
-    p = price if price is not None else 100.0
-    if p < 30:
-        fee = 5.65
-    elif p < 50:
-        fee = 5.85
-    elif p < 79:
-        fee = 6.05
-    else:
-        if p < 100:
-            col = 0
-        elif p < 120:
-            col = 1
-        elif p < 150:
-            col = 2
-        elif p < 200:
-            col = 3
-        else:
-            col = 4
-        fee = None
-        for lim, fees in _BR_GE79:
-            if ship <= lim + 1e-9:
-                fee = fees[col]
-                break
-        if fee is None:
-            fee = _BR_GE79[-1][1][col] + _BR_EXTRA[col] * max(0.0, ship - 10)
+    col = _br_price_col(price)
+    fee = None
+    for lim, fees in _BR_NOVAS:
+        if ship <= lim + 1e-9:
+            fee = fees[col]
+            break
+    if fee is None:
+        fee = _BR_NOVAS[-1][1][col] + _BR_EXTRA[col] * max(0.0, ship - 10)
     return _out("BR", "R$", fba_fee=round(fee, 2), size_tier="fba_core",
                 shipping_weight=round(ship, 3), dim_weight=round(dim, 3))
 
@@ -425,6 +454,29 @@ def _mx_price_col(price: Optional[float]) -> int:
     if p < 499:
         return 2
     return 3
+
+
+# "Tamaño grande" (>45x35x20cm) 官方分档：vender.amazon.com.mx/precios（2026-06-04 更新）
+# 核对：32.00+98x2.80=306.40=50kg档 ✓ / 306.40+100x1.50=456.40=100kg档 ✓（其余三列同样核验一致）
+_MX_LARGE_BASE = (32.00, 38.00, 61.00, 75.40)         # 0–1kg
+_MX_LARGE_PER_HALF_1_50 = (2.80, 2.80, 3.10, 3.75)    # 每加 0.5kg，1–50kg 区间
+_MX_LARGE_AT_50 = (306.40, 312.40, 364.80, 442.90)
+_MX_LARGE_PER_HALF_50_100 = (1.50, 1.50, 1.60, 2.10)  # 每加 0.5kg，50–100kg 区间
+_MX_LARGE_AT_100 = (456.40, 462.40, 524.80, 652.90)
+_MX_LARGE_PER_HALF_100_PLUS = (1.50, 1.50, 3.00, 3.60)  # 每加 0.5kg，100kg 以上
+
+
+def _mx_large_fee(unit_kg: float, col: int) -> float:
+    if unit_kg <= 1.0:
+        return _MX_LARGE_BASE[col]
+    if unit_kg <= 50.0:
+        halves = math.ceil((unit_kg - 1.0) / 0.5 - 1e-9)
+        return _MX_LARGE_BASE[col] + halves * _MX_LARGE_PER_HALF_1_50[col]
+    if unit_kg <= 100.0:
+        halves = math.ceil((unit_kg - 50.0) / 0.5 - 1e-9)
+        return _MX_LARGE_AT_50[col] + halves * _MX_LARGE_PER_HALF_50_100[col]
+    halves = math.ceil((unit_kg - 100.0) / 0.5 - 1e-9)
+    return _MX_LARGE_AT_100[col] + halves * _MX_LARGE_PER_HALF_100_PLUS[col]
 
 
 def estimate_mx(weight_text, dims_text, price=None) -> dict:
@@ -473,15 +525,39 @@ def estimate_mx(weight_text, dims_text, price=None) -> dict:
             fee = base + extra * max(0.0, (unit - 1.0) / 0.25)
         tier = "standard"
     else:
-        # 大件：首 kg + 递增（取公开表 0-1kg 档）
-        base = (32.00, 40.00, 60.00, 75.00)[col]  # approx from grande 0-1kg 2026
-        fee = base + 2.0 * max(0.0, unit - 1.0)
+        fee = _mx_large_fee(unit, col)
         tier = "large"
     return _out("MX", "MX$", fba_fee=round(fee, 2), size_tier=tier,
                 shipping_weight=round(unit, 3))
 
 
-# ── IN（FBA 履约部分 = Pick&Pack + National weight handling，不含 referral）──
+# ── IN（FBA = Pick&Pack + National weight handling；官方 FBA FAQ）────────
+# https://sell.amazon.in/shipping-and-fulfillment/fulfillment-by-amazon/fba-faq
+# Standard Pick&Pack ₹11；H&B Pick&Pack ₹50
+# National Standard: first 500g ₹61；+500g→1kg ₹25；+1kg ₹27；其后每 kg ₹12
+# National H&B: first 12kg ₹261；其后每 kg ₹6
+# 包装重：Standard +100g / H&B +500g；计费重 = max(实重, 体积重)+包装重
+
+
+def _in_national_standard(bill_kg: float) -> float:
+    if bill_kg <= 0.5 + 1e-9:
+        return 61.0
+    fee = 61.0 + 25.0
+    if bill_kg <= 1.0 + 1e-9:
+        return fee
+    # 超出 1kg 后按整 kg 进位：第 1 个追加 kg ₹27，其后每 kg ₹12
+    kg_after = max(1, math.ceil(bill_kg - 1.0 - 1e-9))
+    fee += 27.0
+    if kg_after > 1:
+        fee += 12.0 * (kg_after - 1)
+    return fee
+
+
+def _in_national_hb(bill_kg: float) -> float:
+    if bill_kg <= 12.0 + 1e-9:
+        return 261.0
+    return 261.0 + 6.0 * max(1, math.ceil(bill_kg - 12.0 - 1e-9))
+
 
 def estimate_in(weight_text, dims_text, price=None) -> dict:
     unit = parse_weight_kg(weight_text)
@@ -490,43 +566,33 @@ def estimate_in(weight_text, dims_text, price=None) -> dict:
         return _out("IN", "₹")
     L, W, H = dims
     dim = (L * W * H) / 5000.0
-    bill = max(unit, dim) + 0.1  # +100g packaging standard
-    # Heavy & bulky heuristic
     girth = L + 2 * (W + H)
     oversize = unit > 22.5 or max(L, W, H) > 183 or girth > 300
     if oversize:
-        pick = 50
-        # First 12kg national ₹261 + ₹6/kg
-        ship = 261 + 6 * max(0.0, bill - 12)
-        tier = "oversize"
+        bill = max(unit, dim) + 0.5  # H&B packaging 500g
+        # FAQ: Standard priced >₹20000 免 Pick&Pack+WH；H&B 不适用该豁免
+        pick = 50.0
+        ship = _in_national_hb(bill)
+        tier = "heavy_bulky"
+        fee = pick + ship
     else:
-        pick = 11
-        # National: first 500g ₹61; +500g to 1kg ₹25; +₹27/kg after 1kg; +₹12/kg to 5kg
-        if bill <= 0.5:
-            ship = 61
-        elif bill <= 1.0:
-            ship = 61 + 25
-        else:
-            ship = 61 + 25
-            # each additional kg after 1kg: ₹27 up to... FAQ: after 1kg ₹27, up to 5kg ₹12
-            extra = bill - 1.0
-            if extra <= 4:  # up to 5kg total
-                # simplified: ₹27 first addl kg then ₹12
-                if extra <= 1:
-                    ship += 27 * extra
-                else:
-                    ship += 27 + 12 * (extra - 1)
-            else:
-                ship += 27 + 12 * 4 + 12 * (extra - 4)
+        bill = max(unit, dim) + 0.1  # Standard packaging 100g
+        if price is not None and price > 20000:
+            # zero-fee fulfilment for standard > ₹20,000
+            return _out("IN", "₹", fba_fee=0.0, size_tier="standard_zero_fee",
+                        shipping_weight=round(bill, 3), dim_weight=round(dim, 3))
+        pick = 11.0
+        ship = _in_national_standard(bill)
         tier = "standard"
-    fee = pick + ship
+        fee = pick + ship
     return _out("IN", "₹", fba_fee=round(fee, 0), size_tier=tier,
                 shipping_weight=round(bill, 3), dim_weight=round(dim, 3))
 
 
-# ── CA（公开 CAD 分档 + 3.5% fuel surcharge 2026-04-17）────────────
+# ── CA（sell.amazon.ca/pricing + Seller Central 3.5% surcharge 2026-04-17）
 
 SURCHARGE_CA = 1.035
+
 
 def estimate_ca(weight_text, dims_text, price=None) -> dict:
     unit = parse_weight_kg(weight_text)
@@ -564,10 +630,12 @@ def estimate_ca(weight_text, dims_text, price=None) -> dict:
         tier = "medium_oversize"
         ship = ug
     else:
+        # 官方页另有 Special oversize（首 500g CAD150.78），但公开页未给出与 Large 的尺寸分界；
+        # 无尺寸规则前统一按 Large oversize 计（CAD82.20 + 0.58/500g）
         fee = 82.20 + 0.58 * max(0.0, (ug - 500) / 500)
         tier = "large_oversize"
         ship = ug
-    # Low-Price FBA CA: ≤ CAD14 约减 CAD0.80
+    # Low-Price FBA CA: ≤ CAD14 减 CAD0.80（官方页）
     if price is not None and price <= 14:
         fee = max(0.0, fee - 0.80)
     fee *= SURCHARGE_CA

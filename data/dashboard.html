@@ -39,12 +39,19 @@
     .panel-header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: #FAFAFA; font-size: 14px; font-weight: 600; color: var(--fg); display: flex; justify-content: space-between; align-items: center; }
 
     /* ── Breadcrumb ── */
-    .breadcrumb-bar { padding: 12px 16px; background: #FFFFFF; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 500; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-height: 44px; }
+    .breadcrumb-bar { padding: 8px 12px 8px 16px; background: #FFFFFF; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 10px; min-height: 44px; }
+    .bc-path { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; flex: 1; min-width: 0; }
     .bc-item { display: flex; align-items: center; gap: 4px; }
     .bc-link { color: var(--primary); cursor: pointer; transition: color 0.1s; padding: 2px 4px; border-radius: 4px; }
     .bc-link:hover { background: #EEF2FF; }
     .bc-sep { color: #D1D5DB; font-size: 12px; }
     .bc-current { color: var(--fg); font-weight: 600; padding: 2px 4px; }
+    .scope-toggle { flex-shrink: 0; display: flex; align-items: center; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #F9FAFB; }
+    .scope-toggle button { border: none; background: transparent; width: 28px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--gray); cursor: pointer; }
+    .scope-toggle button + button { border-left: 1px solid var(--border); }
+    .scope-toggle button.active { background: var(--primary); color: #fff; }
+    .scope-toggle button:hover:not(.active) { background: #EEF2FF; color: var(--primary); }
+    .scope-toggle button svg { width: 14px; height: 14px; display: block; }
 
     /* ── Tree Panel ── */
     .tree-panel { width: 380px; flex-shrink: 0; transition: width 0.2s, min-width 0.2s, opacity 0.2s; min-width: 240px; max-width: 600px; }
@@ -263,7 +270,17 @@
               <input type="text" placeholder="搜索类目..." oninput="searchTask(this.value)" style="flex:1; padding:5px 10px; border:1px solid var(--border); border-radius:6px; font-size:12px; outline:none; min-width:80px;">
               <span style="font-size:11px; font-weight:600; color:#fff; background:var(--primary); min-width:22px; height:22px; line-height:22px; text-align:center; border-radius:11px; cursor:pointer; flex-shrink:0; padding:0 6px;" id="selCount" onclick="showSelectedModal()" title="已选类目">-</span>
           </div>
-          <div class="breadcrumb-bar" id="bcBar"></div>
+          <div class="breadcrumb-bar">
+            <div class="bc-path" id="bcPath"></div>
+            <div class="scope-toggle">
+              <button type="button" id="scopeSelectedBtn" onclick="setCategoryScope('selected')" title="仅抓所选类目：选中 L2 就只抓这个 L2" aria-label="仅抓所选类目">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="4.5" width="7" height="7" rx="1.2"/></svg>
+              </button>
+              <button type="button" id="scopeDescendantsBtn" class="active" onclick="setCategoryScope('descendants')" title="含全部下级：选中 L2 会抓 L2 及全部 L3/L4/L5…" aria-label="含全部下级">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="4" rx="0.8"/><path d="M8 5.5v2.5M5 10.5v-2.5h6v2.5"/><rect x="2" y="10.5" width="4" height="3.5" rx="0.7"/><rect x="10" y="10.5" width="4" height="3.5" rx="0.7"/></svg>
+              </button>
+            </div>
+          </div>
           <div class="drill-content" id="drillList"></div>
         </div>
         <div class="collapse-bar" id="collapseBarB" onclick="toggleCollapse()" title="折叠/展开">◀</div>
@@ -331,16 +348,16 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label">商品重量</span>
+              <span class="filter-label" id="lbl_weight">商品重量 (lb)</span>
               <div class="filter-inputs">
                 <input type="number" id="f_weight_min" placeholder="最小" min="0" step="0.1">
                 <span class="filter-sep">~</span>
                 <input type="number" id="f_weight_max" placeholder="最大" min="0" step="0.1">
-                <span class="filter-unit">lb</span>
+                <span class="filter-unit" id="lbl_weight_unit">lb</span>
               </div>
             </div>
             <div class="filter-item span2">
-              <span class="filter-label">商品尺寸 (inch)</span>
+              <span class="filter-label" id="lbl_dims">商品尺寸 (inch)</span>
               <div class="filter-inputs">
                 <input type="number" id="f_dim_l" placeholder="长" min="0" step="0.1">
                 <span class="filter-sep">×</span>
@@ -486,6 +503,55 @@
     function siteCurrency() {
       return SITE_CURRENCY[(_currentSite || 'us').toLowerCase()] || '$';
     }
+    // FBA 官方费率表单位：仅 US 为 lb+inch；UK/EU/JP/CA/AU 等均为 kg+cm（与 fba_fees_*.py 一致）
+    function siteUsesImperial() {
+      return (_currentSite || 'us').toLowerCase() === 'us';
+    }
+    const LB_PER_KG = 2.20462;
+    const CM_PER_IN = 2.54;
+    function updateMeasureUnitLabels() {
+      const imperial = siteUsesImperial();
+      const wUnit = imperial ? 'lb' : 'kg';
+      const dUnit = imperial ? 'inch' : 'cm';
+      const lw = document.getElementById('lbl_weight');
+      const wu = document.getElementById('lbl_weight_unit');
+      const ld = document.getElementById('lbl_dims');
+      if (lw) lw.textContent = '商品重量 (' + wUnit + ')';
+      if (wu) wu.textContent = wUnit;
+      if (ld) ld.textContent = '商品尺寸 (' + dUnit + ')';
+    }
+    function _convertInputVal(id, factor) {
+      const el = document.getElementById(id);
+      if (!el || el.value === '' || el.value == null) return;
+      const n = Number(el.value);
+      if (!Number.isFinite(n)) return;
+      el.value = String(Math.round(n * factor * 10000) / 10000);
+    }
+    function convertMeasureInputsOnSiteSwitch(prevSite, nextSite) {
+      const prevImp = (prevSite || 'us').toLowerCase() === 'us';
+      const nextImp = (nextSite || 'us').toLowerCase() === 'us';
+      if (prevImp === nextImp) return;
+      if (prevImp && !nextImp) {
+        // lb→kg, inch→cm
+        ['f_weight_min', 'f_weight_max'].forEach(id => _convertInputVal(id, 1 / LB_PER_KG));
+        ['f_dim_l', 'f_dim_w', 'f_dim_h'].forEach(id => _convertInputVal(id, CM_PER_IN));
+      } else {
+        // kg→lb, cm→inch
+        ['f_weight_min', 'f_weight_max'].forEach(id => _convertInputVal(id, LB_PER_KG));
+        ['f_dim_l', 'f_dim_w', 'f_dim_h'].forEach(id => _convertInputVal(id, 1 / CM_PER_IN));
+      }
+    }
+    /** 界面本地单位 → 后端统一 lb / inch */
+    function toBackendWeight(v) {
+      const n = Number(v) || 0;
+      if (!n) return 0;
+      return siteUsesImperial() ? n : n * LB_PER_KG;
+    }
+    function toBackendDim(v) {
+      const n = Number(v) || 0;
+      if (!n) return 0;
+      return siteUsesImperial() ? n : n / CM_PER_IN;
+    }
     function fmtMoney(amount, opts) {
       if (amount == null || amount === '') return '';
       const n = Number(amount);
@@ -502,6 +568,7 @@
       const lf = document.getElementById('lbl_fba_fee');
       if (lp) lp.textContent = '现价 (' + cur.trim() + ')';
       if (lf && isFbaSupported()) lf.textContent = 'FBA运费 (' + cur.trim() + ')';
+      updateMeasureUnitLabels();
     }
 
     // ── 下拉菜单 ──
@@ -510,6 +577,15 @@
       const wasOpen = el.style.display !== 'none';
       document.querySelectorAll('.dropdown-menu').forEach(m => m.style.display = 'none');
       if (!wasOpen) el.style.display = 'block';
+    }
+    // 已选类目与站点/榜单强绑定：node_id 只在 (node_id, 站点) 组合下唯一，
+    // 且"最新到货"只认 na_valid 节点，切换后旧选择必须清空，否则会把
+    // 上一个站点/榜单选中的节点原样带进新的抓取任务。
+    function _clearSelectionOnContextSwitch() {
+      if (_selectedNodes.size > 0) _selectedNodes.clear();
+      document.getElementById('selCount').innerText = '-';
+      const modal = document.getElementById('selModal');
+      if (modal && modal.style.display !== 'none') renderSelectedModal();
     }
     function selectChart(el, key, label) {
       if (el.classList.contains('disabled')) return;
@@ -520,9 +596,12 @@
       _currentChart = key;
       document.getElementById('chartDrop').style.display = 'none';
       syncLimitControl(prev !== key);
-      if ((prev === 'la') !== (key === 'la')) {
+      updateFbaSupportUI();
+      if (prev !== key) {
+        _clearSelectionOnContextSwitch();
         taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
         loadTaskDrillDown();
+        loadLiveProducts();
       }
     }
     function getLimitValue() {
@@ -567,13 +646,20 @@
       document.getElementById('countryLabel').textContent = label;
       document.querySelectorAll('#countryDrop .dropdown-item').forEach(i => i.classList.remove('active'));
       el.classList.add('active');
+      const prevSite = _currentSite;
       _currentSite = site;
       document.getElementById('countryDrop').style.display = 'none';
+      if (prevSite !== site) {
+        convertMeasureInputsOnSiteSwitch(prevSite, site);
+      }
       updateCurrencyLabels();
       updateFbaSupportUI();
       updateChartAvailability();
-      taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
-      loadTaskDrillDown();
+      if (prevSite !== site) {
+        _clearSelectionOnContextSwitch();
+        taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
+        loadTaskDrillDown();
+      }
       loadLiveProducts(); // 切站点后立即刷新商品列表，不等下一次 10s 轮询
     }
     document.addEventListener('click', function(e) {
@@ -624,11 +710,12 @@
         variant_max: +document.getElementById('f_variant_max').value || 0,
         sellers_min: +document.getElementById('f_sellers_min').value || 0,
         sellers_max: +document.getElementById('f_sellers_max').value || 0,
-        weight_min: +document.getElementById('f_weight_min').value || 0,
-        weight_max: +document.getElementById('f_weight_max').value || 0,
-        dim_l: +document.getElementById('f_dim_l').value || 0,
-        dim_w: +document.getElementById('f_dim_w').value || 0,
-        dim_h: +document.getElementById('f_dim_h').value || 0,
+        // 按当前站点本地单位录入；发往后端前统一换算为 lb / inch（与 weight_lb / dim_*_in 对齐）
+        weight_min: toBackendWeight(document.getElementById('f_weight_min').value),
+        weight_max: toBackendWeight(document.getElementById('f_weight_max').value),
+        dim_l: toBackendDim(document.getElementById('f_dim_l').value),
+        dim_w: toBackendDim(document.getElementById('f_dim_w').value),
+        dim_h: toBackendDim(document.getElementById('f_dim_h').value),
         list_limit: _currentChart === 'la' ? 0 : limitValue,
         date_range: document.getElementById('f_date_range').value || '',
         date_from: document.getElementById('f_date_from').value || '',
@@ -683,6 +770,15 @@
     let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
     let taskSearchKeyword = '';
     const _selectedNodes = new Map();
+    // descendants = 所选 + 全部下级（默认，兼容现有行为）；selected = 仅抓所选类目本身
+    let _categoryScope = 'descendants';
+    function setCategoryScope(scope) {
+      _categoryScope = (scope === 'selected') ? 'selected' : 'descendants';
+      const selBtn = document.getElementById('scopeSelectedBtn');
+      const descBtn = document.getElementById('scopeDescendantsBtn');
+      if (selBtn) selBtn.classList.toggle('active', _categoryScope === 'selected');
+      if (descBtn) descBtn.classList.toggle('active', _categoryScope === 'descendants');
+    }
     let currentTaskChildren = [];
     let _treeOffset = 0;
     let _treeLoading = false;
@@ -744,7 +840,7 @@
         if (isLast) return '<div class="bc-item bc-current">' + node.name + '</div>';
         return '<div class="bc-item"><span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span></div>';
       }).join('');
-      document.getElementById('bcBar').innerHTML = bcHtml;
+      document.getElementById('bcPath').innerHTML = bcHtml;
       document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">⏳ 加载中...</div>';
 
       _treeOffset = 0;
@@ -960,7 +1056,7 @@
       }
 
       const imgHtml = img
-        ? ('<img src="' + escapeHtml(img) + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\'"><div class="card-img-ph" style="display:none">无图</div>')
+        ? ('<img src="' + escapeHtml(img) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\'"><div class="card-img-ph" style="display:none">无图</div>')
         : '<div class="card-img-ph">无图</div>';
 
       const rows = DISPLAY_DIMS.map(d => {
@@ -989,14 +1085,14 @@
       try {
         const filters = getFilterValues();
         let qs = '?t=' + Date.now();
-        // 最新到货走独立表/接口，榜单商品走 product_sightings
+        // 最新到货走独立表/接口，榜单商品走 product_sightings；两种模式都带筛选条件
         const endpoint = _currentChart === 'la' ? '/api/v2/new_arrivals' : '/api/v2/products';
         // 所有模式强制带站点，避免多站混显
         if (_currentSite) qs += '&site=' + encodeURIComponent(_currentSite.toUpperCase());
-        if (_currentChart !== 'la') {
-          for (const [k, v] of Object.entries(filters)) {
-            if (v !== 0 && v !== '' && v !== false) qs += '&' + k + '=' + encodeURIComponent(v);
-          }
+        for (const [k, v] of Object.entries(filters)) {
+          // list_limit / max_pages 仅抓取参数，结果查询不需要
+          if (k === 'list_limit' || k === 'max_pages') continue;
+          if (v !== 0 && v !== '' && v !== false) qs += '&' + k + '=' + encodeURIComponent(v);
         }
         const res = await fetch(API + endpoint + qs);
         const products = await res.json();
@@ -1013,6 +1109,81 @@
       }
     }
 
+    // ── 筛选条件合法性校验（min > max 等无意义区间直接拦截，避免空跑）──
+    const RANGE_CHECKS = [
+      ['price_min', 'price_max', '现价'],
+      ['rating_min', 'rating_max', '评分'],
+      ['review_min', 'review_max', '评论数'],
+      ['bsr_main_min', 'bsr_main_max', 'BSR大类排名'],
+      ['bsr_sub_min', 'bsr_sub_max', 'BSR子类排名'],
+      ['variant_min', 'variant_max', '变体选项数'],
+      ['sellers_min', 'sellers_max', '其他卖家数'],
+      ['weight_min', 'weight_max', '商品重量'],
+      ['fba_fee_min', 'fba_fee_max', 'FBA运费'],
+    ];
+    const NONNEG_FILTER_KEYS = [
+      ['price_min', '现价最小'], ['price_max', '现价最大'],
+      ['rating_min', '评分最小'], ['rating_max', '评分最大'],
+      ['review_min', '评论数最小'], ['review_max', '评论数最大'],
+      ['bsr_main_min', 'BSR大类排名最小'], ['bsr_main_max', 'BSR大类排名最大'],
+      ['bsr_sub_min', 'BSR子类排名最小'], ['bsr_sub_max', 'BSR子类排名最大'],
+      ['variant_min', '变体选项数最小'], ['variant_max', '变体选项数最大'],
+      ['sellers_min', '其他卖家数最小'], ['sellers_max', '其他卖家数最大'],
+      ['weight_min', '商品重量最小'], ['weight_max', '商品重量最大'],
+      ['fba_fee_min', 'FBA运费最小'], ['fba_fee_max', 'FBA运费最大'],
+      ['dim_l', '尺寸长'], ['dim_w', '尺寸宽'], ['dim_h', '尺寸高'],
+    ];
+    // 与后端 argparse type=int 对齐
+    const INT_FILTER_KEYS = new Set([
+      'review_min', 'review_max',
+      'bsr_main_min', 'bsr_main_max',
+      'bsr_sub_min', 'bsr_sub_max',
+      'variant_min', 'variant_max',
+      'sellers_min', 'sellers_max',
+    ]);
+    function _rawFilterInput(key) {
+      const el = document.getElementById('f_' + key);
+      return el ? String(el.value || '').trim() : '';
+    }
+    function validateFilterRanges(filters) {
+      // 读原始输入：避免 +"abc"||0 把非法值吞成 0 后假通过
+      for (const [key, label] of NONNEG_FILTER_KEYS) {
+        const raw = _rawFilterInput(key);
+        if (raw === '') continue;
+        if (INT_FILTER_KEYS.has(key)) {
+          if (!/^-?\d+$/.test(raw)) {
+            return label + '必须是整数（收到 ' + raw + '），请修正后再启动';
+          }
+          const v = Number(raw);
+          if (v < 0) {
+            return label + '不能为负数 (' + v + ')，请修正后再启动';
+          }
+        } else {
+          const v = Number(raw);
+          if (!Number.isFinite(v)) {
+            return label + '必须是数字（收到 ' + raw + '），请修正后再启动';
+          }
+          if (v < 0) {
+            return label + '不能为负数 (' + v + ')，请修正后再启动';
+          }
+        }
+      }
+      for (const [minKey, maxKey, label] of RANGE_CHECKS) {
+        const min = filters[minKey], max = filters[maxKey];
+        if (min > 0 && max > 0 && min > max) {
+          return label + '：最小值 (' + min + ') 大于最大值 (' + max + ')，请修正后再启动';
+        }
+      }
+      if (filters.rating_min > 5 || filters.rating_max > 5) {
+        return '评分筛选超出合理范围 (0~5)，请修正后再启动';
+      }
+      if (filters.date_range === 'custom' && filters.date_from && filters.date_to
+          && filters.date_from > filters.date_to) {
+        return '上架日期：起始日期晚于结束日期，请修正后再启动';
+      }
+      return null;
+    }
+
     async function toggleRun() {
       if (_isRunning) {
         try {
@@ -1027,11 +1198,14 @@
         const chartMap = {nr:'new-releases', bs:'bestsellers', ms:'movers-and-shakers', mw:'most-wished-for', mg:'most-gifted'};
         const enabledLists = _currentChart === 'la' ? [] : [chartMap[_currentChart]];
         const filters = getFilterValues();
+        const rangeError = validateFilterRanges(filters);
+        if (rangeError) { alert('⚠️ 筛选条件不合法\n\n' + rangeError); return; }
         const params = {
           roots: allSelected,
           lists: enabledLists,
           site: _currentSite.toUpperCase(),
           chart: _currentChart,
+          include_descendants: _categoryScope !== 'selected',
           ...filters,
         };
 
@@ -1117,6 +1291,7 @@
     loadStats();
     updateChartAvailability();
     updateCurrencyLabels();
+    updateMeasureUnitLabels();
     updateFbaSupportUI();
     syncLimitControl(false);
     loadTaskDrillDown();

@@ -1,14 +1,16 @@
 ﻿"""
 Multi-marketplace FBA fulfilment fee estimators (选型估算用).
 
-数据来源（公开费率表）：
-  US  — Amazon US FBA rate card + 3.5% fuel surcharge (2026-04-17)
-  JP  — Amazon JP 公开结构（体积重 /6000）
-  EU  — Amazon Europe Rate Card effective 2026-04-17
-        https://m.media-amazon.com/images/G/02/sell/images/260410-FBA-Rate-Card-EN.pdf
-        站点: UK/DE/FR/IT/ES/NL/SE/PL/BE；附加 1.5% fuel surcharge
+官方信源（仅 Amazon 公开页/PDF / Seller Central 公告）：
+  US  — FBA 分档费率 + 3.5% fuel surcharge
+        https://sellercentral.amazon.com/seller-forums/discussions/t/7cbc0233-ee5b-4359-978a-dee7cad5c6f4
+        （2026-04-17 起附加费）
+  JP  — https://sell.amazon.co.jp/pricing （寸法=三边合计；含税）
+  EU  — https://m.media-amazon.com/images/G/02/sell/images/260410-FBA-Rate-Card-EN.pdf
+        （2026-04-17；UK/DE/FR/IT/ES/NL/SE/PL/BE；附加 1.5% fuel surcharge）
+  其它站点见 fba_fees_extra.py 文首链接。
 
-未内置公开费率表 / 工具不支持估算的站点见 FBA_UNSUPPORTED。
+未内置公开费率表的站点见 FBA_UNSUPPORTED。
 配置费（placement）：仅 US Minimal-split 中位估算；其它站点返回 None。
 """
 from __future__ import annotations
@@ -27,11 +29,12 @@ def parse_weight_lb(text: str | None) -> Optional[float]:
         return None
     v = float(m.group(1).replace(",", "."))
     low = text.lower()
-    if "kg" in low or "kilogramm" in low:
+    # 先匹配完整词 kilograms（“kg”不是 kilograms 的子串）
+    if re.search(r"\bkilograms?\b", low) or "kilogramm" in low or re.search(r"\bkg\b", low):
         return v * 2.20462
     if "ounce" in low or re.search(r"\boz\b", low):
         return v / 16.0
-    if "gramm" in low or re.search(r"\bg\b", low):
+    if re.search(r"\bgrams?\b", low) or "gramm" in low or re.search(r"\bg\b", low):
         return v * 0.00220462
     return v
 
@@ -179,34 +182,47 @@ def _us_placement(tier: str, ship_lb: float) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# JP
+# JP — sell.amazon.co.jp/pricing（寸法 = L+W+H；含 10% 消费税）
 # ═══════════════════════════════════════════════════════════════════
 
-DIM_DIVISOR_JP = 6000.0
-_JP_STD = [
-    (0.25, 288), (0.5, 319), (1.0, 365), (2.0, 425),
-    (5.0, 520), (9.0, 620), (15.0, 780), (20.0, 920),
+# (tier, max_sum_cm|None, max_L, max_W, max_H, max_kg, fee_>1000yen, fee_<=1000yen)
+# max_sum_cm 为 None 时按单边上限判定（小型 / 标准 35×30×3.3）
+_JP_BANDS: list[tuple] = [
+    ("small", None, 25, 18, 2.0, 0.25, 288, 222),
+    ("std_35", None, 35, 30, 3.3, 1.0, 318, 252),
+    ("std_20", 20, None, None, None, 2.0, 410, 344),
+    ("std_30", 30, None, None, None, 2.0, 415, 358),
+    ("std_40", 40, None, None, None, 2.0, 420, 371),
+    ("std_50", 50, None, None, None, 2.0, 425, 379),
+    ("std_60", 60, None, None, None, 2.0, 430, 391),
+    ("std_80", 80, None, None, None, 5.0, 472, 427),
+    ("std_100", 100, None, None, None, 9.0, 532, 466),
+    ("large_60", 60, None, None, None, 2.0, 589, 523),
+    ("large_80", 80, None, None, None, 5.0, 624, 558),
+    ("large_100", 100, None, None, None, 10.0, 675, 609),
+    ("large_120", 120, None, None, None, 15.0, 781, 715),
+    ("large_140", 140, None, None, None, 20.0, 1020, 954),
+    ("large_160", 160, None, None, None, 25.0, 1100, 1034),
+    ("large_180", 180, None, None, None, 30.0, 1532, 1466),
+    ("large_200", 200, None, None, None, 40.0, 1756, 1690),
+    ("xl_200", 200, None, None, None, 50.0, 2755, 2689),
+    ("xl_220", 220, None, None, None, 50.0, 3573, 3507),
+    ("xl_240", 240, None, None, None, 50.0, 4496, 4430),
+    ("xl_260", 260, None, None, None, 50.0, 5625, 5559),
 ]
-_JP_OVER = [(25, 1200), (30, 1500), (40, 2100), (50, 2800)]
 
 
-def _jp_size_tier(L: float, W: float, H: float, unit_kg: float) -> str:
-    dims = sorted([L, W, H], reverse=True)
-    L, W, H = dims
-    if L <= 45 and W <= 35 and H <= 20 and unit_kg <= 9:
-        return "standard"
-    return "oversize"
-
-
-def _jp_shipping_kg(tier: str, unit_kg: float, L: float, W: float, H: float) -> float:
-    dim = (L * W * H) / DIM_DIVISOR_JP
-    return max(unit_kg, dim)
-
-
-def _jp_fulfillment(tier: str, ship_kg: float) -> float:
-    if tier == "standard":
-        return _lookup_ceil(_JP_STD, ship_kg)
-    return _lookup_ceil(_JP_OVER, ship_kg)
+def _jp_match_band(L: float, W: float, H: float, unit_kg: float):
+    sum_cm = L + W + H
+    for tier, max_sum, max_L, max_W, max_H, max_kg, fee_hi, fee_lo in _JP_BANDS:
+        if unit_kg > max_kg + 1e-9:
+            continue
+        if max_sum is None:
+            if L <= max_L + 1e-9 and W <= max_W + 1e-9 and H <= max_H + 1e-9:
+                return tier, fee_hi, fee_lo, sum_cm
+        elif sum_cm <= max_sum + 1e-9:
+            return tier, fee_hi, fee_lo, sum_cm
+    return None, None, None, sum_cm
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -485,16 +501,20 @@ def estimate_fba_fees(site: str, weight_text: str | None, dims_text: str | None,
         dims = parse_dims_cm(dims_text)
         if unit is None or dims is None or unit <= 0:
             return out
-        L, W, H = dims
-        tier = _jp_size_tier(L, W, H, unit)
-        dim = (L * W * H) / DIM_DIVISOR_JP
-        ship = _jp_shipping_kg(tier, unit, L, W, H)
-        fee = _jp_fulfillment(tier, ship)
+        L, W, H = dims  # parse_dims_cm 已按长≥宽≥高排序
+        tier, fee_hi, fee_lo, sum_cm = _jp_match_band(L, W, H, unit)
+        if tier is None:
+            out["size_tier"] = "not_eligible"
+            out["shipping_weight"] = round(unit, 3)
+            out["dim_weight"] = round(sum_cm, 1)  # 存三边合计 cm
+            return out
+        low = price is not None and price <= 1000
+        fee = fee_lo if low else fee_hi
         out.update(
             fba_fee=round(fee, 0),
             size_tier=tier,
-            shipping_weight=round(ship, 3),
-            dim_weight=round(dim, 3),
+            shipping_weight=round(unit, 3),
+            dim_weight=round(sum_cm, 1),
         )
         return out
 
