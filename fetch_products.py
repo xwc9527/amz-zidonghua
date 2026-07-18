@@ -9,6 +9,7 @@ from curl_cffi.requests import RequestsError
 from datetime import datetime
 from queue import Queue, Empty
 from bs4 import BeautifulSoup
+from fba_fees_us import estimate_fba_fees, parse_weight_lb, parse_dims_inches
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -257,14 +258,33 @@ _DETAIL_COLS = [
     ("other_sellers_count", "INTEGER"),
     ("item_weight", "TEXT"),
     ("item_dimensions", "TEXT"),
+    ("weight_lb", "REAL"),
+    ("dim_l_in", "REAL"),
+    ("dim_w_in", "REAL"),
+    ("dim_h_in", "REAL"),
     ("date_first_available", "TEXT"),
     ("shipping_fee", "TEXT"),
     ("shipping_fee_value", "REAL"),
+    ("fba_fee", "REAL"),
+    ("placement_fee", "REAL"),
     ("fulfillment_type", "TEXT"),
     ("country_of_origin", "TEXT"),
     ("is_bestseller", "INTEGER DEFAULT 0"),
     ("detail_scraped", "INTEGER DEFAULT 0"),
 ]
+
+
+def _attach_normalized_dims(d: dict) -> dict:
+    """从文本重量/尺寸写入可 SQL 筛选的数值字段（lb / inch，长≥宽≥高）。"""
+    w = parse_weight_lb(d.get("item_weight"))
+    if w is not None:
+        d["weight_lb"] = round(w, 4)
+    dims = parse_dims_inches(d.get("item_dimensions"))
+    if dims is not None:
+        d["dim_l_in"], d["dim_w_in"], d["dim_h_in"] = (
+            round(dims[0], 4), round(dims[1], 4), round(dims[2], 4)
+        )
+    return d
 
 
 def _pg_fetchall(sql, params=()):
@@ -705,12 +725,15 @@ def parse_products(html: str, node_id: str, category_name: str,
             re.I,
         ) else 0
 
-        # ── 评论数筛选 ──
-        rc = p.get("review_count", 0)
-        if review_max > 0 and rc >= review_max:
-            continue
-        if review_min > 0 and rc < review_min:
-            continue
+        # ── 评论数筛选（闭区间；缺失值不通过）──
+        if review_max > 0 or review_min > 0:
+            if "review_count" not in p or p.get("review_count") is None:
+                continue
+            rc = p["review_count"]
+            if review_max > 0 and rc > review_max:
+                continue
+            if review_min > 0 and rc < review_min:
+                continue
 
         # ── 评分筛选 ──
         rt = p.get("rating")
@@ -798,8 +821,11 @@ def parse_detail_fields(html: str) -> dict:
     if bsr_section:
         bsr_text = bsr_section.get_text(" ")
         bsr_matches = []
-        for pat in [r"Nr\.\s*([\d\.]+)\s+in\s+(.+?)(?:\s*\(|\s{2,}|\s*#|\s*$)",
-                    r"#([\d,]+)\s+in\s+(.+?)(?:\s*\(|\s{2,}|\s*#|\s*$)"]:
+        # 终止条件用 lookahead，避免吞掉下一个 #，否则子类 BSR 会丢
+        for pat in [
+            r"Nr\.\s*([\d\.]+)\s+in\s+(.+?)(?=\s*\(|\s{2,}|\s*#|\s*$)",
+            r"#([\d,]+)\s+in\s+(.+?)(?=\s*\(|\s{2,}|\s*#|\s*$)",
+        ]:
             for m in re.finditer(pat, bsr_text):
                 rank_str = m.group(1).replace(".", "").replace(",", "")
                 cat = m.group(2).strip().rstrip("( ,")
@@ -809,6 +835,15 @@ def parse_detail_fields(html: str) -> dict:
                     bsr_matches.append((int(rank_str), cat))
                 except ValueError:
                     pass
+        # 去重保序（德/英双正则可能重复）
+        seen = set()
+        uniq = []
+        for item in bsr_matches:
+            if item in seen:
+                continue
+            seen.add(item)
+            uniq.append(item)
+        bsr_matches = uniq
         if bsr_matches:
             d["bsr_main_rank"] = bsr_matches[0][0]
             d["bsr_main_category"] = bsr_matches[0][1]
@@ -837,10 +872,20 @@ def parse_detail_fields(html: str) -> dict:
                 except (ValueError, KeyError):
                     pass
             if "date_first_available" not in d:
+                # US: July 1, 2026
                 em = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})", text)
                 if em:
                     try:
                         dt = datetime.strptime(f"{em.group(1)} {em.group(2)} {em.group(3)}", "%B %d %Y")
+                        d["date_first_available"] = dt.strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+            if "date_first_available" not in d:
+                # UK/EU English: 1 July 2026
+                uk = re.search(r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})", text)
+                if uk:
+                    try:
+                        dt = datetime.strptime(f"{uk.group(2)} {uk.group(1)} {uk.group(3)}", "%B %d %Y")
                         d["date_first_available"] = dt.strftime("%Y-%m-%d")
                     except ValueError:
                         pass
@@ -866,11 +911,25 @@ def parse_detail_fields(html: str) -> dict:
             if dim_m:
                 d["item_dimensions"] = dim_m.group(0).strip()
 
-        # 产地
+        # 产地：优先取 th/td 或 li 内最后一个值节点，避免无冒号结构失败
         if any(k in text for k in ["Country of Origin", "Herkunftsland", "原産国"]):
-            parts = re.split(r"[:‏‎]+", text)
-            if len(parts) >= 2:
-                d["country_of_origin"] = parts[-1].strip()
+            val = None
+            td = row.select_one("td")
+            if td and td.get_text(strip=True):
+                val = td.get_text(strip=True)
+            if not val:
+                spans = row.select("span.a-list-item, span.a-text-bold + span, span")
+                texts = [s.get_text(strip=True) for s in spans if s.get_text(strip=True)]
+                # drop the label-like tokens
+                texts = [t for t in texts if t and not any(k in t for k in ["Country of Origin", "Herkunftsland", "原産国", ":"])]
+                if texts:
+                    val = texts[-1]
+            if not val:
+                parts = re.split(r"[:‏‎]+", text)
+                if len(parts) >= 2:
+                    val = parts[-1].strip()
+            if val:
+                d["country_of_origin"] = val
 
     # 变体数
     variants = soup.select("#twister_feature_div li[data-defaultasin]")
@@ -884,7 +943,7 @@ def parse_detail_fields(html: str) -> dict:
         if om:
             d["other_sellers_count"] = int(om.group(1))
 
-    # 运费
+    # 运费（页面配送文案，仅作参考；筛选以 FBA 履约费为准）
     delivery_el = soup.select_one("#mir-layout-DELIVERY_BLOCK, #deliveryBlockMessage")
     if delivery_el:
         dtxt = delivery_el.get_text(" ", strip=True)
@@ -902,13 +961,30 @@ def parse_detail_fields(html: str) -> dict:
                 except ValueError:
                     pass
 
-    # 配送模式
+    # 规范化数值字段（供结果 API SQL 筛选，避免 500 截断后滤）
+    _attach_normalized_dims(d)
+
+    # 多站点 FBA：体积重/实重取高 → 查对应站点费表；配置费（US）单独估算
+    price_for_fee = d.get("price")
+    fees = estimate_fba_fees(_SITE, d.get("item_weight"), d.get("item_dimensions"), price_for_fee)
+    if fees.get("fba_fee") is not None:
+        d["fba_fee"] = fees["fba_fee"]
+    if fees.get("placement_fee") is not None:
+        d["placement_fee"] = fees["placement_fee"]
+
+    # 配送模式：Amazon 自营/发货视为 FBA
     for sel in ("#merchant-info", "#merchantInfoFeature",
                 ".offer-display-feature-text", "#tabular-buybox"):
         mel = soup.select_one(sel)
         if mel:
             mtxt = mel.get_text(" ", strip=True)
-            if re.search(r"Fulfilled by Amazon|Versand durch Amazon|Expédié par Amazon|Amazonが発送", mtxt, re.I):
+            if re.search(
+                r"Fulfilled by Amazon|Versand durch Amazon|Expédié par Amazon|Amazonが発送|"
+                r"Ships from Amazon\.com|Ships from and sold by Amazon|"
+                r"Verkauf und Versand durch Amazon|Amazon\.de|"
+                r"Amazon\.co\.jpが発送|Amazon\.co\.uk",
+                mtxt, re.I,
+            ):
                 d["fulfillment_type"] = "FBA"
             else:
                 d["fulfillment_type"] = "FBM"
@@ -963,7 +1039,7 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
         if wmax and wv > wmax:
             return False
 
-    # 尺寸
+    # 尺寸（严格：不足三维直接不通过，禁止补 0）
     dl = filters.get("dim_l", 0)
     dw = filters.get("dim_w", 0)
     dh = filters.get("dim_h", 0)
@@ -972,13 +1048,11 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
         if not dims_raw:
             return False
         nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", dims_raw)]
-        if not nums:
-            return False
         if "cm" in dims_raw.lower():
             nums = [n / 2.54 for n in nums]
-        nums.sort(reverse=True)
-        while len(nums) < 3:
-            nums.append(0)
+        if len(nums) < 3:
+            return False
+        nums = sorted(nums[:3], reverse=True)
         if dl and nums[0] > dl:
             return False
         if dw and nums[1] > dw:
@@ -986,23 +1060,9 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
         if dh and nums[2] > dh:
             return False
 
-    # 运费
-    sf = filters.get("shipping_fee", "")
-    if sf in ("free", "paid", "custom") and detail.get("shipping_fee_value") is None:
+    # FBA 履约费（US 估算）
+    if not _range_check(detail.get("fba_fee"), "fba_fee_min", "fba_fee_max"):
         return False
-    if sf == "free" and detail["shipping_fee_value"] > 0:
-        return False
-    if sf == "paid" and detail["shipping_fee_value"] == 0:
-        return False
-    if sf == "custom":
-        sop = filters.get("shipping_op", "lte")
-        sval = filters.get("shipping_val", 0)
-        sfv = detail.get("shipping_fee_value")
-        if sval > 0:
-            if sop == "lte" and sfv > sval:
-                return False
-            if sop == "gte" and sfv < sval:
-                return False
 
     # 配送模式
     ft = filters.get("fulfillment_type", "")
@@ -1052,7 +1112,8 @@ def _check_detail_filters(detail: dict, filters: dict) -> bool:
 def enrich_with_details(products: list, session: requests.Session,
                         delay: float, filters: dict = None):
     """对列表页抓到的商品逐个请求详情页，补全字段并 UPDATE 到数据库。
-    不符合筛选条件的商品从数据库删除。"""
+    不符合筛选条件的商品从数据库删除。
+    详情请求/解析失败时标记 detail_scraped=2，结果接口默认不展示。"""
     if not products:
         return
     if filters is None:
@@ -1064,10 +1125,26 @@ def enrich_with_details(products: list, session: requests.Session,
         try:
             r = _safe_get(session, url, referer=referer)
             if r is None or r.status_code != 200:
+                _mark_detail_failed(asin)
                 continue
             detail = parse_detail_fields(r.text)
             if not detail:
+                _mark_detail_failed(asin)
                 continue
+            # 列表价用于 Low-Price FBA（<$10）判定
+            if p.get("price") is not None and detail.get("price") is None:
+                detail["price"] = p["price"]
+            _attach_normalized_dims(detail)
+            fees = estimate_fba_fees(
+                _SITE,
+                detail.get("item_weight"),
+                detail.get("item_dimensions"),
+                detail.get("price") if detail.get("price") is not None else p.get("price"),
+            )
+            if fees.get("fba_fee") is not None:
+                detail["fba_fee"] = fees["fba_fee"]
+            if fees.get("placement_fee") is not None:
+                detail["placement_fee"] = fees["placement_fee"]
             detail["detail_scraped"] = 1
 
             # 详情页筛选 — 按 asin+site 删除，避免误伤其他站点
@@ -1081,8 +1158,10 @@ def enrich_with_details(products: list, session: requests.Session,
             _update_sighting_detail(asin, detail)
             p.update(detail)
         except (KeyError, TypeError, ValueError, AttributeError) as e:
+            _mark_detail_failed(asin)
             _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
+            _mark_detail_failed(asin)
             _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
         time.sleep(delay + random.uniform(delay * 0.3, delay * 0.8))
 
@@ -1100,6 +1179,26 @@ def _delete_sighting(asin: str):
             try:
                 conn.execute(
                     "DELETE FROM product_sightings WHERE asin=? AND site=?",
+                    (asin, _SITE),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+
+def _mark_detail_failed(asin: str):
+    """详情抓取失败：detail_scraped=2，结果接口默认不返回。"""
+    with _db_lock:
+        if DB_BACKEND == "pg":
+            _pg_execute(
+                "UPDATE product_sightings SET detail_scraped=2 WHERE asin=%s AND site=%s",
+                (asin, _SITE),
+            )
+        else:
+            conn = db_conn()
+            try:
+                conn.execute(
+                    "UPDATE product_sightings SET detail_scraped=2 WHERE asin=? AND site=?",
                     (asin, _SITE),
                 )
                 conn.commit()
@@ -1374,9 +1473,8 @@ if __name__ == "__main__":
     parser.add_argument("--dim-w", type=float, default=0)
     parser.add_argument("--dim-h", type=float, default=0)
     parser.add_argument("--list-limit", type=int, default=10)
-    parser.add_argument("--shipping-fee", default="")
-    parser.add_argument("--shipping-op",  default="lte")
-    parser.add_argument("--shipping-val", type=float, default=0)
+    parser.add_argument("--fba-fee-min", type=float, default=0)
+    parser.add_argument("--fba-fee-max", type=float, default=0)
     parser.add_argument("--fulfillment-type", default="")
     parser.add_argument("--country", default="")
     parser.add_argument("--date-range", default="")
@@ -1408,8 +1506,7 @@ if __name__ == "__main__":
         "sellers_min": args.sellers_min, "sellers_max": args.sellers_max,
         "weight_min": args.weight_min, "weight_max": args.weight_max,
         "dim_l": args.dim_l, "dim_w": args.dim_w, "dim_h": args.dim_h,
-        "shipping_fee": args.shipping_fee, "shipping_op": args.shipping_op,
-        "shipping_val": args.shipping_val,
+        "fba_fee_min": args.fba_fee_min, "fba_fee_max": args.fba_fee_max,
         "fulfillment_type": args.fulfillment_type,
         "country": args.country,
         "amazons_choice": args.amazons_choice,

@@ -25,53 +25,46 @@ DELAY_MAX = 4.0   # 类目页最大延迟
 DELAY_PRODUCT_MIN = 2.5   # 产品详情页最小延迟（风险更高）
 DELAY_PRODUCT_MAX = 4.5   # 产品详情页最大延迟
 
-# ── 多站点配置 ────────────────────────────────────────────────────
+# ── 多站点配置（与看板下拉对齐；fba_supported 见 fba_fees_us.FBA_SUPPORTED）──
+def _mp(domain, lang, name, currency, decimal_sep=".", rating=r"([\d.]+)\s+out",
+        results=r"of\s+([\d,]+)\s+results?", fba_supported=False):
+    return {
+        "domain": domain, "lang": lang, "name": name, "currency": currency,
+        "decimal_sep": decimal_sep, "rating_pattern": rating,
+        "results_pattern": results, "fba_supported": fba_supported,
+    }
+
 MARKETPLACES = {
-    "US": {
-        "domain": "https://www.amazon.com",
-        "lang":   "en-US,en;q=0.9",
-        "name":   "美国站",
-        "currency": "$",
-        "decimal_sep": ".",
-        "rating_pattern": r"([\d.]+)\s+out",
-        "results_pattern": r"of\s+([\d,]+)\s+results?",
-    },
-    "DE": {
-        "domain": "https://www.amazon.de",
-        "lang":   "de-DE,de;q=0.9,en;q=0.5",
-        "name":   "德国站",
-        "currency": "€",
-        "decimal_sep": ",",
-        "rating_pattern": r"([\d,]+)\s+von",
-        "results_pattern": r"([\d.]+)\s+Ergebnisse",
-    },
-    "JP": {
-        "domain": "https://www.amazon.co.jp",
-        "lang":   "ja-JP,ja;q=0.9,en;q=0.5",
-        "name":   "日本站",
-        "currency": "¥",
-        "decimal_sep": ".",
-        "rating_pattern": r"5つ星のうち([\d.]+)",
-        "results_pattern": r"([\d,]+)\s*件中",
-    },
-    "UK": {
-        "domain": "https://www.amazon.co.uk",
-        "lang":   "en-GB,en;q=0.9",
-        "name":   "英国站",
-        "currency": "£",
-        "decimal_sep": ".",
-        "rating_pattern": r"([\d.]+)\s+out",
-        "results_pattern": r"of\s+([\d,]+)\s+results?",
-    },
-    "FR": {
-        "domain": "https://www.amazon.fr",
-        "lang":   "fr-FR,fr;q=0.9,en;q=0.5",
-        "name":   "法国站",
-        "currency": "€",
-        "decimal_sep": ",",
-        "rating_pattern": r"([\d,]+)\s+sur",
-        "results_pattern": r"([\d\s]+)\s+résultats?",
-    },
+    "US": _mp("https://www.amazon.com", "en-US,en;q=0.9", "美国站", "$", fba_supported=True),
+    "UK": _mp("https://www.amazon.co.uk", "en-GB,en;q=0.9", "英国站", "£", fba_supported=True),
+    "DE": _mp("https://www.amazon.de", "de-DE,de;q=0.9,en;q=0.5", "德国站", "€", ",",
+              r"([\d,]+)\s+von", r"([\d.]+)\s+Ergebnisse", True),
+    "FR": _mp("https://www.amazon.fr", "fr-FR,fr;q=0.9,en;q=0.5", "法国站", "€", ",",
+              r"([\d,]+)\s+sur", r"([\d\s]+)\s+résultats?", True),
+    "IT": _mp("https://www.amazon.it", "it-IT,it;q=0.9,en;q=0.5", "意大利站", "€", ",",
+              r"([\d,]+)\s+su", r"([\d.]+)\s+risultati", True),
+    "ES": _mp("https://www.amazon.es", "es-ES,es;q=0.9,en;q=0.5", "西班牙站", "€", ",",
+              r"([\d,]+)\s+de", r"([\d.]+)\s+resultados", True),
+    "JP": _mp("https://www.amazon.co.jp", "ja-JP,ja;q=0.9,en;q=0.5", "日本站", "¥",
+              rating=r"5つ星のうち([\d.]+)", results=r"([\d,]+)\s*件中", fba_supported=True),
+    "NL": _mp("https://www.amazon.nl", "nl-NL,nl;q=0.9,en;q=0.5", "荷兰站", "€", ",", fba_supported=True),
+    "SE": _mp("https://www.amazon.se", "sv-SE,sv;q=0.9,en;q=0.5", "瑞典站", "kr", ",", fba_supported=True),
+    "PL": _mp("https://www.amazon.pl", "pl-PL,pl;q=0.9,en;q=0.5", "波兰站", "zł", ",", fba_supported=True),
+    "BE": _mp("https://www.amazon.com.be", "fr-BE,fr;q=0.9,nl;q=0.8,en;q=0.5", "比利时站", "€", ",", fba_supported=True),
+    "CA": _mp("https://www.amazon.ca", "en-CA,en;q=0.9", "加拿大站", "CA$", fba_supported=True),
+    "AU": _mp("https://www.amazon.com.au", "en-AU,en;q=0.9", "澳大利亚站", "A$", fba_supported=True),
+    "IN": _mp("https://www.amazon.in", "en-IN,en;q=0.9", "印度站", "₹", fba_supported=True),
+    "MX": _mp("https://www.amazon.com.mx", "es-MX,es;q=0.9,en;q=0.5", "墨西哥站", "MX$", ",",
+              fba_supported=True),
+    "BR": _mp("https://www.amazon.com.br", "pt-BR,pt;q=0.9,en;q=0.5", "巴西站", "R$", ",",
+              fba_supported=True),
+    "SG": _mp("https://www.amazon.sg", "en-SG,en;q=0.9", "新加坡站", "S$", fba_supported=True),
+    "SA": _mp("https://www.amazon.sa", "ar-AE,ar;q=0.9,en;q=0.5", "沙特站", "SAR ",
+              fba_supported=True),
+    "AE": _mp("https://www.amazon.ae", "en-AE,en;q=0.9", "阿联酋站", "AED ", fba_supported=True),
+    "TR": _mp("https://www.amazon.com.tr", "tr-TR,tr;q=0.9,en;q=0.5", "土耳其站", "₺", ",",
+              fba_supported=True),
+    "EG": _mp("https://www.amazon.eg", "ar-EG,ar;q=0.9,en;q=0.5", "埃及站", "E£", fba_supported=True),
 }
 
 def get_marketplace(site: str = "US") -> dict:

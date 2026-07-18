@@ -84,14 +84,96 @@
 
     .right-area { flex: 1; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
     .results-panel { flex: 1; min-height: 0; }
-    .table-container { flex: 1; overflow-y: auto; }
+    .table-container { flex: 1; overflow-y: auto; padding: 14px 16px; }
 
-    /* ── Table ── */
-    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-    th { background: #FAFAFA; padding: 14px 16px; color: var(--gray); font-weight: 500; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1; white-space: nowrap; }
-    td { padding: 14px 16px; border-bottom: 1px solid var(--border); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #F9FAFB; }
+    /* ── Product card grid ── */
+    .product-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 14px;
+      align-content: start;
+    }
+    .product-card {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .product-card:hover { border-color: #C7D2FE; box-shadow: 0 2px 10px rgba(79,70,229,.08); }
+    .card-img-wrap {
+      position: relative;
+      aspect-ratio: 1;
+      background: #F3F4F6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .card-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .card-img-ph {
+      color: #9CA3AF;
+      font-size: 12px;
+    }
+    .card-badges {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      z-index: 1;
+    }
+    .card-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #fff;
+      width: fit-content;
+      line-height: 1.3;
+    }
+    .card-badge.choice { background: #232F3E; }
+    .card-badge.bestseller { background: #C45500; }
+    .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      text-decoration: none;
+    }
+    a.card-title:hover { color: var(--primary); }
+    .card-asin { font-size: 10px; color: var(--gray); margin-top: -4px; }
+    .dim-list { display: flex; flex-direction: column; gap: 3px; margin-top: 2px; }
+    .dim-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .dim-k { color: var(--gray); flex-shrink: 0; }
+    .dim-v { color: var(--fg); text-align: right; word-break: break-word; }
+    .dim-row.dim-empty .dim-v { color: #D1D5DB; }
+    .empty-state {
+      grid-column: 1 / -1;
+      text-align: center;
+      padding: 56px 20px;
+      color: var(--gray);
+      font-size: 13px;
+    }
 
     /* ── Progress ── */
     .progress-wrap { background: var(--bg); border-radius: 4px; overflow: hidden; height: 6px; }
@@ -151,18 +233,18 @@
                   <div class="dropdown-item" data-site="it" onclick="selectCountry(this,'it','🇮🇹','意大利')">🇮🇹 意大利 (amazon.it)</div>
                   <div class="dropdown-item" data-site="es" onclick="selectCountry(this,'es','🇪🇸','西班牙')">🇪🇸 西班牙 (amazon.es)</div>
                   <div class="dropdown-item" data-site="jp" onclick="selectCountry(this,'jp','🇯🇵','日本')">🇯🇵 日本 (amazon.co.jp)</div>
+                  <div class="dropdown-item" data-site="nl" onclick="selectCountry(this,'nl','🇳🇱','荷兰')">🇳🇱 荷兰 (amazon.nl)</div>
+                  <div class="dropdown-item" data-site="se" onclick="selectCountry(this,'se','🇸🇪','瑞典')">🇸🇪 瑞典 (amazon.se)</div>
+                  <div class="dropdown-item" data-site="pl" onclick="selectCountry(this,'pl','🇵🇱','波兰')">🇵🇱 波兰 (amazon.pl)</div>
+                  <div class="dropdown-item" data-site="be" onclick="selectCountry(this,'be','🇧🇪','比利时')">🇧🇪 比利时 (amazon.com.be)</div>
                   <div class="dropdown-item" data-site="ca" onclick="selectCountry(this,'ca','🇨🇦','加拿大')">🇨🇦 加拿大 (amazon.ca)</div>
                   <div class="dropdown-item" data-site="au" onclick="selectCountry(this,'au','🇦🇺','澳大利亚')">🇦🇺 澳大利亚 (amazon.com.au)</div>
                   <div class="dropdown-item" data-site="in" onclick="selectCountry(this,'in','🇮🇳','印度')">🇮🇳 印度 (amazon.in)</div>
                   <div class="dropdown-item" data-site="mx" onclick="selectCountry(this,'mx','🇲🇽','墨西哥')">🇲🇽 墨西哥 (amazon.com.mx)</div>
                   <div class="dropdown-item" data-site="br" onclick="selectCountry(this,'br','🇧🇷','巴西')">🇧🇷 巴西 (amazon.com.br)</div>
                   <div class="dropdown-item" data-site="sg" onclick="selectCountry(this,'sg','🇸🇬','新加坡')">🇸🇬 新加坡 (amazon.sg)</div>
-                  <div class="dropdown-item" data-site="nl" onclick="selectCountry(this,'nl','🇳🇱','荷兰')">🇳🇱 荷兰 (amazon.nl)</div>
                   <div class="dropdown-item" data-site="sa" onclick="selectCountry(this,'sa','🇸🇦','沙特')">🇸🇦 沙特 (amazon.sa)</div>
                   <div class="dropdown-item" data-site="ae" onclick="selectCountry(this,'ae','🇦🇪','阿联酋')">🇦🇪 阿联酋 (amazon.ae)</div>
-                  <div class="dropdown-item" data-site="se" onclick="selectCountry(this,'se','🇸🇪','瑞典')">🇸🇪 瑞典 (amazon.se)</div>
-                  <div class="dropdown-item" data-site="pl" onclick="selectCountry(this,'pl','🇵🇱','波兰')">🇵🇱 波兰 (amazon.pl)</div>
-                  <div class="dropdown-item" data-site="be" onclick="selectCountry(this,'be','🇧🇪','比利时')">🇧🇪 比利时 (amazon.com.be)</div>
                   <div class="dropdown-item" data-site="tr" onclick="selectCountry(this,'tr','🇹🇷','土耳其')">🇹🇷 土耳其 (amazon.com.tr)</div>
                   <div class="dropdown-item" data-site="eg" onclick="selectCountry(this,'eg','🇪🇬','埃及')">🇪🇬 埃及 (amazon.eg)</div>
                 </div>
@@ -193,7 +275,7 @@
         <div class="panel" style="flex-shrink:0;">
           <div class="filter-grid" id="filterGrid">
             <div class="filter-item">
-              <span class="filter-label">现价 ($)</span>
+              <span class="filter-label" id="lbl_price">现价 ($)</span>
               <div class="filter-inputs">
                 <input type="number" id="f_price_min" placeholder="最小" min="0">
                 <span class="filter-sep">~</span>
@@ -268,7 +350,7 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label" id="f_limit_label">抓取商品数</span>
+              <span class="filter-label" id="f_limit_label">每类目每榜单抓取数</span>
               <div class="filter-inputs">
                 <input type="number" id="f_list_limit" value="10" placeholder="10" min="1" max="100" oninput="syncLimitControl(false)">
               </div>
@@ -292,22 +374,13 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label">运费</span>
+              <span class="filter-label" id="lbl_fba_fee">FBA运费 ($)</span>
               <div class="filter-inputs">
-                <select id="f_shipping_fee" onchange="document.getElementById('f_shipping_custom').style.display=this.value==='custom'?'flex':'none';">
-                  <option value="">不限</option>
-                  <option value="free">免费</option>
-                  <option value="paid">付费</option>
-                  <option value="custom">自定义</option>
-                </select>
+                <input type="number" id="f_fba_fee_min" placeholder="最小" min="0" step="0.01">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_fba_fee_max" placeholder="最大" min="0" step="0.01">
               </div>
-              <div id="f_shipping_custom" class="filter-inputs" style="display:none; margin-top:3px;">
-                <select id="f_shipping_op" style="width:auto;padding:5px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;outline:none;background:#fff;">
-                  <option value="lte">≤</option>
-                  <option value="gte">≥</option>
-                </select>
-                <input type="number" id="f_shipping_val" placeholder="金额" min="0" step="0.01">
-              </div>
+              <div id="fba_support_tip" style="display:none; margin-top:4px; font-size:11px; color:#b45309; line-height:1.35;"></div>
             </div>
             <div class="filter-item">
               <span class="filter-label">配送模式</span>
@@ -340,28 +413,11 @@
           </div>
         </div>
 
-        <!-- 结果表格 -->
+        <!-- 结果卡片网格 -->
         <div class="panel results-panel">
           <button onclick="exportExcel()" style="position:fixed;right:28px;bottom:28px;z-index:999;width:48px;height:48px;border-radius:50%;border:none;background:var(--primary,#4f46e5);color:#fff;font-size:20px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;" title="导出 Excel">📥</button>
           <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th style="width:40px;">#</th>
-                  <th style="min-width:180px;">商品信息</th>
-                  <th style="width:70px;">现价</th>
-                  <th style="width:50px;">评分</th>
-                  <th style="width:65px;">评论数</th>
-                  <th style="width:70px;">BSR大类</th>
-                  <th style="width:70px;">BSR子类</th>
-                  <th style="width:50px;">变体</th>
-                  <th style="width:50px;">卖家</th>
-                  <th style="width:60px;">重量</th>
-                  <th style="width:70px;">上架日期</th>
-                </tr>
-              </thead>
-              <tbody id="demoProducts"></tbody>
-            </table>
+            <div id="demoProducts" class="product-grid"></div>
           </div>
         </div>
       </div>
@@ -386,6 +442,67 @@
   <script>
     let _currentChart = 'nr';
     let _currentSite = 'us';
+
+    // 各站点展示货币（与 Amazon 本地标价一致；FBA 不支持站点仍显示本地货币符号）
+    const SITE_CURRENCY = {
+      us: '$', uk: '£', de: '€', fr: '€', it: '€', es: '€', jp: '¥',
+      ca: 'CA$', au: 'A$', in: '₹', mx: 'MX$', br: 'R$', sg: 'S$',
+      nl: '€', sa: 'SAR ', ae: 'AED ', se: 'kr', pl: 'zł', be: '€',
+      tr: '₺', eg: 'E£',
+    };
+    // 看板全部站点均已内置 Amazon 公开 FBA 费率估算（IE 不在下拉内）
+    const FBA_SUPPORTED_SITES = new Set([
+      'us','uk','de','fr','it','es','jp','nl','se','pl','be',
+      'ca','au','in','mx','br','sg','sa','ae','tr','eg',
+    ]);
+    const FBA_UNSUPPORTED_REASON = {};
+    function isFbaSupported() {
+      return FBA_SUPPORTED_SITES.has((_currentSite || 'us').toLowerCase());
+    }
+    function updateFbaSupportUI() {
+      const ok = isFbaSupported();
+      const min = document.getElementById('f_fba_fee_min');
+      const max = document.getElementById('f_fba_fee_max');
+      const lbl = document.getElementById('lbl_fba_fee');
+      const tip = document.getElementById('fba_support_tip');
+      if (min) { min.disabled = !ok; if (!ok) min.value = ''; }
+      if (max) { max.disabled = !ok; if (!ok) max.value = ''; }
+      if (lbl) {
+        lbl.textContent = ok
+          ? ('FBA运费 (' + siteCurrency().trim() + ')')
+          : 'FBA运费 (不支持)';
+      }
+      if (tip) {
+        if (ok) {
+          tip.style.display = 'none';
+          tip.textContent = '';
+        } else {
+          tip.style.display = 'block';
+          tip.textContent = '本站 FBA 运费估算不支持：' +
+            (FBA_UNSUPPORTED_REASON[(_currentSite || '').toLowerCase()] || '无可用公开费率表');
+        }
+      }
+    }
+    function siteCurrency() {
+      return SITE_CURRENCY[(_currentSite || 'us').toLowerCase()] || '$';
+    }
+    function fmtMoney(amount, opts) {
+      if (amount == null || amount === '') return '';
+      const n = Number(amount);
+      if (!Number.isFinite(n)) return '';
+      const cur = siteCurrency();
+      const digits = (opts && opts.digits != null)
+        ? opts.digits
+        : (cur === '¥' || cur === '₹' || cur === '₺' ? 0 : 2);
+      return cur + n.toFixed(digits);
+    }
+    function updateCurrencyLabels() {
+      const cur = siteCurrency();
+      const lp = document.getElementById('lbl_price');
+      const lf = document.getElementById('lbl_fba_fee');
+      if (lp) lp.textContent = '现价 (' + cur.trim() + ')';
+      if (lf && isFbaSupported()) lf.textContent = 'FBA运费 (' + cur.trim() + ')';
+    }
 
     // ── 下拉菜单 ──
     function toggleDropdown(id) {
@@ -428,12 +545,13 @@
         input.removeAttribute('max');
         pages.value = getLimitValue();
       } else {
-        label.textContent = '抓取商品数';
+        label.textContent = '每类目每榜单抓取数';
         input.placeholder = '10';
         input.min = 1;
         input.max = 100;
         input.value = getLimitValue();
-        pages.value = Math.max(5, Math.ceil(getLimitValue() / 24));
+        // 榜单模式只按商品数限流；页数仅用于爬虫翻页上限估算
+        pages.value = Math.max(1, Math.ceil(getLimitValue() / 24));
       }
     }
     function updateChartAvailability() {
@@ -451,9 +569,12 @@
       el.classList.add('active');
       _currentSite = site;
       document.getElementById('countryDrop').style.display = 'none';
+      updateCurrencyLabels();
+      updateFbaSupportUI();
       updateChartAvailability();
       taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
       loadTaskDrillDown();
+      loadLiveProducts(); // 切站点后立即刷新商品列表，不等下一次 10s 轮询
     }
     document.addEventListener('click', function(e) {
       if (!e.target.closest('.dropdown-menu') && !e.target.closest('[onclick*="toggleDropdown"]')) {
@@ -514,12 +635,12 @@
         date_to: document.getElementById('f_date_to').value || '',
         amazons_choice: document.getElementById('f_amazons_choice').checked,
         bestseller: document.getElementById('f_bestseller').checked,
-        shipping_fee: document.getElementById('f_shipping_fee').value || '',
-        shipping_op: document.getElementById('f_shipping_op').value || 'lte',
-        shipping_val: +document.getElementById('f_shipping_val').value || 0,
+        fba_fee_min: +document.getElementById('f_fba_fee_min').value || 0,
+        fba_fee_max: +document.getElementById('f_fba_fee_max').value || 0,
         fulfillment_type: document.getElementById('f_fulfillment_type').value || '',
         country: (document.getElementById('f_country').value || '').trim(),
         max_pages: _currentChart === 'la' ? limitValue : Math.max(5, Math.ceil(limitValue / 24)),
+        site: (_currentSite || 'us').toUpperCase(),
       };
     }
 
@@ -581,12 +702,19 @@
       const laDisabled = isLA && !hasChild && !naSupported;
 
       // 链接：最新到货模式用搜索 URL，其它模式用新品榜 URL
-      const siteDomains = {us:'https://www.amazon.com', de:'https://www.amazon.de', jp:'https://www.amazon.co.jp',
-                           uk:'https://www.amazon.co.uk', fr:'https://www.amazon.fr'};
+      const siteDomains = {
+        us:'https://www.amazon.com', uk:'https://www.amazon.co.uk', de:'https://www.amazon.de',
+        fr:'https://www.amazon.fr', it:'https://www.amazon.it', es:'https://www.amazon.es',
+        jp:'https://www.amazon.co.jp', nl:'https://www.amazon.nl', se:'https://www.amazon.se',
+        pl:'https://www.amazon.pl', be:'https://www.amazon.com.be', ca:'https://www.amazon.ca',
+        au:'https://www.amazon.com.au', in:'https://www.amazon.in', mx:'https://www.amazon.com.mx',
+        br:'https://www.amazon.com.br', sg:'https://www.amazon.sg', sa:'https://www.amazon.sa',
+        ae:'https://www.amazon.ae', tr:'https://www.amazon.com.tr', eg:'https://www.amazon.eg',
+      };
       const domain = siteDomains[_currentSite] || 'https://www.amazon.com';
       const itemUrl = isLA
         ? (domain + '/s?rh=n%3A' + child.node_id + '&s=date-desc-rank')
-        : ('https://www.amazon.com/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/');
+        : (domain + '/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/');
 
       const disabledStyle = laDisabled ? 'opacity:0.38; pointer-events:none;' : '';
       const naTag = isLA && naSupported ? '<span style="font-size:10px; color:#16a34a; font-weight:700; margin-left:4px; flex-shrink:0;">NEW</span>' : '';
@@ -761,51 +889,128 @@
       } catch(e) {}
     }
 
+    function dimVal(v) {
+      if (v === null || v === undefined || v === '') return '—';
+      return String(v);
+    }
+
+    function isEmptyDim(v) {
+      return v === null || v === undefined || v === '';
+    }
+
+    function fmtPrice(prod) {
+      const priceNum = prod.price_value != null ? prod.price_value : prod.price;
+      if (typeof priceNum === 'number' && !Number.isNaN(priceNum)) return fmtMoney(priceNum);
+      if (prod.price_raw) return String(prod.price_raw);
+      if (prod.price != null && prod.price !== '') return String(prod.price);
+      return '';
+    }
+
+    function fmtBsr(rank, cat) {
+      if (rank == null || rank === '') return '';
+      const r = '#' + rank;
+      return cat ? (r + ' in ' + cat) : r;
+    }
+
+    function fmtNum(v) {
+      if (v == null || v === '') return '';
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toLocaleString() : String(v);
+    }
+
+    const DISPLAY_DIMS = [
+      { key: 'price',       label: '现价',     get: p => fmtPrice(p) },
+      { key: 'rating',      label: '评分',     get: p => (p.rating != null && p.rating !== '' ? p.rating : '') },
+      { key: 'reviews',     label: '评论数',   get: p => fmtNum(p.review_count) },
+      { key: 'bsrMain',     label: 'BSR大类',  get: p => fmtBsr(p.bsr_main_rank, p.bsr_main_category) },
+      { key: 'bsrSub',      label: 'BSR子类',  get: p => fmtBsr(p.bsr_sub_rank || p.bsr_sub, p.bsr_sub_category) },
+      { key: 'variant',     label: '变体数',   get: p => (p.variant_option_count != null ? p.variant_option_count : '') },
+      { key: 'sellers',     label: '跟卖数',   get: p => (p.other_sellers_count != null ? p.other_sellers_count : '') },
+      { key: 'weight',      label: '重量',     get: p => p.item_weight || '' },
+      { key: 'dims',        label: '尺寸',     get: p => p.item_dimensions || '' },
+      { key: 'date',        label: '上架日期', get: p => p.date_first_available || p.listing_date || '' },
+      { key: 'shipping',    label: 'FBA运费',  get: p => {
+          if (!isFbaSupported()) return '不支持';
+          if (p.fba_fee == null || p.fba_fee === '') return '';
+          return fmtMoney(p.fba_fee);
+        } },
+      { key: 'placement',   label: '配置费',   get: p => {
+          if (p.placement_fee == null || p.placement_fee === '') return '';
+          return fmtMoney(p.placement_fee);
+        } },
+      { key: 'fulfillment', label: '配送方式', get: p => p.fulfillment_type || '' },
+      { key: 'country',     label: '产地',     get: p => p.country_of_origin || '' },
+    ];
+
+    function renderProductCard(prod, index) {
+      const title = escapeHtml(prod.name || prod.title || '—');
+      const asin = escapeHtml(prod.asin || '');
+      const href = prod.product_url || '';
+      const img = prod.image_url || '';
+      const titleHtml = href
+        ? ('<a class="card-title" href="' + escapeHtml(href) + '" target="_blank" rel="noopener noreferrer" title="' + title + '">' + title + '</a>')
+        : ('<div class="card-title" title="' + title + '">' + title + '</div>');
+
+      let badges = '';
+      if (prod.is_amazon_choice == 1 || prod.is_amazon_choice === true) {
+        badges += '<span class="card-badge choice">Amazon\'s Choice</span>';
+      }
+      if (prod.is_bestseller == 1 || prod.is_bestseller === true) {
+        badges += '<span class="card-badge bestseller">Best Seller</span>';
+      }
+
+      const imgHtml = img
+        ? ('<img src="' + escapeHtml(img) + '" alt="" loading="lazy" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\'"><div class="card-img-ph" style="display:none">无图</div>')
+        : '<div class="card-img-ph">无图</div>';
+
+      const rows = DISPLAY_DIMS.map(d => {
+        const raw = d.get(prod);
+        const empty = isEmptyDim(raw);
+        return '<div class="dim-row' + (empty ? ' dim-empty' : '') + '">' +
+          '<span class="dim-k">' + d.label + '</span>' +
+          '<span class="dim-v">' + escapeHtml(dimVal(raw)) + '</span>' +
+        '</div>';
+      }).join('');
+
+      return '<article class="product-card" data-asin="' + asin + '">' +
+        '<div class="card-img-wrap">' +
+          (badges ? '<div class="card-badges">' + badges + '</div>' : '') +
+          imgHtml +
+        '</div>' +
+        '<div class="card-body">' +
+          titleHtml +
+          (asin ? '<div class="card-asin">' + asin + '</div>' : '') +
+          '<div class="dim-list">' + rows + '</div>' +
+        '</div>' +
+      '</article>';
+    }
+
     async function loadLiveProducts() {
       try {
         const filters = getFilterValues();
         let qs = '?t=' + Date.now();
         // 最新到货走独立表/接口，榜单商品走 product_sightings
         const endpoint = _currentChart === 'la' ? '/api/v2/new_arrivals' : '/api/v2/products';
-        if (_currentChart === 'la') {
-          if (_currentSite) qs += '&site=' + encodeURIComponent(_currentSite.toUpperCase());
-        } else {
+        // 所有模式强制带站点，避免多站混显
+        if (_currentSite) qs += '&site=' + encodeURIComponent(_currentSite.toUpperCase());
+        if (_currentChart !== 'la') {
           for (const [k, v] of Object.entries(filters)) {
             if (v !== 0 && v !== '' && v !== false) qs += '&' + k + '=' + encodeURIComponent(v);
           }
         }
         const res = await fetch(API + endpoint + qs);
         const products = await res.json();
-        let phtml = '';
+        const el = document.getElementById('demoProducts');
+        // 正式面板：空结果一律空态，不注入样板商品
         if (products && products.length > 0) {
-          products.forEach((prod, i) => {
-            const priceNum = prod.price_value != null ? prod.price_value : prod.price;
-            const price = typeof priceNum === 'number' ? '$' + priceNum.toFixed(2) : (prod.price_raw || prod.price || '—');
-            const title = escapeHtml(prod.name || prod.title || '—');
-            const asin = escapeHtml(prod.asin || '');
-            const weight = escapeHtml(prod.item_weight || '—');
-            const dfa = escapeHtml(prod.date_first_available || prod.listing_date || '—');
-            const bsrSub = escapeHtml(prod.bsr_sub_rank || prod.bsr_sub || '—');
-            phtml += '<tr>' +
-                '<td style="color:var(--gray); font-weight:600;">' + (i + 1) + '</td>' +
-                '<td><div style="font-weight:500; font-size:12px; color:var(--primary); white-space:normal; max-width:260px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;" title="' + title + '">' + title + '</div>' +
-                '<div style="font-size:10px; color:var(--gray);">' + asin + '</div></td>' +
-                '<td style="font-weight:600;">' + escapeHtml(price) + '</td>' +
-                '<td>' + (prod.rating != null ? prod.rating : '—') + '</td>' +
-                '<td>' + (prod.review_count != null ? prod.review_count.toLocaleString() : '—') + '</td>' +
-                '<td>' + (prod.bsr_main_rank || '—') + '</td>' +
-                '<td>' + bsrSub + '</td>' +
-                '<td>' + (prod.variant_option_count != null ? prod.variant_option_count : '—') + '</td>' +
-                '<td>' + (prod.other_sellers_count != null ? prod.other_sellers_count : '—') + '</td>' +
-                '<td>' + weight + '</td>' +
-                '<td style="font-size:11px;">' + dfa + '</td>' +
-            '</tr>';
-          });
+          el.innerHTML = products.map((p, i) => renderProductCard(p, i)).join('');
         } else {
-          phtml = '<tr><td colspan="11" style="text-align:center; padding:40px; color:var(--gray);">暂无实时分析结果。请选择类目并启动抓取进程。</td></tr>';
+          el.innerHTML = '<div class="empty-state">暂无实时分析结果。请选择类目并启动抓取进程。</div>';
         }
-        document.getElementById('demoProducts').innerHTML = phtml;
-      } catch (e) {}
+      } catch (e) {
+        document.getElementById('demoProducts').innerHTML =
+          '<div class="empty-state">加载失败，请检查 API 服务是否运行。</div>';
+      }
     }
 
     async function toggleRun() {
@@ -911,6 +1116,8 @@
     // ── 初始化 ──
     loadStats();
     updateChartAvailability();
+    updateCurrencyLabels();
+    updateFbaSupportUI();
     syncLimitControl(false);
     loadTaskDrillDown();
     refreshProductStats();

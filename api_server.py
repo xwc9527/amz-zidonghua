@@ -86,6 +86,19 @@ async def health():
             return JSONResponse({"status": "error", "msg": str(e)}, status_code=503)
     return {"status": "ok", "backend": DB_BACKEND}
 
+
+@app.get("/api/v2/fba_support")
+async def fba_support(site: str = None):
+    """返回各站点 FBA 运费估算支持状态；可传 site 查单站。"""
+    from fba_fees_us import FBA_SUPPORTED, FBA_UNSUPPORTED, fba_support_info
+    if site:
+        return fba_support_info(site)
+    all_sites = sorted(set(FBA_SUPPORTED) | set(FBA_UNSUPPORTED) | {
+        "US", "UK", "DE", "FR", "IT", "ES", "JP", "NL", "SE", "PL", "BE",
+        "CA", "AU", "IN", "MX", "BR", "SG", "SA", "AE", "TR", "EG",
+    })
+    return {s: fba_support_info(s) for s in all_sites}
+
 # ── DB helpers ──
 
 async def pg_query(sql, *args):
@@ -115,6 +128,79 @@ async def _sqlite_scalar(sql, params=()):
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
+
+_PRODUCT_EXTRA_COLS = [
+    ("site", "TEXT"),
+    ("detail_scraped", "INTEGER DEFAULT 0"),
+    ("bsr_main_rank", "INTEGER"),
+    ("bsr_main_category", "TEXT"),
+    ("bsr_sub_rank", "INTEGER"),
+    ("bsr_sub_category", "TEXT"),
+    ("variant_option_count", "INTEGER"),
+    ("other_sellers_count", "INTEGER"),
+    ("item_weight", "TEXT"),
+    ("item_dimensions", "TEXT"),
+    ("weight_lb", "REAL"),
+    ("dim_l_in", "REAL"),
+    ("dim_w_in", "REAL"),
+    ("dim_h_in", "REAL"),
+    ("date_first_available", "TEXT"),
+    ("shipping_fee", "TEXT"),
+    ("shipping_fee_value", "REAL"),
+    ("fba_fee", "REAL"),
+    ("placement_fee", "REAL"),
+    ("fulfillment_type", "TEXT"),
+    ("country_of_origin", "TEXT"),
+    ("is_amazon_choice", "INTEGER DEFAULT 0"),
+    ("is_bestseller", "INTEGER DEFAULT 0"),
+]
+
+async def _ensure_product_columns():
+    """保证 product_sightings 具备结果筛选所需列，并回填规范化重量/尺寸。"""
+    import aiosqlite
+    from fba_fees_us import parse_weight_lb, parse_dims_inches
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("PRAGMA table_info(product_sightings)")
+        existing = {r[1] for r in await cur.fetchall()}
+        for col, typ in _PRODUCT_EXTRA_COLS:
+            if col not in existing:
+                await db.execute(f"ALTER TABLE product_sightings ADD COLUMN {col} {typ}")
+        await db.commit()
+        # 回填：有文本重量/尺寸但缺数值字段的历史行
+        cur = await db.execute(
+            """SELECT rowid, item_weight, item_dimensions FROM product_sightings
+               WHERE (item_weight IS NOT NULL AND item_weight != '' AND weight_lb IS NULL)
+                  OR (item_dimensions IS NOT NULL AND item_dimensions != ''
+                      AND (dim_l_in IS NULL OR dim_w_in IS NULL OR dim_h_in IS NULL))"""
+        )
+        rows = await cur.fetchall()
+        for rowid, wtxt, dtxt in rows:
+            w = parse_weight_lb(wtxt)
+            dims = parse_dims_inches(dtxt)
+            if w is None and dims is None:
+                continue
+            sets, params = [], []
+            if w is not None:
+                sets.append("weight_lb=?")
+                params.append(round(w, 4))
+            if dims is not None:
+                sets.extend(["dim_l_in=?", "dim_w_in=?", "dim_h_in=?"])
+                params.extend([round(dims[0], 4), round(dims[1], 4), round(dims[2], 4)])
+            params.append(rowid)
+            await db.execute(
+                f"UPDATE product_sightings SET {', '.join(sets)} WHERE rowid=?", params
+            )
+        if rows:
+            await db.commit()
+
+_product_cols_ready = False
+
+async def _sqlite_query_products(sql, params=()):
+    global _product_cols_ready
+    if not _product_cols_ready:
+        await _ensure_product_columns()
+        _product_cols_ready = True
+    return await _sqlite_query(sql, params)
 
 # ── 统计 ──
 
@@ -260,64 +346,228 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
 
 # ── 商品 ──
 
-@app.get("/api/v2/products")
-async def products(limit: int = Query(50, le=200), offset: int = 0,
-                   price_min: float = None, price_max: float = None,
-                   rating_min: float = None, rating_max: float = None,
-                   review_min: int = None, review_max: int = None,
-                   site: str = None):
-    if DB_BACKEND == "pg":
-        return await _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max, site)
-    else:
-        return await _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max)
+def _parse_weight_lb(text):
+    if not text:
+        return None
+    import re
+    m = re.search(r"([\d,.]+)", str(text))
+    if not m:
+        return None
+    v = float(m.group(1).replace(",", "."))
+    low = str(text).lower()
+    if "kg" in low or "kilogramm" in low:
+        return v * 2.205
+    if "ounce" in low or "oz" in low:
+        return v / 16.0
+    if "gramm" in low or (re.search(r"\bg\b", low) and "kg" not in low):
+        return v * 0.0022
+    return v
 
-async def _products_pg(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max, site=None):
+
+def _parse_dims_inches(text):
+    if not text:
+        return None
+    import re
+    nums = [float(x.replace(",", ".")) for x in re.findall(r"[\d,.]+", str(text))]
+    if len(nums) < 3:
+        return None  # 尺寸缺失：严格不通过（由调用方判定）
+    if "cm" in str(text).lower():
+        nums = [n / 2.54 for n in nums[:3]]
+    else:
+        nums = nums[:3]
+    nums.sort(reverse=True)
+    return nums
+
+
+def _products_post_filter(rows, weight_min=None, weight_max=None, dim_l=None, dim_w=None, dim_h=None):
+    """重量/尺寸用文本字段，在应用层做严格过滤。"""
+    out = []
+    need_w = (weight_min is not None and weight_min > 0) or (weight_max is not None and weight_max > 0)
+    need_d = any(v is not None and v > 0 for v in (dim_l, dim_w, dim_h))
+    for r in rows:
+        row = dict(r) if not isinstance(r, dict) else r
+        if need_w:
+            wv = _parse_weight_lb(row.get("item_weight"))
+            if wv is None:
+                continue
+            if weight_min and wv < weight_min:
+                continue
+            if weight_max and wv > weight_max:
+                continue
+        if need_d:
+            dims = _parse_dims_inches(row.get("item_dimensions"))
+            if dims is None:
+                continue  # 尺寸缺失严格不通过
+            if dim_l and dims[0] > dim_l:
+                continue
+            if dim_w and dims[1] > dim_w:
+                continue
+            if dim_h and dims[2] > dim_h:
+                continue
+        out.append(row)
+    return out
+
+
+@app.get("/api/v2/products")
+async def products(
+    limit: int = Query(50, le=200), offset: int = 0,
+    price_min: float = None, price_max: float = None,
+    rating_min: float = None, rating_max: float = None,
+    review_min: int = None, review_max: int = None,
+    bsr_main_min: int = None, bsr_main_max: int = None,
+    bsr_sub_min: int = None, bsr_sub_max: int = None,
+    variant_min: int = None, variant_max: int = None,
+    sellers_min: int = None, sellers_max: int = None,
+    weight_min: float = None, weight_max: float = None,
+    dim_l: float = None, dim_w: float = None, dim_h: float = None,
+    fba_fee_min: float = None, fba_fee_max: float = None,
+    fulfillment_type: str = None, country: str = None,
+    amazons_choice: bool = False, bestseller: bool = False,
+    date_range: str = None, date_from: str = None, date_to: str = None,
+    site: str = Query(..., description="Required marketplace site, e.g. US"),
+    detail_only: bool = True,
+):
+    """商品结果查询。site 必填；默认只返回详情抓取成功的记录。"""
+    filters = dict(
+        limit=limit, offset=offset,
+        price_min=price_min, price_max=price_max,
+        rating_min=rating_min, rating_max=rating_max,
+        review_min=review_min, review_max=review_max,
+        bsr_main_min=bsr_main_min, bsr_main_max=bsr_main_max,
+        bsr_sub_min=bsr_sub_min, bsr_sub_max=bsr_sub_max,
+        variant_min=variant_min, variant_max=variant_max,
+        sellers_min=sellers_min, sellers_max=sellers_max,
+        weight_min=weight_min, weight_max=weight_max,
+        dim_l=dim_l, dim_w=dim_w, dim_h=dim_h,
+        fba_fee_min=fba_fee_min, fba_fee_max=fba_fee_max,
+        fulfillment_type=fulfillment_type, country=country,
+        amazons_choice=amazons_choice, bestseller=bestseller,
+        date_range=date_range, date_from=date_from, date_to=date_to,
+        site=site.upper(), detail_only=detail_only,
+    )
+    if DB_BACKEND == "pg":
+        return await _products_pg(**filters)
+    return await _products_sqlite(**filters)
+
+
+def _build_product_where(filters, style="sqlite"):
+    """构建 WHERE 子句。style=sqlite 用 ?；pg 用 $n。"""
+    sql = " WHERE 1=1"
+    params = []
+    ph = lambda: "?" if style == "sqlite" else f"${len(params)+1}"
+
+    sql += f" AND site = {ph()}"
+    params.append(filters["site"])
+
+    if filters.get("detail_only", True):
+        sql += f" AND detail_scraped = {ph()}"
+        params.append(1)
+
+    for key, op, col in [
+        ("price_min", ">=", "price"), ("price_max", "<=", "price"),
+        ("rating_min", ">=", "rating"), ("rating_max", "<=", "rating"),
+        ("review_min", ">=", "review_count"), ("review_max", "<=", "review_count"),
+        ("bsr_main_min", ">=", "bsr_main_rank"), ("bsr_main_max", "<=", "bsr_main_rank"),
+        ("bsr_sub_min", ">=", "bsr_sub_rank"), ("bsr_sub_max", "<=", "bsr_sub_rank"),
+        ("variant_min", ">=", "variant_option_count"), ("variant_max", "<=", "variant_option_count"),
+        ("sellers_min", ">=", "other_sellers_count"), ("sellers_max", "<=", "other_sellers_count"),
+        ("fba_fee_min", ">=", "fba_fee"), ("fba_fee_max", "<=", "fba_fee"),
+        ("weight_min", ">=", "weight_lb"), ("weight_max", "<=", "weight_lb"),
+    ]:
+        val = filters.get(key)
+        if val is not None and val != 0 and val is not False:
+            # 数值筛选要求字段非空（缺失值不通过）
+            sql += f" AND {col} IS NOT NULL AND {col} {op} {ph()}"
+            params.append(val)
+
+    # 尺寸上限：商品长/宽/高（inch，已排序）不得超过筛选上限
+    for key, col in (("dim_l", "dim_l_in"), ("dim_w", "dim_w_in"), ("dim_h", "dim_h_in")):
+        val = filters.get(key)
+        if val is not None and val != 0:
+            sql += f" AND {col} IS NOT NULL AND {col} <= {ph()}"
+            params.append(val)
+
+    ft = filters.get("fulfillment_type") or ""
+    if ft:
+        sql += f" AND fulfillment_type = {ph()}"
+        params.append(ft)
+
+    country = (filters.get("country") or "").strip()
+    if country:
+        sql += f" AND country_of_origin IS NOT NULL AND LOWER(country_of_origin) LIKE {ph()}"
+        params.append(f"%{country.lower()}%")
+
+    if filters.get("amazons_choice"):
+        sql += f" AND is_amazon_choice = {ph()}"
+        params.append(1)
+    if filters.get("bestseller"):
+        sql += f" AND is_bestseller = {ph()}"
+        params.append(1)
+
+    date_range = filters.get("date_range") or ""
+    if date_range:
+        sql += " AND date_first_available IS NOT NULL"
+        if date_range == "custom":
+            if filters.get("date_from"):
+                sql += f" AND date_first_available >= {ph()}"
+                params.append(filters["date_from"])
+            if filters.get("date_to"):
+                sql += f" AND date_first_available <= {ph()}"
+                params.append(filters["date_to"])
+        else:
+            try:
+                days = int(date_range)
+                from datetime import datetime, timedelta
+                cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+                sql += f" AND date_first_available >= {ph()}"
+                params.append(cutoff)
+            except ValueError:
+                pass
+
+    return sql, params
+
+
+async def _products_pg(**filters):
     sql = """SELECT name, asin, price, review_count, rank, rating, image_url, product_url,
              list_type, category_name, site, scraped_at,
              bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
              variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             weight_lb, dim_l_in, dim_w_in, dim_h_in,
              date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
-             country_of_origin
-             FROM product_sightings WHERE 1=1"""
-    args = []
-    idx = 1
-    if site:
-        sql += f" AND site = ${idx}"
-        args.append(site.upper())
-        idx += 1
-    for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
-                          (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
-                          (review_min, ">=", "review_count"), (review_max, "<=", "review_count")]:
-        if val is not None:
-            sql += f" AND {col} {op} ${idx}"
-            args.append(val)
-            idx += 1
-    sql += f" ORDER BY scraped_at DESC LIMIT ${idx} OFFSET ${idx+1}"
-    args.extend([limit, offset])
+             country_of_origin, is_amazon_choice, is_bestseller, fba_fee, placement_fee,
+             detail_scraped
+             FROM product_sightings"""
+    where, params = _build_product_where(filters, style="pg")
+    sql += where
+    limit = filters["limit"]
+    offset = filters["offset"]
+    sql += f" ORDER BY scraped_at DESC LIMIT ${len(params)+1} OFFSET ${len(params)+2}"
+    params.extend([limit, offset])
     try:
-        return await pg_query(sql, *args)
+        return await pg_query(sql, *params)
     except Exception:
         return []
 
-async def _products_sqlite(limit, offset, price_min, price_max, rating_min, rating_max, review_min, review_max):
+
+async def _products_sqlite(**filters):
     sql = """SELECT name, asin, price, price_raw, review_count, rank, rating,
-             image_url, product_url, list_type, category_name, scraped_at,
+             image_url, product_url, list_type, category_name, scraped_at, site,
              bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
              variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             weight_lb, dim_l_in, dim_w_in, dim_h_in,
              date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
-             country_of_origin
-             FROM product_sightings WHERE 1=1"""
-    params = []
-    for val, op, col in [(price_min, ">=", "price"), (price_max, "<=", "price"),
-                          (rating_min, ">=", "rating"), (rating_max, "<=", "rating"),
-                          (review_min, ">=", "review_count"), (review_max, "<=", "review_count")]:
-        if val is not None:
-            sql += f" AND {col} {op} ?"
-            params.append(val)
-    sql += f" ORDER BY scraped_at DESC LIMIT {limit} OFFSET {offset}"
+             country_of_origin, is_amazon_choice, is_bestseller, fba_fee, placement_fee,
+             detail_scraped
+             FROM product_sightings"""
+    where, params = _build_product_where(filters, style="sqlite")
+    sql += where
+    limit = filters["limit"]
+    offset = filters["offset"]
+    sql += f" ORDER BY scraped_at DESC LIMIT {int(limit)} OFFSET {int(offset)}"
     try:
-        return await _sqlite_query(sql, params)
-    except Exception:
+        return await _sqlite_query_products(sql, params)
+    except Exception as e:
+        logging.warning(f"_products_sqlite query failed: {e}")
         return []
 
 @app.get("/api/v2/new_arrivals")
@@ -444,8 +694,7 @@ async def start_products(body: dict):
             ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
             ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
             ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
-            ("shipping_fee", "--shipping-fee"), ("shipping_op", "--shipping-op"),
-            ("shipping_val", "--shipping-val"),
+            ("fba_fee_min", "--fba-fee-min"), ("fba_fee_max", "--fba-fee-max"),
             ("fulfillment_type", "--fulfillment-type"),
             ("country", "--country"),
             ("date_range", "--date-range"), ("date_from", "--date-from"), ("date_to", "--date-to"),

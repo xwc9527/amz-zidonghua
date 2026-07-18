@@ -171,14 +171,27 @@ def _db_batch_insert(nodes: list[dict]) -> int:
             pass
         added = 0
         for n in nodes:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO categories "
-                "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
-                "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                (n["name"], normalize_url(n["url"]), n.get("node_id"),
-                 n.get("depth", 0), n.get("source", "subtree"),
-                 n.get("parent_node_id"), n.get("slug", ""), _SITE)
-            )
+            depth = n.get("depth", 0)
+            if depth == 0:
+                # Root nodes: upsert name so re-runs can correct slug fallbacks
+                cur = conn.execute(
+                    "INSERT INTO categories "
+                    "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
+                    "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?) "
+                    "ON CONFLICT(node_id, site) DO UPDATE SET name=excluded.name",
+                    (n["name"], normalize_url(n["url"]), n.get("node_id"),
+                     depth, n.get("source", "subtree"),
+                     n.get("parent_node_id"), n.get("slug", ""), _SITE)
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO categories "
+                    "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
+                    "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                    (n["name"], normalize_url(n["url"]), n.get("node_id"),
+                     depth, n.get("source", "subtree"),
+                     n.get("parent_node_id"), n.get("slug", ""), _SITE)
+                )
             added += cur.rowcount
         conn.commit()
         conn.close()
@@ -372,7 +385,8 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     # 确保 depth=0 根节点存在，尝试从页面获取本地化类目名
     root_name = slug
     try:
-        session0 = _make_session(0)
+        session0 = requests.Session()
+        session0.headers.update({**HEADERS, "User-Agent": USER_AGENTS[0], "Accept-Language": _LANG})
         root_html = _safe_get(session0, root_url)
         if root_html:
             soup = BeautifulSoup(root_html, "html.parser")
@@ -392,8 +406,10 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                     h1_text = htmlmod.unescape(h1.get_text(strip=True)).strip()
                     m = re.search(r"\bin\s+(.+)$", h1_text, re.I)
                     root_name = m.group(1).strip() if m else h1_text
-    except Exception:
-        pass
+        if root_name == slug:
+            print(f"  [{slug}] warning: could not resolve root name from page, falling back to slug", flush=True)
+    except Exception as e:
+        print(f"  [{slug}] root name fetch failed: {e}, falling back to slug", flush=True)
     if not root_name or root_name == slug:
         root_name = (L1_DISPLAY_NAMES.get(_SITE) or {}).get(slug, slug)
     root_node = {
