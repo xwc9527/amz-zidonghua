@@ -86,7 +86,12 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-from config import PROXY_ENABLED, PROXY_POOL_FILE, PROXY_VERIFY
+from proxy_session import (
+    ProxyRequiredError,
+    assert_session_has_proxy,
+    load_proxy_pool,
+    make_forced_session,
+)
 
 LIST_LABELS = {
     "new-releases":       "新品榜",
@@ -111,104 +116,54 @@ _stats_lock = threading.Lock()
 _seen_asins = set()
 _seen_lock = threading.Lock()
 
-# ── 代理池 ─────────────────────────────────────────────────────────
+# ── 代理池（强制代理，禁止静默直连）────────────────────────────────
 
 _proxy_pool: list[dict] = []
 _proxy_idx = 0
 
 def _validate_proxy_pool():
-    """启动时并发校验 proxy_pool.json 中所有端口，剔除不可用的。"""
+    """强制加载已发布代理池；空池/过期直接失败。"""
     global _proxy_pool
-    if not PROXY_ENABLED or not os.path.exists(PROXY_POOL_FILE):
-        _log.info("[proxy] 代理未启用或池文件不存在，使用直连")
-        return
-    with open(PROXY_POOL_FILE, encoding="utf-8") as f:
-        pool = json.load(f)
-    if not pool:
-        _log.info("[proxy] 代理池为空，使用直连")
-        return
-
-    _log.info(f"[proxy] 启动校验 {len(pool)} 个代理端口...")
-    CHECK_URL = "http://ip-api.com/json?fields=query,country"
-    alive = []
-    lock = threading.Lock()
-
-    local_ip = ""
-    try:
-        r = requests.get("http://ip-api.com/json?fields=query", timeout=5, impersonate="chrome124")
-        local_ip = r.json().get("query", "")
-    except Exception:
-        pass
-
-    def _check(entry):
-        px = {"http": entry["proxy"], "https": entry["proxy"]}
-        try:
-            r = requests.get(CHECK_URL, proxies=px, verify=False, timeout=12, impersonate="chrome124")
-            d = r.json()
-            ip = d.get("query", "")
-            if ip and ip != local_ip and not ip.startswith(("192.", "10.")):
-                entry_copy = dict(entry)
-                entry_copy["exit_ip"] = ip
-                entry_copy["country"] = d.get("country", "?")
-                with lock:
-                    alive.append(entry_copy)
-                _log.debug(f"  ✅ {entry.get('port', '?')} → {ip} ({d.get('country', '?')})")
-            else:
-                _log.debug(f"  ❌ {entry.get('port', '?')} IP异常({ip})")
-        except Exception as e:
-            _log.debug(f"  ❌ {entry.get('port', '?')} {e}")
-
-    threads = [threading.Thread(target=_check, args=(p,), daemon=True) for p in pool]
-    for t in threads:
-        t.start()
-        time.sleep(0.15)
-    for t in threads:
-        t.join()
-
-    seen_ips = {}
-    for entry in sorted(alive, key=lambda x: x.get("delay") or 9999):
-        ip = entry.get("exit_ip", "")
-        if ip and ip not in seen_ips:
-            seen_ips[ip] = entry
-    _proxy_pool = sorted(seen_ips.values(), key=lambda x: x.get("delay") or 9999)
-
-    with open(PROXY_POOL_FILE, "w", encoding="utf-8") as f:
-        json.dump(_proxy_pool, f, ensure_ascii=False, indent=2)
-    _log.info(f"[proxy] 校验完成: {len(_proxy_pool)}/{len(pool)} 可用, {len(seen_ips)} 独立IP")
+    loaded = load_proxy_pool(required=True, allow_direct=False)
+    if not loaded.ok:
+        raise ProxyRequiredError(loaded.error, loaded.error_code)
+    _proxy_pool = list(loaded.entries)
+    ips = {e.get("exit_ip") for e in _proxy_pool if e.get("exit_ip")}
+    _log.info(f"[proxy] 强制代理池就绪: {len(_proxy_pool)} 节点, {len(ips)} 独立IP")
 
 
-def _next_proxy() -> dict | None:
-    """轮询返回下一个代理。"""
+def _next_proxy() -> dict:
+    """轮询返回下一个代理；无代理视为程序错误。"""
     global _proxy_idx
     if not _proxy_pool:
-        return None
+        raise ProxyRequiredError("代理池为空", "POOL_EMPTY")
     p = _proxy_pool[_proxy_idx % len(_proxy_pool)]
     _proxy_idx += 1
     return p
 
 
 def _make_session(warmup: bool = True) -> requests.Session:
-    """创建带 UA 轮换、Sec-Fetch 头、代理的 session，并 warmup 拿 cookie。"""
+    """创建强制带代理的 session。"""
     ua = random.choice(USER_AGENTS)
     hdrs = {
         **HEADERS,
         "User-Agent": ua,
         "Accept-Language": _LANG,
     }
-    proxies = {}
     proxy = _next_proxy()
-    if proxy:
-        proxies = {"http": proxy["proxy"], "https": proxy["proxy"]}
-    session = requests.Session(impersonate="chrome124", headers=hdrs, proxies=proxies, verify=False)
+    session = make_forced_session(proxy, headers=hdrs, required=True)
+    assert_session_has_proxy(session, required=True)
     if warmup:
         try:
             session.get(f"{_DOMAIN}/", timeout=15)
-            _log.info(f"[session] warmup 完成, cookies={len(session.cookies)}")
+            _log.info(
+                f"[session] warmup 完成, cookies={len(session.cookies)}, "
+                f"proxy={proxy.get('exit_ip')}"
+            )
             time.sleep(1 + random.uniform(0, 1))
         except Exception as e:
             _log.warning(f"[session] warmup 失败: {e}")
     return session
-
 
 def _safe_get(session: requests.Session, url: str,
               referer: str = "", retries: int = 3) -> requests.Response | None:
@@ -224,8 +179,8 @@ def _safe_get(session: requests.Session, url: str,
                     time.sleep(30 + random.uniform(0, 15))
                     session.headers["User-Agent"] = random.choice(USER_AGENTS)
                     proxy = _next_proxy()
-                    if proxy:
-                        session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+                    session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
+                    assert_session_has_proxy(session, required=True)
                     continue
                 return r
             if r.status_code == 429:
@@ -1083,8 +1038,12 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         _log.warning("[fetch_products] 无目标节点，退出")
         return
 
-    _validate_proxy_pool()
-    session = _make_session()
+    try:
+        _validate_proxy_pool()
+        session = _make_session()
+    except ProxyRequiredError as e:
+        _log.error(f"[fetch_products] 代理强制模式失败: {e.code} {e}")
+        raise SystemExit(2) from e
 
     t0 = time.time()
     price_info = ""

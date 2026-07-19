@@ -186,22 +186,22 @@
     .progress-wrap { background: var(--bg); border-radius: 4px; overflow: hidden; height: 6px; }
     .progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary), #818CF8); transition: width 0.5s; }
 
-    /* ── Filter Panel ── */
-    .filter-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px 16px; padding: 14px 18px; position: relative; overflow: hidden; }
-    .filter-item.span2 { grid-column: span 2; }
-    .filter-item { display: flex; flex-direction: column; gap: 3px; }
+    /* ── Filter Panel（截图：上排8 / 下排7）── */
+    .filter-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px 12px; padding: 14px 18px; position: relative; overflow: hidden; }
+    .filter-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
     .filter-label { font-size: 11px; font-weight: 600; color: var(--gray); }
     .filter-inputs { display: flex; align-items: center; gap: 4px; }
-    .filter-inputs input[type="number"], .filter-inputs input[type="date"] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; outline: none; background: #fff; }
+    .filter-inputs input[type="number"], .filter-inputs input[type="date"], .filter-inputs input[type="text"] {
+      width: 100%; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; outline: none; background: #fff;
+    }
     .filter-inputs input:focus { border-color: var(--primary); }
     .filter-inputs select { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; outline: none; background: #fff; }
     .filter-inputs select:focus { border-color: var(--primary); }
     .filter-sep { color: var(--gray); font-size: 11px; flex-shrink: 0; }
     .filter-unit { font-size: 10px; color: var(--gray); flex-shrink: 0; }
-    .filter-check { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
-    .filter-check label { font-size: 12px; color: var(--fg); cursor: pointer; display: flex; align-items: center; gap: 5px; }
+    .filter-check { display: flex; align-items: center; gap: 8px; padding-top: 4px; flex-wrap: nowrap; }
+    .filter-check label { font-size: 12px; color: var(--fg); cursor: pointer; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
     .filter-check input[type="checkbox"] { width: 14px; height: 14px; }
-
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -268,7 +268,7 @@
                 </div>
               </div>
               <input type="text" placeholder="搜索类目..." oninput="searchTask(this.value)" style="flex:1; padding:5px 10px; border:1px solid var(--border); border-radius:6px; font-size:12px; outline:none; min-width:80px;">
-              <span style="font-size:11px; font-weight:600; color:#fff; background:var(--primary); min-width:22px; height:22px; line-height:22px; text-align:center; border-radius:11px; cursor:pointer; flex-shrink:0; padding:0 6px;" id="selCount" onclick="showSelectedModal()" title="已选类目">-</span>
+              <span style="font-size:11px; font-weight:600; color:#fff; background:var(--primary); min-width:22px; height:22px; line-height:22px; text-align:center; border-radius:11px; cursor:pointer; flex-shrink:0; padding:0 6px;" id="selCount" onclick="showSelectedModal()" title="实际抓取类目数">-</span>
           </div>
           <div class="breadcrumb-bar">
             <div class="bc-path" id="bcPath"></div>
@@ -353,24 +353,26 @@
                 <input type="number" id="f_weight_min" placeholder="最小" min="0" step="0.1">
                 <span class="filter-sep">~</span>
                 <input type="number" id="f_weight_max" placeholder="最大" min="0" step="0.1">
-                <span class="filter-unit" id="lbl_weight_unit">lb</span>
               </div>
             </div>
-            <div class="filter-item span2">
+            <div class="filter-item">
               <span class="filter-label" id="lbl_dims">商品尺寸 (inch)</span>
               <div class="filter-inputs">
                 <input type="number" id="f_dim_l" placeholder="长" min="0" step="0.1">
-                <span class="filter-sep">×</span>
+                <span class="filter-sep">x</span>
                 <input type="number" id="f_dim_w" placeholder="宽" min="0" step="0.1">
-                <span class="filter-sep">×</span>
+                <span class="filter-sep">x</span>
                 <input type="number" id="f_dim_h" placeholder="高" min="0" step="0.1">
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label" id="f_limit_label">抓取页数</span>
+              <span class="filter-label" id="lbl_fba_fee">FBA运费 ($)</span>
               <div class="filter-inputs">
-                <input type="number" id="f_max_pages" value="2" placeholder="2" min="1" max="2" oninput="syncPageControl(false)">
+                <input type="number" id="f_fba_fee_min" placeholder="最小" min="0" step="0.01">
+                <span class="filter-sep">~</span>
+                <input type="number" id="f_fba_fee_max" placeholder="最大" min="0" step="0.01">
               </div>
+              <div id="fba_support_tip" style="display:none; margin-top:4px; font-size:11px; color:#b45309; line-height:1.35;"></div>
             </div>
             <div class="filter-item">
               <span class="filter-label">上架日期</span>
@@ -391,15 +393,6 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label" id="lbl_fba_fee">FBA运费 ($)</span>
-              <div class="filter-inputs">
-                <input type="number" id="f_fba_fee_min" placeholder="最小" min="0" step="0.01">
-                <span class="filter-sep">~</span>
-                <input type="number" id="f_fba_fee_max" placeholder="最大" min="0" step="0.01">
-              </div>
-              <div id="fba_support_tip" style="display:none; margin-top:4px; font-size:11px; color:#b45309; line-height:1.35;"></div>
-            </div>
-            <div class="filter-item">
               <span class="filter-label">配送模式</span>
               <div class="filter-inputs">
                 <select id="f_fulfillment_type">
@@ -412,7 +405,13 @@
             <div class="filter-item">
               <span class="filter-label">产地</span>
               <div class="filter-inputs">
-                <input type="text" id="f_country" placeholder="如 China" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px;outline:none;background:#fff;">
+                <input type="text" id="f_country" placeholder="如 China">
+              </div>
+            </div>
+            <div class="filter-item">
+              <span class="filter-label" id="f_limit_label">抓取页数</span>
+              <div class="filter-inputs">
+                <input type="number" id="f_max_pages" value="2" placeholder="2" min="1" max="2" oninput="syncPageControl(false)">
               </div>
             </div>
             <div class="filter-item">
@@ -422,9 +421,12 @@
                 <label><input type="checkbox" id="f_bestseller"> 畅销标记</label>
               </div>
             </div>
-            <div style="position:absolute; right:16px; bottom:12px; display:flex; align-items:center; gap:6px;">
-              <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:36px; text-align:right;">0</span>
-              <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:4px 12px; font-size:12px;">▶ 开始</button>
+            <div class="filter-item">
+              <span class="filter-label">&nbsp;</span>
+              <div class="filter-inputs" style="gap:6px;">
+                <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:14px; text-align:right;">0</span>
+                <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:5px 8px; font-size:12px; width:100%;">▶ 开始</button>
+              </div>
             </div>
           </div>
         </div>
@@ -513,10 +515,8 @@
       const wUnit = imperial ? 'lb' : 'kg';
       const dUnit = imperial ? 'inch' : 'cm';
       const lw = document.getElementById('lbl_weight');
-      const wu = document.getElementById('lbl_weight_unit');
       const ld = document.getElementById('lbl_dims');
       if (lw) lw.textContent = '商品重量 (' + wUnit + ')';
-      if (wu) wu.textContent = wUnit;
       if (ld) ld.textContent = '商品尺寸 (' + dUnit + ')';
     }
     function _convertInputVal(id, factor) {
@@ -582,7 +582,7 @@
     // 上一个站点/榜单选中的节点原样带进新的抓取任务。
     function _clearSelectionOnContextSwitch() {
       if (_selectedNodes.size > 0) _selectedNodes.clear();
-      document.getElementById('selCount').innerText = '-';
+      updateSelectionCount();
       const modal = document.getElementById('selModal');
       if (modal && modal.style.display !== 'none') renderSelectedModal();
     }
@@ -788,6 +788,46 @@
       const descBtn = document.getElementById('scopeDescendantsBtn');
       if (selBtn) selBtn.classList.toggle('active', _categoryScope === 'selected');
       if (descBtn) descBtn.classList.toggle('active', _categoryScope === 'descendants');
+      updateSelectionCount();
+    }
+    let _selectionCountRequest = 0;
+    async function updateSelectionCount() {
+      const badge = document.getElementById('selCount');
+      const roots = [..._selectedNodes.keys()].filter(Boolean);
+      const requestId = ++_selectionCountRequest;
+      if (!roots.length) {
+        badge.innerText = '-';
+        badge.title = '实际抓取类目数';
+        return;
+      }
+      badge.innerText = '…';
+      badge.title = '正在计算实际抓取类目数';
+      try {
+        const response = await fetch(API + '/api/v2/category_scope_count', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            roots,
+            site: _currentSite.toUpperCase(),
+            include_descendants: _categoryScope !== 'selected',
+          }),
+        });
+        if (response.status === 404) {
+          if (requestId !== _selectionCountRequest) return;
+          badge.innerText = String(roots.length);
+          badge.title = '服务待重启，暂显示已选入口 ' + roots.length + ' 个';
+          return;
+        }
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const result = await response.json();
+        if (requestId !== _selectionCountRequest) return;
+        badge.innerText = String(result.count || 0);
+        badge.title = '实际抓取 ' + (result.count || 0) + ' 个类目（已选入口 ' + roots.length + ' 个）';
+      } catch (e) {
+        if (requestId !== _selectionCountRequest) return;
+        badge.innerText = '!';
+        badge.title = '实际抓取类目数计算失败';
+      }
     }
     let currentTaskChildren = [];
     let _treeOffset = 0;
@@ -805,7 +845,7 @@
       // 最新到货模式：叶子节点按 na_valid 控制，父节点始终可导航
       const isLA = _currentChart === 'la';
       const naSupported = child.na_valid === 1;
-      const laDisabled = isLA && !hasChild && !naSupported;
+      const laDisabled = isLA && !naSupported;
 
       // 链接：最新到货模式用搜索 URL，其它模式用新品榜 URL
       const siteDomains = {
@@ -822,12 +862,15 @@
         ? (domain + '/s?rh=n%3A' + child.node_id + '&s=date-desc-rank')
         : (domain + '/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/');
 
-      const disabledStyle = laDisabled ? 'opacity:0.38; pointer-events:none;' : '';
+      const disabledStyle = laDisabled && !hasChild ? 'opacity:0.38; pointer-events:none;' : '';
       const naTag = isLA && naSupported ? '<span style="font-size:10px; color:#16a34a; font-weight:700; margin-left:4px; flex-shrink:0;">NEW</span>' : '';
+      const itemName = isLA && !naSupported
+        ? '<span class="item-name" title="仅用于层级导航">' + child.name + '</span>'
+        : '<a class="item-name" href="' + itemUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()' + (laDisabled ? '; return false;' : '') + '">' + child.name + '</a>';
 
-      return '<div class="drill-item ' + (isSel ? 'selected' : '') + (laDisabled ? ' la-disabled' : '') + '" style="' + (laDisabled ? 'cursor:default;' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
+      return '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
           '<input type="checkbox" ' + (isSel ? 'checked' : '') + (laDisabled ? ' disabled' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
-          '<span class="item-name-wrap" style="' + disabledStyle + '"><a class="item-name" href="' + itemUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()' + (laDisabled ? '; return false;' : '') + '">' + child.name + '</a></span>' +
+          '<span class="item-name-wrap" style="' + disabledStyle + '">' + itemName + '</span>' +
           naTag +
           (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
           '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
@@ -873,7 +916,6 @@
         } else {
           document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">该类目下没有子类目了</div>';
         }
-        document.getElementById('selCount').innerText = _selectedNodes.size || '-';
       } catch (err) {
         document.getElementById('drillList').innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ' + err + '</div>';
       }
@@ -921,6 +963,7 @@
     function toggleSelect(key, name) {
       if (_selectedNodes.has(key)) _selectedNodes.delete(key);
       else _selectedNodes.set(key, name || key);
+      updateSelectionCount();
       loadTaskDrillDown();
     }
     function searchTask(kw) {
@@ -957,11 +1000,13 @@
       currentTaskChildren.forEach(c => {
         if (!_selectedNodes.has(c.node_id)) _selectedNodes.set(c.node_id, c.name);
       });
+      updateSelectionCount();
       renderSelectedModal();
       loadTaskDrillDown();
     }
     function selModalClearAll() {
       _selectedNodes.clear();
+      updateSelectionCount();
       renderSelectedModal();
       loadTaskDrillDown();
     }
@@ -971,26 +1016,59 @@
 
     // ── 商品抓取控制 ──
     let _isRunning = false;
+    let _isStarting = false;
+    let _startingLabel = '准备中';
     function updateRunBtn() {
       const btn = document.getElementById('btnToggleRun');
-      if (_isRunning) {
+      if (_isStarting) {
+        btn.textContent = '⏳ ' + _startingLabel;
+        btn.className = 'btn btn-primary';
+        btn.disabled = true;
+      } else if (_isRunning) {
         btn.textContent = '⏹ 停止';
         btn.className = 'btn btn-danger';
+        btn.disabled = false;
       } else {
         btn.textContent = '▶ 开始';
         btn.className = 'btn btn-primary';
+        btn.disabled = false;
       }
     }
 
     async function refreshProductStats() {
       try {
-        const r = await fetch(API + '/api/v2/product_stats?t=' + Date.now());
+        const stamp = Date.now();
+        const [r, proxyR] = await Promise.all([
+          fetch(API + '/api/v2/product_stats?t=' + stamp),
+          fetch(API + '/api/v2/proxy_status?t=' + stamp),
+        ]);
         const d = await r.json();
+        const proxyState = proxyR.ok ? await proxyR.json() : {};
         // 最新到货看 new_arrivals，榜单看 product_sightings
         const total = _currentChart === 'la' ? (d.new_arrivals || 0) : (d.total_asins || 0);
         document.getElementById('p_total_side').textContent = total;
         document.getElementById('p_multi_side').textContent = _currentChart === 'la' ? 0 : (d.multi_list || 0);
-        _isRunning = !!d.running;
+        const lifecycle = d.lifecycle || proxyState.status || '';
+        const preparing = ['preparing_proxy', 'proxy_ready', 'starting_crawler'].includes(lifecycle);
+        if (preparing) {
+          _isStarting = true;
+          _isRunning = true;
+          const detail = proxyState.detail || {};
+          const phaseLabels = {
+            acquire_lock: '准备代理',
+            load_nodes: '读取节点',
+            start_mihomo: '启动代理',
+            restart_mihomo: '恢复代理',
+            quick_verify: '快速验证',
+            health_check: detail.candidate_nodes
+              ? `验证 ${detail.checked_nodes || 0}/${detail.candidate_nodes}`
+              : '验证代理',
+          };
+          _startingLabel = phaseLabels[detail.phase] || '准备中';
+        } else if (!_isStarting || lifecycle) {
+          _isStarting = false;
+          _isRunning = !!d.running;
+        }
         updateRunBtn();
       } catch(e) {}
     }
@@ -1199,7 +1277,12 @@
     async function toggleRun() {
       if (_isRunning) {
         try {
-          await fetch(API + '/api/v2/stop_products', {method: 'POST'});
+          const r = await fetch(API + '/api/v2/stop_products', {method: 'POST'});
+          const d = await r.json();
+          if (d.status === 'stop_timeout') {
+            alert('代理池仍在准备中，停止操作未执行，请稍后重试\n' + (d.msg || ''));
+            return; // 抓取/代理未真正停止，保持运行态，避免 UI 与实际状态不一致
+          }
           _isRunning = false;
           updateRunBtn();
         } catch(e) { alert('停止失败: ' + e); }
@@ -1223,6 +1306,10 @@
 
         document.getElementById('p_progress_text').innerText = '0';
 
+        _isStarting = true;
+        _isRunning = true;
+        _startingLabel = '准备代理';
+        updateRunBtn();
         try {
           const r = await fetch(API + '/api/v2/start_products', {
             method: 'POST',
@@ -1230,10 +1317,34 @@
             body: JSON.stringify(params)
           });
           const d = await r.json();
-          if (d.status === 'already_running') alert('抓取进程已在运行中');
-          else if (d.status === 'error') alert('启动失败: ' + d.msg);
-          else { _isRunning = true; updateRunBtn(); }
-        } catch(e) { alert('启动失败: ' + e); }
+          _isStarting = false;
+          if (d.status === 'already_running') {
+            _isRunning = true;
+            alert('抓取进程已在运行中');
+          } else if (d.status === 'preparing_proxy') {
+            _isStarting = true;
+            _isRunning = true;
+          } else if (d.status === 'proxy_failed') {
+            _isRunning = false;
+            alert(
+              '代理池准备失败，已阻止抓取启动\n'
+              + 'run_id: ' + (d.run_id || '-') + '\n'
+              + '候选: ' + (d.candidate_nodes ?? '-') + ' 验证: ' + (d.verified_nodes ?? '-') + ' IP: ' + (d.unique_ips ?? '-') + '\n'
+              + '原因: ' + (d.reason || d.error_code || 'unknown')
+            );
+          } else if (d.status === 'error') {
+            _isRunning = false;
+            alert('启动失败: ' + d.msg);
+          } else {
+            _isRunning = true;
+          }
+          updateRunBtn();
+        } catch(e) {
+          _isStarting = false;
+          _isRunning = false;
+          updateRunBtn();
+          alert('启动失败: ' + e);
+        }
       }
     }
 
@@ -1267,12 +1378,31 @@
     }
 
     // ── 拖拽调整宽度 ──
+    function resizeBounds(panel) {
+      const other = panel.id === 'sidebarEl' ? document.getElementById('treePanelEl') : document.getElementById('sidebarEl');
+      const otherWidth = other && !other.classList.contains('collapsed') ? other.offsetWidth : 0;
+      const cssMin = parseFloat(getComputedStyle(panel).minWidth) || 100;
+      const cssMax = parseFloat(getComputedStyle(panel).maxWidth) || 600;
+      const remainingForWork = window.innerWidth <= 900 ? 420 : 560;
+      return { min: cssMin, max: Math.max(cssMin, Math.min(cssMax, window.innerWidth - otherWidth - remainingForWork)) };
+    }
+    function clampSidePanels() {
+      ['sidebarEl','treePanelEl'].forEach(id => {
+        const panel = document.getElementById(id);
+        if (!panel || panel.classList.contains('collapsed')) return;
+        const {min,max} = resizeBounds(panel);
+        panel.style.width = Math.max(min, Math.min(max, panel.offsetWidth)) + 'px';
+      });
+    }
     function initResize(handleId, panelId, storageKey) {
       const handle = document.getElementById(handleId);
       const panel = document.getElementById(panelId);
       if (!handle || !panel) return;
       const saved = localStorage.getItem(storageKey);
-      if (saved) panel.style.width = saved + 'px';
+      if (saved) {
+        const {min,max} = resizeBounds(panel);
+        panel.style.width = Math.max(min, Math.min(max, Number(saved) || panel.offsetWidth)) + 'px';
+      }
 
       let startX, startW;
       handle.addEventListener('mousedown', function(e) {
@@ -1285,7 +1415,8 @@
         document.addEventListener('mouseup', onUp);
       });
       function onMove(e) {
-        const newW = Math.max(100, Math.min(600, startW + e.clientX - startX));
+        const {min,max} = resizeBounds(panel);
+        const newW = Math.max(min, Math.min(max, startW + e.clientX - startX));
         panel.style.width = newW + 'px';
       }
       function onUp() {
@@ -1298,6 +1429,7 @@
     }
     initResize('sidebarResizeHandle', 'sidebarEl', 'amz_sidebar_w');
     initResize('treeResizeHandle', 'treePanelEl', 'amz_tree_w');
+    window.addEventListener('resize', clampSidePanels);
 
     // ── 初始化 ──
     loadStats();

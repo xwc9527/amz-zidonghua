@@ -267,10 +267,13 @@ def main():
     ensure_column()
 
     from proxy_pool_manager import PoolManager, ensure_proxy_ready
-    ensure_proxy_ready()
+    prep = ensure_proxy_ready(force=True)
+    if not prep.ok:
+        log.error("[pool] 代理池准备失败: %s %s", prep.error_code, prep.reason)
+        sys.exit(1)
     mgr = PoolManager(check_interval=args.check_interval)
     if not mgr.bootstrap():
-        log.error("[pool] 无可用代理 IP，请先 python start_lb_proxy.py start")
+        log.error("[pool] 无可用代理 IP")
         sys.exit(1)
 
     sites = [args.site] if args.site else ["US", "DE", "JP"]

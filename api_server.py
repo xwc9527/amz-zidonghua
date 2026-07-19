@@ -1,7 +1,7 @@
 # api_server.py — FastAPI v2 API (asyncpg + PostgreSQL)
 # 启动: DB_BACKEND=sqlite uvicorn api_server:app --host 127.0.0.1 --port 8081
 # PG:   set PG_DSN=postgresql://user:pass@localhost:5432/amz_selection
-import os, sys, subprocess, threading, logging, time, math
+import os, sys, subprocess, threading, logging, time, math, asyncio
 import asyncpg
 from fastapi import FastAPI, Query, Request
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,22 @@ DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
 # PG config（SQLite 模式可不设置 PG_DSN）
 from pg_config import PG_DSN, get_pg_dsn
+from config import PROXY_IDLE_TTL
+
+# 代理池：点击开始时真实验证，失败不得启动抓取；结束后关闭独立 Mihomo
+from proxy_pool_manager import (
+    STATUS_IDLE,
+    STATUS_PREPARING,
+    STATUS_PROXY_FAILED,
+    STATUS_PROXY_READY,
+    STATUS_RUNNING,
+    STATUS_STARTING_CRAWLER,
+    STATUS_STOPPING,
+    ensure_proxy_ready,
+    get_status as get_proxy_status,
+    set_status as set_proxy_status,
+    stop_proxy_pool,
+)
 
 # SQLite fallback
 DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
@@ -23,6 +39,103 @@ DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
 _product_proc = None
 _product_lock = threading.Lock()
 _pool = None
+_proxy_prepare_lock = threading.Lock()
+
+# 代际计数器：区分"看门狗线程等待的那一轮"与"当前实际在跑的那一轮"，
+# 避免旧看门狗在新一轮已启动后误杀新 Mihomo / 误写 idle 状态。
+_crawl_generation = 0
+
+_ACTIVE_CRAWL_LIFECYCLES = {
+    STATUS_PREPARING,
+    STATUS_PROXY_READY,
+    STATUS_STARTING_CRAWLER,
+    STATUS_RUNNING,
+    STATUS_STOPPING,
+}
+
+
+def _crawl_lifecycle_state():
+    """Return one consistent UI state for proxy preparation and crawler execution."""
+    proc_running = _product_proc is not None and _product_proc.poll() is None
+    proxy_state = get_proxy_status()
+    lifecycle = proxy_state.get("status") or STATUS_IDLE
+    active = proc_running or lifecycle in _ACTIVE_CRAWL_LIFECYCLES
+    return active, lifecycle, proxy_state.get("run_id") or ""
+
+
+def _proxy_sleep(reason: str = "idle_timeout"):
+    """关闭独立 Mihomo（不触碰主 Clash）。"""
+    try:
+        stop_proxy_pool()
+        logging.info("[proxy] 独立代理池已停止 reason=%s", reason)
+    except Exception as e:
+        logging.warning(f"[proxy] 自动停止失败: {e}")
+
+
+def _stop_proxy_after_idle(generation: int, run_id: str, ttl: int):
+    """自然结束后保留热池一段时间；新一轮启动会使旧定时器失效。"""
+    deadline = time.monotonic() + max(0, ttl)
+    while time.monotonic() < deadline:
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+        with _product_lock:
+            if generation != _crawl_generation:
+                logging.info("[proxy] 新一轮已接管，取消旧空闲关闭 run_id=%s", run_id)
+                return
+    with _product_lock:
+        still_idle = (
+            generation == _crawl_generation
+            and (_product_proc is None or _product_proc.poll() is not None)
+        )
+    if still_idle:
+        _proxy_sleep("idle_timeout")
+        set_proxy_status(STATUS_IDLE, run_id=run_id, pool_ready=False)
+
+
+def _watch_and_sleep_proxy(
+    proc: subprocess.Popen,
+    generation: int,
+    request_id: str,
+    run_id: str,
+    started_at: float,
+):
+    """后台线程：等抓取子进程退出后停止独立代理池。
+
+    仅当自己仍是"当前这一轮"时才执行停止/置状态，防止旧看门狗
+    在用户快速点击 停止→开始 后，误杀新一轮刚启动的 Mihomo。
+    """
+    return_code = None
+    try:
+        return_code = proc.wait()
+    finally:
+        logging.info(
+            "[crawl] process exited request_id=%s run_id=%s pid=%s return_code=%s elapsed=%.1fs",
+            request_id,
+            run_id,
+            proc.pid,
+            return_code,
+            time.monotonic() - started_at,
+        )
+        with _product_lock:
+            still_current = (generation == _crawl_generation)
+        if still_current:
+            set_proxy_status(
+                STATUS_IDLE,
+                run_id=run_id,
+                pool_ready=True,
+                idle_ttl=PROXY_IDLE_TTL,
+            )
+            logging.info(
+                "[proxy] 抓取自然结束，热池保留 %ds run_id=%s",
+                PROXY_IDLE_TTL,
+                run_id,
+            )
+            threading.Thread(
+                target=_stop_proxy_after_idle,
+                args=(generation, run_id, PROXY_IDLE_TTL),
+                daemon=True,
+            ).start()
+        else:
+            logging.info("[proxy] 检测到更新一轮已启动，跳过本轮看门狗的停止操作")
 
 def _positive_int(value, default):
     try:
@@ -160,6 +273,7 @@ async def lifespan(app: FastAPI):
         if _product_proc and _product_proc.poll() is None:
             _product_proc.terminate()
             _product_proc = None
+    await asyncio.to_thread(stop_proxy_pool)
 
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
 
@@ -352,16 +466,84 @@ async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: 
     else:
         return await _tree_children_sqlite(parent, q, limit, offset, site, na_only)
 
+
+@app.post("/api/v2/category_scope_count")
+async def category_scope_count(body: dict):
+    """Return the deduplicated category count the crawler will actually execute."""
+    site = str(body.get("site") or "US").upper()
+    roots = list(dict.fromkeys(str(v).strip() for v in (body.get("roots") or []) if str(v).strip()))
+    include_descendants = body.get("include_descendants", True)
+    if isinstance(include_descendants, str):
+        include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        include_descendants = bool(include_descendants)
+
+    if not roots:
+        return {"count": 0, "selected_count": 0, "include_descendants": include_descendants}
+
+    if DB_BACKEND == "pg":
+        if include_descendants:
+            count = await pg_scalar(
+                """WITH RECURSIVE sub(node_id) AS (
+                       SELECT node_id FROM categories WHERE site = $1 AND node_id = ANY($2::text[])
+                       UNION
+                       SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                       WHERE c.site = $1
+                   ) SELECT COUNT(*) FROM sub""",
+                site, roots,
+            )
+        else:
+            count = await pg_scalar(
+                "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1 AND node_id = ANY($2::text[])",
+                site, roots,
+            )
+    else:
+        placeholders = ",".join("?" for _ in roots)
+        if include_descendants:
+            count = await _sqlite_scalar(
+                f"""WITH RECURSIVE sub(node_id) AS (
+                        SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
+                        UNION
+                        SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                        WHERE c.site = ?
+                    ) SELECT COUNT(*) FROM sub""",
+                (site, *roots, site),
+            )
+        else:
+            count = await _sqlite_scalar(
+                f"SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ? AND node_id IN ({placeholders})",
+                (site, *roots),
+            )
+
+    return {
+        "count": int(count or 0),
+        "selected_count": len(roots),
+        "include_descendants": include_descendants,
+    }
+
 async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
     if na_only:
-        sql = "SELECT name, node_id, depth, slug, na_valid, 0 as child_count FROM categories WHERE site = $1 AND na_valid = 1"
+        sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
+                 (SELECT COUNT(*) FROM categories d
+                  WHERE d.site = c.site AND d.na_valid = 1
+                    AND d.path <@ c.path AND d.id != c.id) AS child_count
+                 FROM categories c
+                 WHERE c.site = $1
+                   AND (c.na_valid = 1 OR EXISTS (
+                       SELECT 1 FROM categories d
+                       WHERE d.site = c.site AND d.na_valid = 1
+                         AND d.path <@ c.path AND d.id != c.id
+                   ))"""
         args = [site]
-        if q:
-            sql += " AND name ILIKE $2"
-            args.append(f"%{q}%")
-            sql += f" ORDER BY depth, name LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
+        if parent == "root":
+            sql += " AND c.depth = 0"
         else:
-            sql += f" ORDER BY depth, name LIMIT $2 OFFSET $3"
+            sql += " AND c.parent_node_id = $2"
+            args.append(parent)
+        if q:
+            sql += f" AND c.name ILIKE ${len(args)+1}"
+            args.append(f"%{q}%")
+        sql += f" ORDER BY c.name LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
         args.extend([limit, offset])
         return await pg_query(sql, *args)
     if parent == "root":
@@ -400,15 +582,41 @@ async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
         return await pg_query(sql, *args)
 
 async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
-    # na_only 模式：平铺返回所有 na_valid=1 的节点，忽略层级
+    # 最新到货模式：保留 NEW 节点及其祖先导航链，仍按 parent_node_id 逐层展示。
     if na_only:
-        sql = """SELECT name, node_id, depth, slug, na_valid, 0 as child_count
-                 FROM categories WHERE site = ? AND na_valid = 1"""
-        params = [site]
+        sql = """WITH RECURSIVE ancestry(new_node_id, ancestor_id) AS (
+                     SELECT node_id, parent_node_id
+                     FROM categories WHERE site = ? AND na_valid = 1
+                     UNION ALL
+                     SELECT a.new_node_id, c.parent_node_id
+                     FROM ancestry a JOIN categories c ON c.node_id = a.ancestor_id
+                     WHERE c.site = ? AND a.ancestor_id IS NOT NULL
+                 ),
+                 relevant(node_id) AS (
+                     SELECT node_id FROM categories WHERE site = ? AND na_valid = 1
+                     UNION
+                     SELECT ancestor_id FROM ancestry WHERE ancestor_id IS NOT NULL
+                 ),
+                 new_counts(node_id, child_count) AS (
+                     SELECT ancestor_id, COUNT(DISTINCT new_node_id)
+                     FROM ancestry WHERE ancestor_id IS NOT NULL
+                     GROUP BY ancestor_id
+                 )
+                 SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
+                    COALESCE(n.child_count, 0) AS child_count
+                 FROM categories c JOIN relevant r ON r.node_id = c.node_id
+                 LEFT JOIN new_counts n ON n.node_id = c.node_id
+                 WHERE c.site = ?"""
+        params = [site, site, site, site]
+        if parent == "root":
+            sql += " AND c.depth = 0"
+        else:
+            sql += " AND c.parent_node_id = ?"
+            params.append(parent)
         if q:
-            sql += " AND name LIKE ?"
+            sql += " AND c.name LIKE ?"
             params.append(f"%{q}%")
-        sql += f" ORDER BY depth, name LIMIT {limit} OFFSET {offset}"
+        sql += f" ORDER BY c.name LIMIT {limit} OFFSET {offset}"
         return await _sqlite_query(sql, params)
 
     if parent == "root":
@@ -856,7 +1064,7 @@ async def new_arrivals_api(
 
 @app.get("/api/v2/product_stats")
 async def product_stats():
-    running = _product_proc is not None and _product_proc.poll() is None
+    running, lifecycle, run_id = _crawl_lifecycle_state()
     total, by_list, multi, na_total = 0, [], 0, 0
     try:
         if DB_BACKEND == "pg":
@@ -884,11 +1092,19 @@ async def product_stats():
                 logging.warning(f"new_arrivals stats failed: {e}")
     except Exception as e:
         logging.warning(f"product_stats failed: {e}")
-    return {"total_asins": total, "new_arrivals": na_total, "by_list": by_list or [], "multi_list": multi, "running": running}
+    return {
+        "total_asins": total,
+        "new_arrivals": na_total,
+        "by_list": by_list or [],
+        "multi_list": multi,
+        "running": running,
+        "lifecycle": lifecycle,
+        "run_id": run_id,
+    }
 
 @app.get("/api/v2/product_progress")
 async def product_progress():
-    running = _product_proc is not None and _product_proc.poll() is None
+    running, lifecycle, run_id = _crawl_lifecycle_state()
     ps, na = 0, 0
     try:
         if DB_BACKEND == "pg":
@@ -911,7 +1127,14 @@ async def product_progress():
                 na = 0
     except Exception:
         pass
-    return {"running": running, "total_products": ps + na, "product_sightings": ps, "new_arrivals": na}
+    return {
+        "running": running,
+        "lifecycle": lifecycle,
+        "run_id": run_id,
+        "total_products": ps + na,
+        "product_sightings": ps,
+        "new_arrivals": na,
+    }
 
 # ── 爬虫控制 ──
 
@@ -952,72 +1175,251 @@ def _append_filter_flags(cmd: list, body: dict, *, for_la: bool = False):
         cmd += ["--bestseller"]
 
 
+@app.get("/api/v2/proxy_status")
+async def proxy_status():
+    return get_proxy_status()
+
+
 @app.post("/api/v2/start_products")
 async def start_products(body: dict):
-    global _product_proc
+    global _product_proc, _crawl_generation
+    request_id = f"START-{time.strftime('%Y%m%d-%H%M%S')}-{threading.get_ident()}"
     with _product_lock:
         if _product_proc is not None and _product_proc.poll() is None:
+            logging.info("[crawl] duplicate start rejected request_id=%s reason=already_running", request_id)
             return {"status": "already_running"}
         range_err = _validate_start_filters(body)
         if range_err:
+            logging.warning("[crawl] start rejected request_id=%s reason=invalid_filters detail=%s", request_id, range_err)
             return {"status": "error", "msg": f"筛选条件不合法: {range_err}"}
         chart = body.get("chart", "")
-        # include_descendants 默认 True（兼容旧行为：所选 + 全部下级）
-        include_descendants = body.get("include_descendants", True)
-        if isinstance(include_descendants, str):
-            include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
-        else:
-            include_descendants = bool(include_descendants)
+        if chart == "la" and not body.get("roots"):
+            logging.warning("[crawl] start rejected request_id=%s reason=no_roots chart=la", request_id)
+            return {"status": "error", "msg": "latest arrivals requires roots"}
+        if chart != "la" and not body.get("slugs") and not body.get("roots"):
+            logging.warning("[crawl] start rejected request_id=%s reason=no_roots_or_slugs chart=%s", request_id, chart)
+            return {"status": "error", "msg": "no slugs or roots specified"}
 
-        if chart == "la":
-            cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
-            if body.get("roots"):
-                cmd += ["--roots"] + body["roots"]
+    roots = body.get("roots") or []
+    slugs = body.get("slugs") or []
+    logging.info(
+        "[crawl] start requested request_id=%s chart=%s site=%s roots=%d slugs=%d include_descendants=%s max_pages=%s",
+        request_id,
+        chart,
+        body.get("site") or "",
+        len(roots),
+        len(slugs),
+        body.get("include_descendants", True),
+        body.get("max_pages"),
+    )
+
+    # 代理准备：单飞锁，失败直接 proxy_failed，禁止带病启动
+    if not _proxy_prepare_lock.acquire(blocking=False):
+        logging.info("[crawl] duplicate start rejected request_id=%s reason=proxy_preparing", request_id)
+        return {
+            "status": STATUS_PREPARING,
+            "msg": "代理池正在准备中，请勿重复点击",
+        }
+
+    # 仅成功取得单飞锁的请求可以预留新代际；重复点击不得使当前看门狗失效。
+    with _product_lock:
+        _crawl_generation += 1
+        generation = _crawl_generation
+
+    try:
+        prepare_started_at = time.monotonic()
+        set_proxy_status(STATUS_PREPARING, request_id=request_id)
+        try:
+            prep = await asyncio.to_thread(ensure_proxy_ready, force=False)
+        except Exception as e:
+            logging.exception("[crawl] proxy preparation crashed request_id=%s", request_id)
+            set_proxy_status(STATUS_PROXY_FAILED, request_id=request_id, reason=str(e))
+            return {
+                "status": STATUS_PROXY_FAILED,
+                "run_id": "",
+                "candidate_nodes": 0,
+                "verified_nodes": 0,
+                "unique_ips": 0,
+                "reason": str(e),
+            }
+
+        if not prep.ok:
+            logging.warning(
+                "[crawl] proxy preparation failed request_id=%s run_id=%s candidates=%d verified=%d unique_ips=%d reason=%s elapsed=%.1fs",
+                request_id,
+                prep.run_id,
+                prep.candidate_nodes,
+                prep.verified_nodes,
+                prep.unique_ips,
+                prep.reason or prep.error_code,
+                time.monotonic() - prepare_started_at,
+            )
+            set_proxy_status(
+                STATUS_PROXY_FAILED,
+                run_id=prep.run_id,
+                request_id=request_id,
+                reason=prep.reason,
+            )
+            return {
+                "status": STATUS_PROXY_FAILED,
+                "run_id": prep.run_id,
+                "candidate_nodes": prep.candidate_nodes,
+                "verified_nodes": prep.verified_nodes,
+                "unique_ips": prep.unique_ips,
+                "reason": prep.reason or prep.error_code,
+                "error_code": prep.error_code,
+                "fail_reasons": prep.fail_reasons,
+            }
+
+        logging.info(
+            "[crawl] proxy ready request_id=%s run_id=%s candidates=%d verified=%d unique_ips=%d elapsed=%.1fs",
+            request_id,
+            prep.run_id,
+            prep.candidate_nodes,
+            prep.verified_nodes,
+            prep.unique_ips,
+            time.monotonic() - prepare_started_at,
+        )
+        set_proxy_status(STATUS_PROXY_READY, run_id=prep.run_id, request_id=request_id)
+
+        with _product_lock:
+            if _product_proc is not None and _product_proc.poll() is None:
+                return {"status": "already_running", "run_id": prep.run_id}
+
+            set_proxy_status(STATUS_STARTING_CRAWLER, run_id=prep.run_id, request_id=request_id)
+            include_descendants = body.get("include_descendants", True)
+            if isinstance(include_descendants, str):
+                include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
             else:
-                return {"status": "error", "msg": "latest arrivals requires roots"}
-            if body.get("site"):
-                cmd += ["--site", body["site"]]
-            page_cap = min(_positive_int(body.get("max_pages"), 2), 999)
-            cmd += ["--max-pages", str(page_cap)]
-            if not include_descendants:
-                cmd += ["--exact-roots"]
-            _append_filter_flags(cmd, body, for_la=True)
+                include_descendants = bool(include_descendants)
+
+            if chart == "la":
+                cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
+                cmd += ["--roots"] + body["roots"]
+                if body.get("site"):
+                    cmd += ["--site", body["site"]]
+                page_cap = min(_positive_int(body.get("max_pages"), 2), 999)
+                cmd += ["--max-pages", str(page_cap)]
+                if not include_descendants:
+                    cmd += ["--exact-roots"]
+                _append_filter_flags(cmd, body, for_la=True)
+            else:
+                cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_products.py")]
+                if body.get("slugs"):
+                    cmd += ["--slugs"] + body["slugs"]
+                else:
+                    cmd += ["--roots"] + body["roots"]
+                if body.get("lists"):
+                    cmd += ["--lists"] + body["lists"]
+                if body.get("site"):
+                    cmd += ["--site", body["site"]]
+                page_cap = min(_positive_int(body.get("max_pages"), 2), 2)
+                cmd += ["--list-limit", "0", "--max-pages", str(page_cap)]
+                if not include_descendants:
+                    cmd += ["--exact-roots"]
+                _append_filter_flags(cmd, body, for_la=False)
+
             env = os.environ.copy()
             env["DB_BACKEND"] = DB_BACKEND
-            _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
-            return {"status": "started", "pid": _product_proc.pid, "backend": DB_BACKEND}
-
-        cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_products.py")]
-        if body.get("slugs"):
-            cmd += ["--slugs"] + body["slugs"]
-        elif body.get("roots"):
-            cmd += ["--roots"] + body["roots"]
-        else:
-            return {"status": "error", "msg": "no slugs or roots specified"}
-        if body.get("lists"):
-            cmd += ["--lists"] + body["lists"]
-        if body.get("site"):
-            cmd += ["--site", body["site"]]
-        page_cap = min(_positive_int(body.get("max_pages"), 2), 2)
-        cmd += ["--list-limit", "0", "--max-pages", str(page_cap)]
-        if not include_descendants:
-            cmd += ["--exact-roots"]
-        _append_filter_flags(cmd, body, for_la=False)
-        env = os.environ.copy()
-        env["DB_BACKEND"] = DB_BACKEND
-        _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
-    return {"status": "started", "pid": _product_proc.pid, "backend": DB_BACKEND}
+            env["PROXY_REQUIRED"] = "1"
+            env["ALLOW_DIRECT_FALLBACK"] = "0"
+            try:
+                _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
+            except Exception as exc:
+                _product_proc = None
+                logging.exception("[proxy] 抓取进程创建失败")
+                # stop_proxy_pool 内部含 taskkill + 轮询等待，不能同步阻塞事件循环
+                cleanup = await asyncio.to_thread(stop_proxy_pool)
+                set_proxy_status(
+                    STATUS_PROXY_FAILED,
+                    run_id=prep.run_id,
+                    request_id=request_id,
+                    reason=str(exc),
+                    error_code="CRAWLER_START_FAILED",
+                    cleanup=cleanup,
+                )
+                return {
+                    "status": STATUS_PROXY_FAILED,
+                    "run_id": prep.run_id,
+                    "candidate_nodes": prep.candidate_nodes,
+                    "verified_nodes": prep.verified_nodes,
+                    "unique_ips": prep.unique_ips,
+                    "reason": str(exc),
+                    "error_code": "CRAWLER_START_FAILED",
+                }
+            crawler_started_at = time.monotonic()
+            threading.Thread(
+                target=_watch_and_sleep_proxy,
+                args=(_product_proc, generation, request_id, prep.run_id, crawler_started_at),
+                daemon=True,
+            ).start()
+            logging.info(
+                "[crawl] process started request_id=%s run_id=%s pid=%d chart=%s",
+                request_id,
+                prep.run_id,
+                _product_proc.pid,
+                chart,
+            )
+            set_proxy_status(
+                STATUS_RUNNING,
+                run_id=prep.run_id,
+                request_id=request_id,
+                pid=_product_proc.pid,
+            )
+            return {
+                "status": "started",
+                "lifecycle": STATUS_RUNNING,
+                "pid": _product_proc.pid,
+                "backend": DB_BACKEND,
+                "run_id": prep.run_id,
+                "candidate_nodes": prep.candidate_nodes,
+                "verified_nodes": prep.verified_nodes,
+                "unique_ips": prep.unique_ips,
+            }
+    finally:
+        _proxy_prepare_lock.release()
 
 @app.post("/api/v2/stop_products")
 async def stop_products():
-    global _product_proc
-    with _product_lock:
-        if _product_proc is None or _product_proc.poll() is not None:
+    global _product_proc, _crawl_generation
+    set_proxy_status(STATUS_STOPPING)
+    # 等待正在进行的代理准备结束，避免残留 Mihomo（阻塞操作放线程池，不卡事件循环）
+    acquired = await asyncio.to_thread(_proxy_prepare_lock.acquire, True, 120)
+    if not acquired:
+        set_proxy_status(
+            STATUS_STOPPING,
+            reason="等待代理准备结束超时，停止操作未执行",
+            error_code="STOP_PREPARE_TIMEOUT",
+        )
+        return {
+            "status": "stop_timeout",
+            "msg": "代理池仍在准备，停止操作未执行",
+            "error_code": "STOP_PREPARE_TIMEOUT",
+        }
+    try:
+        with _product_lock:
+            # 使当前世代失效：即便旧看门狗随后才唤醒，也不会误杀本次显式停止之后的新一轮
+            _crawl_generation += 1
+            if _product_proc is None or _product_proc.poll() is not None:
+                proc_to_wait = None
+            else:
+                _product_proc.terminate()
+                pid = _product_proc.pid
+                proc_to_wait = _product_proc
+                _product_proc = None
+
+        if proc_to_wait is None:
+            await asyncio.to_thread(stop_proxy_pool)
+            set_proxy_status(STATUS_IDLE)
             return {"status": "not_running"}
-        _product_proc.terminate()
-        pid = _product_proc.pid
-        _product_proc = None
-    return {"status": "stopped", "pid": pid}
+
+        await asyncio.to_thread(proc_to_wait.wait)
+        await asyncio.to_thread(stop_proxy_pool)
+        set_proxy_status(STATUS_IDLE)
+        return {"status": "stopped", "pid": pid}
+    finally:
+        if acquired:
+            _proxy_prepare_lock.release()
 
 @app.post("/api/v2/export_excel")
 async def export_excel(body: dict = None):

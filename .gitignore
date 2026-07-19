@@ -28,7 +28,18 @@ data/*.log
 data/lb_pid.json
 data/crawl_checkpoint.json
 data/proxy_pool.json
+data/proxy_pool.candidate.json
+data/proxy_pool.last_good.json
+data/proxy_pool.last_failed.json
+data/proxy_pool_status.json
+data/proxy_pool.lock
 data/lb_instance/
+
+# 代理池审计/冒烟产物（诊断用，非交付物）
+data/proxy_audit_*.json
+data/proxy_smoke_*.json
+data/proxy_smoke_*.log
+data/categories_proxy_smoke_*.db
 
 # 样本HTML（调试用，不入库）
 data/sample_*.html

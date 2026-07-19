@@ -39,8 +39,13 @@ from curl_cffi.requests import RequestsError
 from bs4 import BeautifulSoup
 
 from config import (
-    HEADERS, DATA_DIR, DB_FILE, PROXY_POOL_FILE,
-    PROXY_ENABLED, PROXY_VERIFY, get_marketplace,
+    HEADERS, DATA_DIR, DB_FILE, get_marketplace,
+)
+from proxy_session import (
+    ForcedProxyPool,
+    ProxyRequiredError,
+    assert_session_has_proxy,
+    make_forced_session,
 )
 from detail_parser import (
     parse_detail_fields, check_detail_filters, attach_normalized_dims,
@@ -107,29 +112,12 @@ _DETAIL_FILTERS: dict = {}
 # 代理池
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-class ProxyPool:
+class ProxyPool(ForcedProxyPool):
+    """兼容旧名称；强制代理，禁止静默直连。"""
+
     def __init__(self):
-        self._q = Queue()
-        self._all = []
-        if PROXY_ENABLED and os.path.exists(PROXY_POOL_FILE):
-            with open(PROXY_POOL_FILE, encoding="utf-8") as f:
-                entries = json.load(f)
-            for p in entries:
-                self._q.put(p)
-                self._all.append(p)
-            _log.info(f"[pool] 加载 {len(entries)} 个代理端口")
-        else:
-            _log.info("[pool] 代理未启用，使用直连")
-
-    @property
-    def size(self):
-        return len(self._all)
-
-    def acquire(self, timeout=30):
-        return self._q.get(timeout=timeout)
-
-    def release(self, entry):
-        self._q.put(entry)
+        super().__init__(required=True)
+        _log.info(f"[pool] 强制加载 {self.size} 个代理端口")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -240,6 +228,49 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
 """
 
 
+_NA_RETENTION_DAYS = 30
+_LAST_PURGE_CHECK = 0.0
+
+
+def _purge_stale_new_arrivals(days: int = _NA_RETENTION_DAYS) -> int:
+    """清理 new_arrivals 中抓取时间超过 days 天的旧记录，避免"最新到货"堆积陈旧数据。"""
+    if DB_BACKEND == "pg":
+        conn = _get_pg()
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM new_arrivals WHERE scraped_at < now() - (%s || ' days')::interval",
+            (str(int(days)),),
+        )
+        deleted = cur.rowcount
+        conn.commit()
+        return deleted
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL")
+    cur = conn.execute(
+        "DELETE FROM new_arrivals WHERE scraped_at < datetime('now', ?)",
+        (f"-{int(days)} days",),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def _maybe_purge_stale_new_arrivals():
+    """节流：每个进程内最多每小时检查一次，避免高频轮询接口反复触发 DELETE。"""
+    global _LAST_PURGE_CHECK
+    now = time.time()
+    if now - _LAST_PURGE_CHECK < 3600:
+        return
+    _LAST_PURGE_CHECK = now
+    try:
+        deleted = _purge_stale_new_arrivals()
+        if deleted:
+            _log.info(f"[清理] new_arrivals 超过 {_NA_RETENTION_DAYS} 天的旧数据已清理 {deleted} 条")
+    except Exception as e:
+        _log.warning(f"[清理] new_arrivals 旧数据清理失败: {e}")
+
+
 def _init_db():
     if DB_BACKEND == "pg":
         conn = _get_pg()
@@ -253,6 +284,7 @@ def _init_db():
             EXCEPTION WHEN duplicate_object THEN NULL;
             END $$;
         """)
+        _maybe_purge_stale_new_arrivals()
         return
     conn = sqlite3.connect(DB_FILE, timeout=15)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -263,6 +295,7 @@ def _init_db():
             conn.execute(f"ALTER TABLE new_arrivals ADD COLUMN {col} {typ}")
     conn.commit()
     conn.close()
+    _maybe_purge_stale_new_arrivals()
 
 
 def _product_row_tuple(p: dict) -> tuple:
@@ -456,10 +489,8 @@ def _make_session(worker_id: int, proxy_entry: dict | None) -> requests.Session:
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
     }
-    proxies = {}
-    if proxy_entry:
-        proxies = {"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]}
-    session = requests.Session(impersonate="chrome124", headers=hdrs, proxies=proxies, verify=False)
+    session = make_forced_session(proxy_entry, headers=hdrs, required=True)
+    assert_session_has_proxy(session, required=True)
     return session
 
 
@@ -488,11 +519,14 @@ def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | No
 
 
 def _warmup(session: requests.Session):
+    assert_session_has_proxy(session, required=True)
+    proxy = (getattr(session, "proxies", None) or {}).get("https") or ""
     try:
         session.get(f"{_DOMAIN}/", timeout=10)
+        _log.info(f"[session] warmup ok proxy={proxy}")
         time.sleep(1 + random.uniform(0, 1))
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning(f"[session] warmup 失败 proxy={proxy}: {e}")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -783,7 +817,7 @@ all_asins = {}  # asin -> list meta + node info
 
 
 def _worker_phase1(worker_id: int, task_q: Queue, pool: ProxyPool, max_pages: int):
-    proxy_entry = pool.acquire() if pool.size > 0 else None
+    proxy_entry = pool.acquire()
     session = _make_session(worker_id, proxy_entry)
     _warmup(session)
 
@@ -837,7 +871,7 @@ def _worker_phase1(worker_id: int, task_q: Queue, pool: ProxyPool, max_pages: in
 
 
 def _worker_phase2(worker_id: int, task_q: Queue, pool: ProxyPool):
-    proxy_entry = pool.acquire() if pool.size > 0 else None
+    proxy_entry = pool.acquire()
     session = _make_session(worker_id, proxy_entry)
     _warmup(session)
     session.headers["Referer"] = f"{_DOMAIN}/s?k=new"
@@ -1005,8 +1039,15 @@ def main():
     _LIST_FILTERS, _DETAIL_FILTERS = _build_filters_from_args(args)
 
     _init_db()
-    pool = ProxyPool()
-    num_workers = max(pool.size, 1)
+    try:
+        pool = ProxyPool()
+    except ProxyRequiredError as e:
+        _log.error(f"[proxy] 强制代理失败: {e.code} {e}")
+        raise SystemExit(2) from e
+    num_workers = pool.size
+    if num_workers < 1:
+        _log.error("[proxy] 代理池为空，拒绝启动")
+        raise SystemExit(2)
 
     nodes = _load_nodes(
         _SITE,

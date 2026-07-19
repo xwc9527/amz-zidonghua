@@ -100,10 +100,116 @@ EXCEL_FILE         = os.path.join(OUTPUT_DIR, "候选品.xlsx")
 FILTER_COMPETITION_MAX = 5000
 FILTER_REVIEWS_FINAL   = 50
 
-# ── 代理池（start_lb_proxy.py 生成的 proxy_pool.json）────────────────
-PROXY_ENABLED   = True
+# ── 代理池 ──────────────────────────────────────────────────────────
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _default_clash_home() -> str:
+    override = os.environ.get("CLASH_VERGE_HOME", "").strip()
+    if override:
+        return override
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return os.path.join(appdata, "io.github.clash-verge-rev.clash-verge-rev")
+    return ""
+
+
+def _default_mihomo_bin() -> str:
+    override = os.environ.get("MIHOMO_BIN", "").strip()
+    if override:
+        return override
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Clash Verge", "verge-mihomo.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Clash Verge", "mihomo.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return candidates[0]
+
+
+PROXY_ENABLED = _env_bool("PROXY_ENABLED", True)
+PROXY_REQUIRED = _env_bool("PROXY_REQUIRED", True)
+ALLOW_DIRECT_FALLBACK = _env_bool("ALLOW_DIRECT_FALLBACK", False)
+PROXY_VERIFY = _env_bool("PROXY_VERIFY", False)
+
 PROXY_POOL_FILE = os.path.join(DATA_DIR, "proxy_pool.json")
-PROXY_VERIFY    = False
+PROXY_POOL_CANDIDATE_FILE = os.path.join(DATA_DIR, "proxy_pool.candidate.json")
+PROXY_POOL_LAST_GOOD_FILE = os.path.join(DATA_DIR, "proxy_pool.last_good.json")
+PROXY_POOL_LAST_FAILED_FILE = os.path.join(DATA_DIR, "proxy_pool.last_failed.json")
+PROXY_POOL_STATUS_FILE = os.path.join(DATA_DIR, "proxy_pool_status.json")
+PROXY_PROBE_CACHE_FILE = os.path.join(DATA_DIR, "probe_results.json")
+PROXY_LB_DIR = os.path.join(DATA_DIR, "lb_instance")
+PROXY_PID_FILE = os.path.join(DATA_DIR, "lb_pid.json")
+PROXY_LOCK_FILE = os.path.join(DATA_DIR, "proxy_pool.lock")
+
+CLASH_VERGE_HOME = _default_clash_home()
+CLASH_PROFILES_META = os.path.join(CLASH_VERGE_HOME, "profiles.yaml") if CLASH_VERGE_HOME else ""
+CLASH_PROFILES_DIR = os.path.join(CLASH_VERGE_HOME, "profiles") if CLASH_VERGE_HOME else ""
+MIHOMO_BIN = _default_mihomo_bin()
+
+# 可选信息源：主 Clash 控制口 / 混合口；不可用不得阻断代理池构建
+CLASH_CTRL_API = os.environ.get("CLASH_CTRL_API", "http://127.0.0.1:9097").rstrip("/")
+CLASH_MIXED_PORT = _env_int("CLASH_MIXED_PORT", 7897)
+
+PROXY_BASE_PORT = _env_int("PROXY_BASE_PORT", 18001)
+PROXY_CTRL_PORT = _env_int("PROXY_CTRL_PORT", 19897)
+PROXY_PORT_RANGE_END = _env_int("PROXY_PORT_RANGE_END", 18100)
+PROXY_MAX_NODES = _env_int("PROXY_MAX_NODES", 0)  # 0 = 不限
+
+# 抓取启动的硬门槛：最终发布池必须至少有 11 个“独立出口 + Amazon 可用”节点。
+# 三个指标保持同一默认值，避免某一层门槛较低造成误放行。
+PROXY_MIN_VERIFIED_NODES = _env_int("PROXY_MIN_VERIFIED_NODES", 11)
+PROXY_MIN_UNIQUE_IPS = _env_int("PROXY_MIN_UNIQUE_IPS", 11)
+PROXY_MIN_AMAZON_OK = _env_int("PROXY_MIN_AMAZON_OK", 11)
+
+PROXY_HEALTH_CONCURRENCY = _env_int("PROXY_HEALTH_CONCURRENCY", 20)
+PROXY_CONNECT_TIMEOUT = _env_int("PROXY_CONNECT_TIMEOUT", 5)
+PROXY_READ_TIMEOUT = _env_int("PROXY_READ_TIMEOUT", 8)
+PROXY_PROBE_CACHE_TTL = _env_int("PROXY_PROBE_CACHE_TTL", 3600)
+PROXY_POOL_MAX_AGE = _env_int("PROXY_POOL_MAX_AGE", 600)
+PROXY_IDLE_TTL = _env_int("PROXY_IDLE_TTL", 1800)
+
+PROXY_IP_ENDPOINTS = (
+    "https://api.ipify.org",
+    "https://checkip.amazonaws.com",
+    "https://ifconfig.me/ip",
+)
+# 注意：不要用 robots.txt 作为可达性判据——反爬系统通常不拦截 robots.txt，
+# 实测对 69 个节点验证时 0 个因 Amazon 不可达/验证码被淘汰，双层验证形同虚设。
+# 首页会真正触发反爬路径判定，才能体现"能访问IP检测服务≠能访问Amazon"的差异。
+PROXY_AMAZON_CHECK_URL = os.environ.get(
+    "PROXY_AMAZON_CHECK_URL", "https://www.amazon.com/"
+)
+
+PROXY_SKIP_PROTOCOLS = frozenset(
+    x.strip().lower()
+    for x in os.environ.get("PROXY_SKIP_PROTOCOLS", "hysteria").split(",")
+    if x.strip()
+)
+# 默认不再来源层剔除 CDN（共享出口改由健康检查按 exit_ip 去重）。
+# 如需恢复旧行为：设置 PROXY_CDN_SERVERS=host1,host2
+PROXY_CDN_SERVERS = frozenset(
+    x.strip().lower()
+    for x in os.environ.get("PROXY_CDN_SERVERS", "").split(",")
+    if x.strip()
+)
+PROXY_IPROYAL_MARKERS = ("iproyal", "ip royal")
+PROXY_GEO_DB_FILES = ("Country.mmdb", "geoip.dat", "geosite.dat")
 
 # ── 阶段5：商品抓取（榜单批量扫描）─────────────────────────────────
 # 通用筛选条件（看板 UI 可覆盖）
