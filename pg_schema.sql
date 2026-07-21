@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS product_sightings (
     discount_pct          REAL,
     review_count          INTEGER,
     rank                  INTEGER,
-    rating                REAL,
+    -- DOUBLE PRECISION：避免 REAL(float4) 把 4.2 存成 4.1999998 导致边界筛选误拒
+    rating                DOUBLE PRECISION,
     image_url             TEXT,
     product_url           TEXT,
     has_video             INTEGER DEFAULT 0,
@@ -103,6 +104,8 @@ CREATE TABLE IF NOT EXISTS product_sightings (
     bsr_sub_category      TEXT,
     variant_option_count  INTEGER,
     other_sellers_count   INTEGER,
+    social_proof          TEXT,
+    social_proof_count    INTEGER,
     item_weight           TEXT,
     item_dimensions       TEXT,
     date_first_available  TEXT,
@@ -111,7 +114,8 @@ CREATE TABLE IF NOT EXISTS product_sightings (
     fulfillment_type      TEXT,
     country_of_origin     TEXT,
     is_bestseller         INTEGER DEFAULT 0,
-    detail_scraped        INTEGER DEFAULT 0
+    detail_scraped        INTEGER DEFAULT 0,
+    run_id                TEXT
 );
 
 -- 兼容已有库：补齐缺失列（CREATE TABLE IF NOT EXISTS 不会改旧表）
@@ -130,6 +134,8 @@ ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS bsr_sub_rank INTEGER;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS bsr_sub_category TEXT;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS variant_option_count INTEGER;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS other_sellers_count INTEGER;
+ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS social_proof TEXT;
+ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS social_proof_count INTEGER;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS item_weight TEXT;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS item_dimensions TEXT;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS date_first_available TEXT;
@@ -139,6 +145,16 @@ ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS fulfillment_type TEXT;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS country_of_origin TEXT;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS is_bestseller INTEGER DEFAULT 0;
 ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS detail_scraped INTEGER DEFAULT 0;
+ALTER TABLE product_sightings ADD COLUMN IF NOT EXISTS run_id TEXT;
+-- 已有库：REAL→DOUBLE PRECISION，再按 0.1 精度归一化（修复 4.2→4.1999998 历史漂移）
+ALTER TABLE product_sightings
+    ALTER COLUMN rating TYPE DOUBLE PRECISION
+    USING rating::double precision;
+-- 仅更新仍漂移的行，避免每次执行 schema 全表重写
+UPDATE product_sightings
+SET rating = ROUND(rating::numeric, 1)
+WHERE rating IS NOT NULL
+  AND rating IS DISTINCT FROM ROUND(rating::numeric, 1);
 
 -- 与 SQLite UNIQUE(asin, node_id, list_type) 对齐，并加上 site；NULLS NOT DISTINCT 避免 NULL 绕过唯一性
 DO $$ BEGIN
@@ -157,6 +173,8 @@ CREATE INDEX IF NOT EXISTS idx_ps_scraped    ON product_sightings(scraped_at DES
 CREATE INDEX IF NOT EXISTS idx_ps_list_type  ON product_sightings(list_type);
 CREATE INDEX IF NOT EXISTS idx_ps_site       ON product_sightings(site);
 CREATE INDEX IF NOT EXISTS idx_ps_asin_site  ON product_sightings(asin, site);
+CREATE INDEX IF NOT EXISTS idx_ps_social_proof ON product_sightings(social_proof_count);
+CREATE INDEX IF NOT EXISTS idx_ps_run_id ON product_sightings(run_id);
 
 -- ── 选品清单 ──
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -201,7 +219,7 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
     title                TEXT,
     price                TEXT,
     price_value          REAL,
-    rating               REAL,
+    rating               DOUBLE PRECISION,
     review_count         INTEGER DEFAULT 0,
     listing_date         TEXT,
     listing_age_days     INTEGER,
@@ -224,6 +242,8 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
     dim_h_in             REAL,
     variant_option_count INTEGER,
     other_sellers_count  INTEGER,
+    social_proof         TEXT,
+    social_proof_count   INTEGER,
     fba_fee              REAL,
     placement_fee        REAL,
     fulfillment_type     TEXT,
@@ -232,6 +252,16 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
     is_bestseller        INTEGER DEFAULT 0,
     scraped_at           TIMESTAMPTZ DEFAULT now()
 );
+
+ALTER TABLE new_arrivals ADD COLUMN IF NOT EXISTS social_proof TEXT;
+ALTER TABLE new_arrivals ADD COLUMN IF NOT EXISTS social_proof_count INTEGER;
+ALTER TABLE new_arrivals
+    ALTER COLUMN rating TYPE DOUBLE PRECISION
+    USING rating::double precision;
+UPDATE new_arrivals
+SET rating = ROUND(rating::numeric, 1)
+WHERE rating IS NOT NULL
+  AND rating IS DISTINCT FROM ROUND(rating::numeric, 1);
 
 DO $$ BEGIN
     IF NOT EXISTS (
@@ -251,3 +281,4 @@ CREATE INDEX IF NOT EXISTS idx_na_scraped   ON new_arrivals(scraped_at DESC);
 CREATE INDEX IF NOT EXISTS idx_na_asin_site ON new_arrivals(asin, site);
 CREATE INDEX IF NOT EXISTS idx_na_price     ON new_arrivals(price_value);
 CREATE INDEX IF NOT EXISTS idx_na_bsr_main  ON new_arrivals(bsr_main_rank);
+CREATE INDEX IF NOT EXISTS idx_na_social_proof ON new_arrivals(social_proof_count);

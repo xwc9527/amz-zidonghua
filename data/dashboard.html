@@ -211,6 +211,8 @@
     .filter-check { display: flex; align-items: center; gap: 8px; padding-top: 4px; flex-wrap: nowrap; }
     .filter-check label { font-size: 12px; color: var(--fg); cursor: pointer; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
     .filter-check input[type="checkbox"] { width: 14px; height: 14px; }
+    .run-filter-inputs input { flex: 1 1 auto; }
+    .run-filter-inputs #btnToggleRun { flex: 0 0 auto; width: auto; white-space: nowrap; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -397,6 +399,7 @@
       <div class="mini-stat-row"><span>总类目</span><span id="total">—</span></div>
       <div class="mini-stat-row"><span>总商品</span><span id="p_total_side" style="color:var(--warning)">—</span></div>
       <div class="mini-stat-row"><span>多榜出现</span><span id="p_multi_side" style="color:var(--success)">—</span></div>
+      <div class="mini-stat-row"><span>详情失败</span><span id="p_detail_failed_side" style="color:var(--danger, #dc2626)">—</span></div>
     </div>
   </aside>
 
@@ -599,10 +602,10 @@
               </div>
             </div>
             <div class="filter-item">
-              <span class="filter-label">&nbsp;</span>
-              <div class="filter-inputs" style="gap:6px;">
-                <span id="p_progress_text" style="font-size:11px; color:var(--primary); font-weight:600; min-width:14px; text-align:right;">0</span>
-                <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:5px 8px; font-size:12px; width:100%;">▶ 开始</button>
+              <span class="filter-label">社交证明(月销量)</span>
+              <div class="filter-inputs run-filter-inputs" style="gap:6px;">
+                <input type="number" id="f_social_proof_min" placeholder="最小" min="0" step="1" title="Amazon 展示的近一个月销量下限，如 500+ 按 500 计算">
+                <button class="btn btn-primary" id="btnToggleRun" onclick="toggleRun()" style="padding:5px 6px; font-size:12px;">▶ 开始</button>
               </div>
             </div>
           </div>
@@ -951,6 +954,7 @@
         variant_max: +document.getElementById('f_variant_max').value || 0,
         sellers_min: +document.getElementById('f_sellers_min').value || 0,
         sellers_max: +document.getElementById('f_sellers_max').value || 0,
+        social_proof_min: +document.getElementById('f_social_proof_min').value || 0,
         // 按当前站点本地单位录入；发往后端前统一换算为 lb / inch（与 weight_lb / dim_*_in 对齐）
         weight_min: toBackendWeight(document.getElementById('f_weight_min').value),
         weight_max: toBackendWeight(document.getElementById('f_weight_max').value),
@@ -1606,8 +1610,9 @@
     async function refreshProductStats() {
       try {
         const stamp = Date.now();
+        const siteQ = encodeURIComponent((_currentSite || 'US').toUpperCase());
         const [r, proxyR] = await Promise.all([
-          fetch(API + '/api/v2/product_stats?t=' + stamp),
+          fetch(API + '/api/v2/product_stats?site=' + siteQ + '&t=' + stamp),
           fetch(API + '/api/v2/proxy_status?t=' + stamp),
         ]);
         const d = await r.json();
@@ -1617,6 +1622,14 @@
         const total = _currentChart === 'la' ? (d.new_arrivals || 0) : (d.total_asins || 0);
         document.getElementById('p_total_side').textContent = total;
         document.getElementById('p_multi_side').textContent = _currentChart === 'la' ? 0 : (d.multi_list || 0);
+        const failedEl = document.getElementById('p_detail_failed_side');
+        if (failedEl) {
+          const failed = _currentChart === 'la' ? 0 : (d.detail_failed || 0);
+          failedEl.textContent = failed;
+          failedEl.title = failed
+            ? (`本次运行详情失败 ${failed} 个 ASIN（按 run_id 隔离；结果列表默认只展示成功项）`)
+            : '本次运行无详情失败';
+        }
         const lifecycle = d.lifecycle || proxyState.status || '';
         const preparing = ['preparing_proxy', 'proxy_ready', 'starting_crawler'].includes(lifecycle);
         if (preparing) {
@@ -1639,16 +1652,18 @@
           _isStarting = false;
           _isRunning = !!d.running;
         }
-        // 后台看门狗写入的异步失败：只提示一次，避免轮询刷屏
-        if (lifecycle === 'proxy_failed') {
+        // 后台看门狗写入的异步结束态：只提示一次；retry_pending 与 proxy_failed 分开
+        if (lifecycle === 'proxy_failed' || lifecycle === 'retry_pending') {
           const detail = proxyState.detail || {};
           const code = detail.error_code || '';
           const reason = detail.reason || '';
-          const key = (proxyState.run_id || '') + '|' + code + '|' + reason;
+          const key = (proxyState.run_id || '') + '|' + lifecycle + '|' + code + '|' + reason;
           if (key !== _lastProxyAlertKey && (code || reason)) {
             _lastProxyAlertKey = key;
-            const msg = PROXY_FAIL_ALERTS[code] || reason || code || '代理/抓取失败';
-            alert('抓取已停止\n' + msg + (code ? '\n错误码: ' + code : ''));
+            const msg = PROXY_FAIL_ALERTS[code] || reason || code
+              || (lifecycle === 'retry_pending' ? '部分节点/商品待重试' : '代理/抓取失败');
+            const title = lifecycle === 'retry_pending' ? '抓取未完全完成' : '抓取已停止';
+            alert(title + '\n' + msg + (code ? '\n错误码: ' + code : ''));
           }
         } else if (lifecycle === 'running' || lifecycle === 'idle') {
           _lastProxyAlertKey = '';
@@ -1694,6 +1709,7 @@
       { key: 'bsrSub',      label: 'BSR子类',  get: p => fmtBsr(p.bsr_sub_rank || p.bsr_sub, p.bsr_sub_category) },
       { key: 'variant',     label: '变体数',   get: p => (p.variant_option_count != null ? p.variant_option_count : '') },
       { key: 'sellers',     label: '跟卖数',   get: p => (p.other_sellers_count != null ? p.other_sellers_count : '') },
+      { key: 'socialProof', label: '月销量',   get: p => (p.social_proof_count != null ? (fmtNum(p.social_proof_count) + '+') : '') },
       { key: 'weight',      label: '重量',     get: p => p.item_weight || '' },
       { key: 'dims',        label: '尺寸',     get: p => p.item_dimensions || '' },
       { key: 'date',        label: '上架日期', get: p => p.date_first_available || p.listing_date || '' },
@@ -1801,6 +1817,7 @@
       ['bsr_sub_min', 'BSR子类排名最小'], ['bsr_sub_max', 'BSR子类排名最大'],
       ['variant_min', '变体选项数最小'], ['variant_max', '变体选项数最大'],
       ['sellers_min', '其他卖家数最小'], ['sellers_max', '其他卖家数最大'],
+      ['social_proof_min', '月销量最小'],
       ['weight_min', '商品重量最小'], ['weight_max', '商品重量最大'],
       ['fba_fee_min', 'FBA运费最小'], ['fba_fee_max', 'FBA运费最大'],
       ['dim_l', '尺寸长'], ['dim_w', '尺寸宽'], ['dim_h', '尺寸高'],
@@ -1812,6 +1829,7 @@
       'bsr_sub_min', 'bsr_sub_max',
       'variant_min', 'variant_max',
       'sellers_min', 'sellers_max',
+      'social_proof_min',
     ]);
     function _rawFilterInput(key) {
       const el = document.getElementById('f_' + key);
@@ -1895,8 +1913,6 @@
           ...filters,
         };
 
-        document.getElementById('p_progress_text').innerText = '0';
-
         _isStarting = true;
         _isRunning = true;
         _startingLabel = '准备代理';
@@ -1937,17 +1953,6 @@
           alert('启动失败: ' + e);
         }
       }
-    }
-
-    async function refreshProductProgress() {
-      try {
-        const r = await fetch(API + '/api/v2/product_progress?t=' + Date.now());
-        const d = await r.json();
-        const n = _currentChart === 'la'
-          ? (d.new_arrivals || 0)
-          : (d.product_sightings != null ? d.product_sightings : (d.total_products || 0));
-        document.getElementById('p_progress_text').innerText = n;
-      } catch(e) {}
     }
 
     async function exportExcel() {
@@ -2302,7 +2307,7 @@
     loadTaskDrillDown();
     refreshProductStats();
     loadLiveProducts();
-    setInterval(() => { refreshProductStats(); loadLiveProducts(); refreshProductProgress(); }, 10000);
+    setInterval(() => { refreshProductStats(); loadLiveProducts(); }, 10000);
     setInterval(loadStats, 15000);
     // 即使面板收起也轻量刷新状态点，便于发现抓取中
     setInterval(async () => {

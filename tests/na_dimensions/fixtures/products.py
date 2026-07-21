@@ -26,6 +26,8 @@ PRODUCTS = {
         "dim_h_in": 2.0,
         "variant_option_count": 3,
         "other_sellers_count": 2,
+        "social_proof": "1K+ bought in past month",
+        "social_proof_count": 1000,
         "fba_fee": 4.5,
         "fulfillment_type": "FBA",
         "country_of_origin": "China",
@@ -57,6 +59,8 @@ PRODUCTS = {
         "dim_h_in": 4.0,
         "variant_option_count": 1,
         "other_sellers_count": 0,
+        "social_proof": "50+ bought in past month",
+        "social_proof_count": 50,
         "fba_fee": 3.0,
         "fulfillment_type": "FBA",
         "country_of_origin": "USA",
@@ -88,6 +92,8 @@ PRODUCTS = {
         "dim_h_in": 15.0,
         "variant_option_count": 20,
         "other_sellers_count": 50,
+        "social_proof": "20K+ bought in past month",
+        "social_proof_count": 20000,
         "fba_fee": 35.0,
         "fulfillment_type": "FBM",
         "country_of_origin": "Vietnam",
@@ -119,6 +125,8 @@ PRODUCTS = {
         "dim_h_in": None,
         "variant_option_count": None,
         "other_sellers_count": None,
+        "social_proof": None,
+        "social_proof_count": None,
         "fba_fee": None,
         "fulfillment_type": None,
         "country_of_origin": None,
@@ -150,6 +158,8 @@ PRODUCTS = {
         "dim_h_in": 3.0,
         "variant_option_count": 5,
         "other_sellers_count": 8,
+        "social_proof": "5K+ bought in past month",
+        "social_proof_count": 5000,
         "fba_fee": 3.5,
         "fulfillment_type": "FBA",
         "country_of_origin": "China",
@@ -181,6 +191,8 @@ PRODUCTS = {
         "dim_h_in": 3.937007874,
         "variant_option_count": 2,
         "other_sellers_count": 1,
+        "social_proof": "100+ bought in past month",
+        "social_proof_count": 100,
         "fba_fee": 5.0,
         "fulfillment_type": "FBM",
         "country_of_origin": "Germany",
@@ -213,6 +225,8 @@ PRODUCTS = {
         "dim_h_in": 3.0,
         "variant_option_count": 4,
         "other_sellers_count": 3,
+        "social_proof": "2K+ bought in past month",
+        "social_proof_count": 2000,
         "fba_fee": 4.0,
         "fulfillment_type": "FBA",
         "country_of_origin": "China",
@@ -245,22 +259,23 @@ def detail_fields(product: dict) -> dict:
         "bsr_sub_rank", "bsr_sub_category", "item_weight", "weight_lb",
         "item_dimensions", "dim_l_in", "dim_w_in", "dim_h_in",
         "variant_option_count", "other_sellers_count", "fba_fee",
+        "social_proof", "social_proof_count",
         "fulfillment_type", "country_of_origin", "is_amazon_choice", "is_bestseller",
     ]
     return {k: product.get(k) for k in keys}
 
 
-# Pairwise 15 因子（dim 作为整体）
+# Pairwise 16 因子（dim 作为整体）
 PAIRWISE_DIMS = [
     "price", "rating", "review", "bsr_main", "bsr_sub",
-    "variant", "sellers", "weight", "dim", "fba",
+    "variant", "sellers", "social", "weight", "dim", "fba",
     "ft", "country", "ac", "bs", "date",
 ]
 
-# 严格全维度 17 因子（长宽高分开）
+# 严格全维度 18 因子（长宽高分开）
 STRICT_DIMS = [
     "price", "rating", "review", "bsr_main", "bsr_sub",
-    "variant", "sellers", "weight", "dim_l", "dim_w", "dim_h",
+    "variant", "sellers", "social", "weight", "dim_l", "dim_w", "dim_h",
     "fba", "ft", "country", "ac", "bs", "date",
 ]
 
@@ -273,6 +288,7 @@ STRICT_FULL_FILTERS = {
     "bsr_sub_min": 1, "bsr_sub_max": 5000,
     "variant_min": 1, "variant_max": 20,
     "sellers_min": 1, "sellers_max": 100,
+    "social_proof_min": 1000,
     "weight_min": 0.1, "weight_max": 10,
     "dim_l": 20, "dim_w": 15, "dim_h": 10,
     "fba_fee_min": 1, "fba_fee_max": 20,
@@ -324,6 +340,11 @@ DIM_SPEC = {
         "pass": {"sellers_min": 1, "sellers_max": 100},
         "fail": {"sellers_min": 100},
         "miss_fields": ["other_sellers_count"],
+    },
+    "social": {
+        "pass": {"social_proof_min": 1000},
+        "fail": {"social_proof_min": 99999},
+        "miss_fields": ["social_proof_count"],
     },
     "weight": {
         "pass": {"weight_min": 0.1, "weight_max": 10},

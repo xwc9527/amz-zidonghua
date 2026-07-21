@@ -18,7 +18,7 @@ def _init_tree(db: str):
     conn.execute(
         """CREATE TABLE categories (
             node_id TEXT, name TEXT, depth INTEGER,
-            parent_node_id TEXT, site TEXT,
+            parent_node_id TEXT, site TEXT, na_valid INTEGER DEFAULT 1,
             PRIMARY KEY (node_id, site)
         )"""
     )

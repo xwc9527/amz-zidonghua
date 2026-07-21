@@ -66,6 +66,8 @@ def _ensure_tables():
         discount_pct TEXT,
         rating REAL,
         review_count INTEGER,
+        social_proof TEXT,
+        social_proof_count INTEGER,
         rank INTEGER,
         image_url TEXT,
         product_url TEXT,
@@ -84,6 +86,13 @@ def _ensure_tables():
     CREATE INDEX IF NOT EXISTS idx_ps_node ON product_sightings(node_id);
     CREATE INDEX IF NOT EXISTS idx_ps_list ON product_sightings(list_type);
     """)
+    ps_existing = {row[1] for row in conn.execute("PRAGMA table_info(product_sightings)")}
+    for col, typ in (("social_proof", "TEXT"), ("social_proof_count", "INTEGER")):
+        if col not in ps_existing:
+            conn.execute(f"ALTER TABLE product_sightings ADD COLUMN {col} {typ}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ps_social_proof ON product_sightings(social_proof_count)"
+    )
     # 榜单验证列
     existing = {row[1] for row in conn.execute("PRAGMA table_info(categories)")}
     for col in ["nr_valid", "bs_valid", "ms_valid", "mw_valid"]:

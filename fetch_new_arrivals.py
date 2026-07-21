@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
     dim_h_in        REAL,
     variant_option_count INTEGER,
     other_sellers_count INTEGER,
+    social_proof    TEXT,
+    social_proof_count INTEGER,
     fba_fee         REAL,
     placement_fee   REAL,
     fulfillment_type TEXT,
@@ -202,6 +204,8 @@ _NA_EXTRA_COLS = [
     ("dim_h_in", "REAL"),
     ("variant_option_count", "INTEGER"),
     ("other_sellers_count", "INTEGER"),
+    ("social_proof", "TEXT"),
+    ("social_proof_count", "INTEGER"),
     ("fba_fee", "REAL"),
     ("placement_fee", "REAL"),
     ("fulfillment_type", "TEXT"),
@@ -241,6 +245,8 @@ CREATE TABLE IF NOT EXISTS new_arrivals (
     dim_h_in             REAL,
     variant_option_count INTEGER,
     other_sellers_count  INTEGER,
+    social_proof         TEXT,
+    social_proof_count   INTEGER,
     fba_fee              REAL,
     placement_fee        REAL,
     fulfillment_type     TEXT,
@@ -300,6 +306,9 @@ def _init_db():
         conn = _get_pg()
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_PG_SQL)
+        cur.execute("ALTER TABLE new_arrivals ADD COLUMN IF NOT EXISTS social_proof TEXT")
+        cur.execute("ALTER TABLE new_arrivals ADD COLUMN IF NOT EXISTS social_proof_count INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_na_social_proof ON new_arrivals(social_proof_count)")
         cur.execute("""
             DO $$ BEGIN
                 ALTER TABLE new_arrivals
@@ -317,6 +326,7 @@ def _init_db():
     for col, typ in _NA_EXTRA_COLS:
         if col not in existing:
             conn.execute(f"ALTER TABLE new_arrivals ADD COLUMN {col} {typ}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_na_social_proof ON new_arrivals(social_proof_count)")
     conn.commit()
     conn.close()
     _maybe_purge_stale_new_arrivals()
@@ -338,6 +348,7 @@ def _product_row_tuple(p: dict) -> tuple:
         p.get("weight_lb"), p.get("dim_l_in"),
         p.get("dim_w_in"), p.get("dim_h_in"),
         p.get("variant_option_count"), p.get("other_sellers_count"),
+        p.get("social_proof"), p.get("social_proof_count"),
         p.get("fba_fee"), p.get("placement_fee"),
         p.get("fulfillment_type"), p.get("country_of_origin"),
         1 if p.get("is_amazon_choice") else 0,
@@ -355,9 +366,10 @@ def _save_products_sqlite(products: list) -> int:
          node_id, category_name, category_depth, site,
          item_weight, item_dimensions, weight_lb, dim_l_in, dim_w_in, dim_h_in,
          variant_option_count, other_sellers_count,
+         social_proof, social_proof_count,
          fba_fee, placement_fee, fulfillment_type, country_of_origin,
          is_amazon_choice, is_bestseller)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """
     saved = 0
     with _db_lock:
@@ -384,9 +396,10 @@ def _save_products_pg(products: list) -> int:
          node_id, category_name, category_depth, site,
          item_weight, item_dimensions, weight_lb, dim_l_in, dim_w_in, dim_h_in,
          variant_option_count, other_sellers_count,
+         social_proof, social_proof_count,
          fba_fee, placement_fee, fulfillment_type, country_of_origin,
          is_amazon_choice, is_bestseller)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT ON CONSTRAINT uq_na_asin_node_site DO NOTHING
     """
     saved = 0
@@ -827,6 +840,8 @@ def _build_product_from_detail(html: str, asin: str, list_meta: dict) -> dict | 
         "dim_h_in": detail.get("dim_h_in"),
         "variant_option_count": detail.get("variant_option_count"),
         "other_sellers_count": detail.get("other_sellers_count"),
+        "social_proof": detail.get("social_proof"),
+        "social_proof_count": detail.get("social_proof_count"),
         "fba_fee": detail.get("fba_fee"),
         "placement_fee": detail.get("placement_fee"),
         "fulfillment_type": detail.get("fulfillment_type"),
@@ -1079,6 +1094,7 @@ def _build_filters_from_args(args) -> tuple[dict, dict]:
         "bsr_sub_min": args.bsr_sub_min, "bsr_sub_max": args.bsr_sub_max,
         "variant_min": args.variant_min, "variant_max": args.variant_max,
         "sellers_min": args.sellers_min, "sellers_max": args.sellers_max,
+        "social_proof_min": args.social_proof_min,
         "weight_min": args.weight_min, "weight_max": args.weight_max,
         "dim_l": args.dim_l, "dim_w": args.dim_w, "dim_h": args.dim_h,
         "fba_fee_min": args.fba_fee_min, "fba_fee_max": args.fba_fee_max,
@@ -1117,6 +1133,7 @@ def main():
     parser.add_argument("--variant-max", type=int, default=0)
     parser.add_argument("--sellers-min", type=int, default=0)
     parser.add_argument("--sellers-max", type=int, default=0)
+    parser.add_argument("--social-proof-min", type=int, default=0)
     parser.add_argument("--weight-min", type=float, default=0)
     parser.add_argument("--weight-max", type=float, default=0)
     parser.add_argument("--dim-l", type=float, default=0)
@@ -1413,6 +1430,7 @@ def export_excel(site: str = None, signal_only: bool = False) -> str:
                image_url, product_url, node_id, category_name, category_depth,
                site, item_weight, item_dimensions, weight_lb,
                dim_l_in, dim_w_in, dim_h_in, fba_fee, placement_fee,
+               social_proof, social_proof_count,
                fulfillment_type, country_of_origin, is_amazon_choice, is_bestseller,
                scraped_at
         FROM new_arrivals WHERE 1=1
@@ -1441,6 +1459,7 @@ def export_excel(site: str = None, signal_only: bool = False) -> str:
             "image_url", "product_url", "node_id", "category_name", "category_depth",
             "site", "item_weight", "item_dimensions", "weight_lb",
             "dim_l_in", "dim_w_in", "dim_h_in", "fba_fee", "placement_fee",
+            "social_proof", "social_proof_count",
             "fulfillment_type", "country_of_origin", "is_amazon_choice", "is_bestseller",
             "scraped_at",
         )] for r in rows]
@@ -1464,7 +1483,8 @@ def export_excel(site: str = None, signal_only: bool = False) -> str:
         "BSR子类排名", "BSR子类",
         "图片URL", "商品URL", "节点ID", "类目名", "类目深度",
         "站点", "重量", "尺寸", "重量lb", "长in", "宽in", "高in",
-        "FBA运费", "配置费", "配送方式", "产地", "Amazon精选", "畅销标记",
+        "FBA运费", "配置费", "社交证明原文", "月销量下限",
+        "配送方式", "产地", "Amazon精选", "畅销标记",
         "抓取时间",
     ]
     ws.append(headers)

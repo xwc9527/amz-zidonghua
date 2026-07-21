@@ -278,6 +278,7 @@ class TestFetchProductsDetailFailurePropagation(unittest.TestCase):
 
         with mock.patch.object(fp, "save_link_validity"), \
              mock.patch.object(fp, "save_products", return_value=1), \
+             mock.patch.object(fp, "_load_cached_detail", return_value=None), \
              mock.patch.object(fp, "_mark_detail_failed") as mark_failed:
             status, err_code, found, attempts = fp.process_node(
                 self._NODE, ["new-releases"], review_max=0, min_list_size=0,
@@ -287,7 +288,8 @@ class TestFetchProductsDetailFailurePropagation(unittest.TestCase):
         self.assertEqual(status, "error")
         self.assertTrue(err_code.startswith("DETAIL_FETCH_FAILED"))
         self.assertEqual(found, 1)
-        mark_failed.assert_called_once_with("B000000001")
+        mark_failed.assert_called_once()
+        self.assertEqual(mark_failed.call_args[0][0], "B000000001")
 
     def test_detail_fetch_success_marks_node_done(self):
         import fetch_products as fp
@@ -300,6 +302,7 @@ class TestFetchProductsDetailFailurePropagation(unittest.TestCase):
 
         with mock.patch.object(fp, "save_link_validity"), \
              mock.patch.object(fp, "save_products", return_value=1), \
+             mock.patch.object(fp, "_load_cached_detail", return_value=None), \
              mock.patch.object(fp, "parse_detail_fields", return_value={"price": 9.99}), \
              mock.patch.object(fp, "estimate_fba_fees", return_value={}), \
              mock.patch.object(fp, "_check_detail_filters", return_value=True), \

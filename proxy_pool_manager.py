@@ -59,6 +59,8 @@ STATUS_PROXY_READY = "proxy_ready"
 STATUS_STARTING_CRAWLER = "starting_crawler"
 STATUS_RUNNING = "running"
 STATUS_PROXY_FAILED = "proxy_failed"
+# 业务节点未完成（非代理池故障）：可再次开始只重试失败项
+STATUS_RETRY_PENDING = "retry_pending"
 STATUS_STOPPING = "stopping"
 
 _state_lock = threading.RLock()
@@ -99,7 +101,10 @@ def set_status(status: str, run_id: str = "", **detail) -> dict:
         if run_id:
             _status["run_id"] = run_id
         _status["updated_at"] = _utc_now()
-        if detail:
+        # idle/preparing/retry_pending 时替换 detail，避免上一轮 error_code/return_code 残留
+        if status in (STATUS_IDLE, STATUS_PREPARING, STATUS_RETRY_PENDING):
+            _status["detail"] = dict(detail) if detail else {}
+        elif detail:
             _status["detail"] = {**(_status.get("detail") or {}), **detail}
         snap = dict(_status)
         snap["detail"] = dict(_status.get("detail") or {})

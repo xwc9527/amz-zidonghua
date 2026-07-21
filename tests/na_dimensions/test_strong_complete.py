@@ -21,6 +21,7 @@ from tests.na_dimensions.helpers import (
 # (名称, 因子列表)
 STRONG = [
     ("价格+评论数", ["price", "review"]),
+    ("月销量+评论数", ["social", "review"]),
     ("评分+评论数", ["rating", "review"]),
     ("BSR大类+BSR子类", ["bsr_main", "bsr_sub"]),
     ("重量+尺寸", ["weight", "dim"]),

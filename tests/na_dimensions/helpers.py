@@ -111,6 +111,8 @@ def init_new_arrivals_table(db_path: str):
             dim_h_in REAL,
             variant_option_count INTEGER,
             other_sellers_count INTEGER,
+            social_proof TEXT,
+            social_proof_count INTEGER,
             fba_fee REAL,
             placement_fee REAL,
             fulfillment_type TEXT,
@@ -135,6 +137,7 @@ def insert_products(db_path: str, products: list[dict] | None = None, *, test_ru
         "bsr_sub_category", "node_id", "category_name", "category_depth", "site",
         "item_weight", "item_dimensions", "weight_lb", "dim_l_in", "dim_w_in",
         "dim_h_in", "variant_option_count", "other_sellers_count", "fba_fee",
+        "social_proof", "social_proof_count",
         "fulfillment_type", "country_of_origin", "is_amazon_choice", "is_bestseller",
     ]
     for p in products:

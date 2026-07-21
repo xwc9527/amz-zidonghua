@@ -15,7 +15,7 @@ from detail_parser import (
     extract_image_url,
 )
 from crawl_checkpoint import ProductsCheckpoint, canonical_signature
-from config import PROXY_MIN_START_NODES, get_marketplace
+from config import DB_FILE, PROXY_MIN_START_NODES, get_marketplace
 from proxy_daemon import touch_crawl_activity
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -35,7 +35,8 @@ _log.addHandler(_sh)
 
 # ── 配置 ────────────────────────────────────────────────────────────
 BASE    = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE, "data", "categories.db")
+# 尊重 DB_FILE / AMZ_DB_FILE（测试隔离与正式库均可覆盖）
+DB_PATH = DB_FILE
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
 _mp     = get_marketplace("US")
@@ -215,6 +216,8 @@ _DETAIL_COLS = [
     ("bsr_sub_category", "TEXT"),
     ("variant_option_count", "INTEGER"),
     ("other_sellers_count", "INTEGER"),
+    ("social_proof", "TEXT"),
+    ("social_proof_count", "INTEGER"),
     ("item_weight", "TEXT"),
     ("item_dimensions", "TEXT"),
     ("weight_lb", "REAL"),
@@ -230,6 +233,20 @@ _DETAIL_COLS = [
     ("country_of_origin", "TEXT"),
     ("is_bestseller", "INTEGER DEFAULT 0"),
     ("detail_scraped", "INTEGER DEFAULT 0"),
+    ("run_id", "TEXT"),
+]
+
+# 可从已成功详情行复用的字段（不含详情状态本身）。
+# 不含 price / fba_fee / placement_fee：价格随榜单变化，费用需按当前价重算。
+_CACHED_DETAIL_KEYS = [
+    "bsr_main_rank", "bsr_main_category", "bsr_sub_rank", "bsr_sub_category",
+    "variant_option_count", "other_sellers_count",
+    "social_proof", "social_proof_count",
+    "item_weight", "item_dimensions",
+    "weight_lb", "dim_l_in", "dim_w_in", "dim_h_in",
+    "date_first_available", "shipping_fee", "shipping_fee_value",
+    "fulfillment_type", "country_of_origin",
+    "is_bestseller", "is_amazon_choice",
 ]
 
 
@@ -273,6 +290,10 @@ def db_conn():
             existing.add(col)
     if "site" not in existing:
         c.execute("ALTER TABLE product_sightings ADD COLUMN site TEXT DEFAULT 'US'")
+    if "run_id" not in existing:
+        c.execute("ALTER TABLE product_sightings ADD COLUMN run_id TEXT")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ps_social_proof ON product_sightings(social_proof_count)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ps_run_id ON product_sightings(run_id)")
     c.commit()
     return c
 
@@ -309,30 +330,27 @@ def get_descendant_nodes(root_ids: list, lists: list, site: str = None,
         _log.info(f"[fetch_products] [{site}] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
         return result
 
-    roots = conn.execute(
-        f"SELECT node_id, url FROM categories WHERE node_id IN ({placeholders}) AND site = ?",
-        [*root_ids, site]
+    # 按 parent_node_id 递归展开，不依赖 URL 前缀（不同榜单 URL 格式下前缀会漏抓）
+    rows = conn.execute(
+        f"""WITH RECURSIVE sub AS (
+                SELECT node_id, url, name, depth FROM categories
+                WHERE node_id IN ({placeholders}) AND site = ?
+                  AND node_id IS NOT NULL AND node_id != ''
+                UNION
+                SELECT c.node_id, c.url, c.name, c.depth FROM categories c
+                JOIN sub s ON c.parent_node_id = s.node_id
+                WHERE c.site = ? AND c.node_id IS NOT NULL AND c.node_id != ''
+            )
+            SELECT node_id, url, name, depth FROM sub
+            ORDER BY depth DESC, name""",
+        [*root_ids, site, site],
     ).fetchall()
-    if not roots:
-        conn.close()
-        return []
-    like_clauses = []
-    like_params = []
-    for r in roots:
-        prefix = r["url"].rstrip("/") + "/"
-        like_clauses.append("url LIKE ?")
-        like_params.append(f"{prefix}%")
-    like_clauses.append(f"node_id IN ({placeholders})")
-    sql = f"""
-        SELECT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL AND site = ?
-          AND ({" OR ".join(like_clauses)})
-        ORDER BY depth DESC, name
-    """
-    rows = conn.execute(sql, [site, *like_params, *root_ids]).fetchall()
     conn.close()
     result = _dedupe_category_nodes([dict(r) for r in rows])
-    _log.info(f"[fetch_products] [{site}] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
+    _log.info(
+        f"[fetch_products] [{site}] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点"
+        f"（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）"
+    )
     return result
 
 
@@ -348,28 +366,21 @@ def _get_descendant_nodes_pg(root_ids, include_descendants: bool = True):
         _log.info(f"[fetch_products] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
         return result
 
-    roots = _pg_fetchall(
-        f"SELECT node_id, path FROM categories WHERE site = %s AND node_id IN ({ph})",
-        [_SITE, *root_ids],
-    )
-    if not roots:
-        return []
-    clauses = []
-    params = [_SITE]
-    for r in roots:
-        if r.get("path"):
-            clauses.append("path <@ %s::ltree")
-            params.append(str(r["path"]))
-    if len(params) == 1:
-        # 所有节点都无 path 时回退到 node_id IN（params 仅含 site）
-        clauses.append(f"node_id IN ({ph})")
-        params.extend(root_ids)
-    sql = f"""
-        SELECT node_id, url, name, depth FROM categories
-        WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(clauses)})
-        ORDER BY depth DESC, name
-    """
-    result = _dedupe_category_nodes(_pg_fetchall(sql, params))
+    # 与 SQLite 一致：按 parent_node_id 递归，避免 path/ltree 缺失或 URL 格式差异导致漏展开
+    result = _dedupe_category_nodes(_pg_fetchall(
+        f"""WITH RECURSIVE sub AS (
+                SELECT node_id, url, name, depth FROM categories
+                WHERE node_id IN ({ph}) AND site = %s
+                  AND node_id IS NOT NULL AND node_id != ''
+                UNION
+                SELECT c.node_id, c.url, c.name, c.depth FROM categories c
+                JOIN sub s ON c.parent_node_id = s.node_id
+                WHERE c.site = %s AND c.node_id IS NOT NULL AND c.node_id != ''
+            )
+            SELECT node_id, url, name, depth FROM sub
+            ORDER BY depth DESC, name""",
+        [*root_ids, _SITE, _SITE],
+    ))
     _log.info(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先）")
     return result
 
@@ -540,16 +551,26 @@ def save_products(products: list):
          rating, review_count, rank, image_url, product_url,
          has_video, is_amazon_choice,
          node_id, category_name, category_slug, category_depth,
-         list_type, list_total, site)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         list_type, list_total, site, run_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """
+    touch_sql = """
+        UPDATE product_sightings
+        SET run_id=?, name=COALESCE(?, name), price=COALESCE(?, price),
+            price_raw=COALESCE(?, price_raw), rating=COALESCE(?, rating),
+            review_count=COALESCE(?, review_count), rank=COALESCE(?, rank),
+            image_url=COALESCE(?, image_url), product_url=COALESCE(?, product_url),
+            list_total=COALESCE(?, list_total)
+        WHERE asin=? AND node_id=? AND list_type=? AND site=?
     """
     saved = 0
     with _db_lock:
         conn = db_conn()
         try:
             for p in products:
+                site = p.get("site", _SITE)
                 try:
-                    conn.execute(sql, (
+                    cur = conn.execute(sql, (
                         p["asin"], p.get("name"), p.get("price"),
                         p.get("price_raw"), p.get("original_price"),
                         p.get("discount_pct"), p.get("rating"),
@@ -559,8 +580,16 @@ def save_products(products: list):
                         p["node_id"], p.get("category_name"),
                         p.get("category_slug"), p.get("category_depth"),
                         p["list_type"], p.get("list_total"),
-                        p.get("site", _SITE),
+                        site, _RUN_ID,
                     ))
+                    if cur.rowcount == 0:
+                        # 已存在：刷新 run_id 与列表字段，保留已有详情
+                        conn.execute(touch_sql, (
+                            _RUN_ID, p.get("name"), p.get("price"), p.get("price_raw"),
+                            p.get("rating"), p.get("review_count"), p.get("rank"),
+                            p.get("image_url"), p.get("product_url"), p.get("list_total"),
+                            p["asin"], p["node_id"], p["list_type"], site,
+                        ))
                     saved += 1
                 except sqlite3.IntegrityError:
                     pass
@@ -577,8 +606,8 @@ def _save_products_pg(products):
          rating, review_count, rank, image_url, product_url,
          has_video, is_amazon_choice,
          node_id, category_name, category_slug, category_depth,
-         list_type, list_total, site)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+         list_type, list_total, site, run_id)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT ON CONSTRAINT uq_ps_asin_node_list_site
         DO UPDATE SET
             name = EXCLUDED.name,
@@ -590,6 +619,7 @@ def _save_products_pg(products):
             image_url = EXCLUDED.image_url,
             product_url = EXCLUDED.product_url,
             list_total = EXCLUDED.list_total,
+            run_id = EXCLUDED.run_id,
             scraped_at = now()
     """
     saved = 0
@@ -608,7 +638,7 @@ def _save_products_pg(products):
                     p.get("node_id"), p.get("category_name"),
                     p.get("category_slug"), p.get("category_depth"),
                     p["list_type"], p.get("list_total"),
-                    p.get("site", _SITE),
+                    p.get("site", _SITE), _RUN_ID,
                 ))
                 saved += 1
             except Exception:
@@ -758,13 +788,15 @@ def parse_products(html: str, node_id: str, category_name: str,
             if rt_text.isdigit():
                 p["review_count"] = int(rt_text)
 
-        # 排名
+        # 排名：优先读徽章；Amazon 当前 DOM 常无 .zg-badge-text，回退到分页顺序位
         rank_el = item.select_one(".zg-badge-text")
         if rank_el:
             rk = rank_el.get_text(strip=True).lstrip("#")
             if rk.isdigit():
                 p["rank"] = int(rk)
                 list_position = p["rank"]
+        if "rank" not in p:
+            p["rank"] = list_position
 
         if list_limit > 0 and list_position > list_limit:
             continue
@@ -851,13 +883,79 @@ _log.info("[fetch_products] 模块加载完成")
 
 
 
+def _load_cached_detail(asin: str) -> dict | None:
+    """加载同站点任意已成功详情，供跨榜单/断点复用（仍需重跑当前筛选）。"""
+    cols = ", ".join(_CACHED_DETAIL_KEYS)
+    with _db_lock:
+        if DB_BACKEND == "pg":
+            rows = _pg_fetchall(
+                f"SELECT {cols} FROM product_sightings "
+                "WHERE asin=%s AND site=%s AND detail_scraped=1 LIMIT 1",
+                (asin, _SITE),
+            )
+            return dict(rows[0]) if rows else None
+        conn = db_conn()
+        try:
+            row = conn.execute(
+                f"SELECT {cols} FROM product_sightings "
+                "WHERE asin=? AND site=? AND detail_scraped=1 LIMIT 1",
+                (asin, _SITE),
+            ).fetchone()
+            return {k: row[k] for k in _CACHED_DETAIL_KEYS} if row else None
+        finally:
+            conn.close()
+
+
+def _finalize_detail(product: dict, detail: dict, filters: dict) -> bool:
+    """把详情写回当前 (asin,node_id,list_type,site)；筛选失败只删当前归属行。
+    返回 True=保留，False=被筛选剔除。"""
+    payload = dict(detail)
+    # 始终优先当前榜单价；丢弃缓存/旧详情中的派生费用，按当前价重算
+    current_price = product.get("price")
+    if current_price is not None:
+        payload["price"] = current_price
+    payload.pop("fba_fee", None)
+    payload.pop("placement_fee", None)
+    _attach_normalized_dims(payload)
+    if payload.get("item_weight") is not None or payload.get("item_dimensions") is not None:
+        fees = estimate_fba_fees(
+            _SITE,
+            payload.get("item_weight"),
+            payload.get("item_dimensions"),
+            payload.get("price"),
+        )
+        if fees.get("fba_fee") is not None:
+            payload["fba_fee"] = fees["fba_fee"]
+        if fees.get("placement_fee") is not None:
+            payload["placement_fee"] = fees["placement_fee"]
+    payload["detail_scraped"] = 1
+    payload["run_id"] = _RUN_ID
+
+    if filters and not _check_detail_filters(payload, filters):
+        _delete_sighting(
+            product["asin"],
+            node_id=product.get("node_id"),
+            list_type=product.get("list_type"),
+        )
+        with _stats_lock:
+            _stats["products_saved"] -= 1
+        return False
+
+    _update_sighting_detail(
+        product["asin"], payload,
+        node_id=product.get("node_id"),
+        list_type=product.get("list_type"),
+    )
+    product.update(payload)
+    return True
+
+
 def enrich_with_details(products: list, client: WorkerProxyClient,
                         delay: float, filters: dict = None) -> int:
     """对列表页抓到的商品逐个请求详情页，补全字段并 UPDATE 到数据库。
-    不符合筛选条件的商品从数据库删除。
-    详情请求/解析失败时标记 detail_scraped=2，结果接口默认不展示。
-    返回详情抓取失败（非"筛选剔除"）的商品数，供调用方判断是否需要
-    将本节点标记为 error 以便下次断点重试详情阶段。"""
+    不符合筛选条件的商品从数据库删除（仅当前榜单归属）。
+    已有成功详情时复用并重跑当前筛选，避免漏填新归属行或沿用旧筛选结果。
+    返回详情抓取失败（非"筛选剔除"）的商品数，供调用方将节点标为 error。"""
     if not products:
         return 0
     if filters is None:
@@ -865,118 +963,157 @@ def enrich_with_details(products: list, client: WorkerProxyClient,
     fetch_failures = 0
     for p in products:
         asin = p["asin"]
-        url = f"{_DOMAIN}/dp/{asin}"
-        referer = p.get("product_url", f"{_DOMAIN}/s?k={asin}")
         try:
+            cached = _load_cached_detail(asin)
+            if cached is not None:
+                _finalize_detail(p, cached, filters)
+                continue
+
+            url = f"{_DOMAIN}/dp/{asin}"
+            referer = p.get("product_url", f"{_DOMAIN}/s?k={asin}")
             outcome = client.get(url, phase="DETAIL", item_id=asin, referer=referer)
             raise_if_pool_below_minimum(outcome)
             if not outcome.ok or outcome.status_code != 200:
-                _mark_detail_failed(asin)
+                _mark_detail_failed(
+                    asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+                )
                 fetch_failures += 1
                 continue
             detail = parse_detail_fields(outcome.html or "")
             if not detail:
-                _mark_detail_failed(asin)
+                # HTTP 200 但解析为空（验证码/结构变化）必须计入失败
+                _mark_detail_failed(
+                    asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+                )
+                fetch_failures += 1
                 continue
-            # 列表价用于 Low-Price FBA（<$10）判定
-            if p.get("price") is not None and detail.get("price") is None:
-                detail["price"] = p["price"]
-            _attach_normalized_dims(detail)
-            fees = estimate_fba_fees(
-                _SITE,
-                detail.get("item_weight"),
-                detail.get("item_dimensions"),
-                detail.get("price") if detail.get("price") is not None else p.get("price"),
-            )
-            if fees.get("fba_fee") is not None:
-                detail["fba_fee"] = fees["fba_fee"]
-            if fees.get("placement_fee") is not None:
-                detail["placement_fee"] = fees["placement_fee"]
-            detail["detail_scraped"] = 1
-
-            # 详情页筛选 — 按 asin+site 删除，避免误伤其他站点
-            if filters and not _check_detail_filters(detail, filters):
-                _delete_sighting(asin)
-                with _stats_lock:
-                    _stats["products_saved"] -= 1
-                continue
-
-            # UPDATE DB — 按 asin+site
-            _update_sighting_detail(asin, detail)
-            p.update(detail)
+            _finalize_detail(p, detail, filters)
         except ProxyRequiredError:
             raise
         except (KeyError, TypeError, ValueError, AttributeError) as e:
-            _mark_detail_failed(asin)
+            _mark_detail_failed(
+                asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+            )
             fetch_failures += 1
             _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
-            _mark_detail_failed(asin)
+            _mark_detail_failed(
+                asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+            )
             fetch_failures += 1
             _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
         time.sleep(_pool_delay(delay, getattr(client, "pool", None)) + random.uniform(0, delay * 0.3))
     return fetch_failures
 
 
-def _delete_sighting(asin: str):
-    """按 asin + 当前站点删除 product_sightings 记录。"""
+def _delete_sighting(asin: str, node_id: str = None, list_type: str = None):
+    """删除当前归属行；未传 node/list 时保持 asin+site（兼容旧调用）。"""
     with _db_lock:
         if DB_BACKEND == "pg":
-            _pg_execute(
-                "DELETE FROM product_sightings WHERE asin=%s AND site=%s",
-                (asin, _SITE),
-            )
+            if node_id is not None and list_type is not None:
+                _pg_execute(
+                    "DELETE FROM product_sightings "
+                    "WHERE asin=%s AND site=%s AND node_id=%s AND list_type=%s",
+                    (asin, _SITE, node_id, list_type),
+                )
+            else:
+                _pg_execute(
+                    "DELETE FROM product_sightings WHERE asin=%s AND site=%s",
+                    (asin, _SITE),
+                )
         else:
             conn = db_conn()
             try:
-                conn.execute(
-                    "DELETE FROM product_sightings WHERE asin=? AND site=?",
-                    (asin, _SITE),
-                )
+                if node_id is not None and list_type is not None:
+                    conn.execute(
+                        "DELETE FROM product_sightings "
+                        "WHERE asin=? AND site=? AND node_id=? AND list_type=?",
+                        (asin, _SITE, node_id, list_type),
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM product_sightings WHERE asin=? AND site=?",
+                        (asin, _SITE),
+                    )
                 conn.commit()
             finally:
                 conn.close()
 
 
-def _mark_detail_failed(asin: str):
-    """详情抓取失败：detail_scraped=2，结果接口默认不返回。"""
+def _mark_detail_failed(asin: str, node_id: str = None, list_type: str = None):
+    """详情抓取失败：当前归属行 detail_scraped=2，并写入本次 run_id。"""
     with _db_lock:
         if DB_BACKEND == "pg":
-            _pg_execute(
-                "UPDATE product_sightings SET detail_scraped=2 WHERE asin=%s AND site=%s",
-                (asin, _SITE),
-            )
+            if node_id is not None and list_type is not None:
+                _pg_execute(
+                    "UPDATE product_sightings SET detail_scraped=2, run_id=%s "
+                    "WHERE asin=%s AND site=%s AND node_id=%s AND list_type=%s",
+                    (_RUN_ID, asin, _SITE, node_id, list_type),
+                )
+            else:
+                _pg_execute(
+                    "UPDATE product_sightings SET detail_scraped=2, run_id=%s "
+                    "WHERE asin=%s AND site=%s",
+                    (_RUN_ID, asin, _SITE),
+                )
         else:
             conn = db_conn()
             try:
-                conn.execute(
-                    "UPDATE product_sightings SET detail_scraped=2 WHERE asin=? AND site=?",
-                    (asin, _SITE),
-                )
+                if node_id is not None and list_type is not None:
+                    conn.execute(
+                        "UPDATE product_sightings SET detail_scraped=2, run_id=? "
+                        "WHERE asin=? AND site=? AND node_id=? AND list_type=?",
+                        (_RUN_ID, asin, _SITE, node_id, list_type),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE product_sightings SET detail_scraped=2, run_id=? "
+                        "WHERE asin=? AND site=?",
+                        (_RUN_ID, asin, _SITE),
+                    )
                 conn.commit()
             finally:
                 conn.close()
 
 
-def _update_sighting_detail(asin: str, detail: dict):
-    """按 asin + 当前站点更新详情字段。"""
+def _update_sighting_detail(asin: str, detail: dict,
+                            node_id: str = None, list_type: str = None):
+    """更新详情：优先写当前归属行；否则回退 asin+site。"""
+    detail = dict(detail)
+    detail.setdefault("run_id", _RUN_ID)
     with _db_lock:
         if DB_BACKEND == "pg":
             sets = ", ".join(f"{k}=%s" for k in detail)
-            vals = list(detail.values()) + [asin, _SITE]
-            _pg_execute(
-                f"UPDATE product_sightings SET {sets} WHERE asin=%s AND site=%s",
-                vals,
-            )
-        else:
-            sets = ", ".join(f"{k}=?" for k in detail)
-            vals = list(detail.values()) + [asin, _SITE]
-            conn = db_conn()
-            try:
-                conn.execute(
-                    f"UPDATE product_sightings SET {sets} WHERE asin=? AND site=?",
+            if node_id is not None and list_type is not None:
+                vals = list(detail.values()) + [asin, _SITE, node_id, list_type]
+                _pg_execute(
+                    f"UPDATE product_sightings SET {sets} "
+                    "WHERE asin=%s AND site=%s AND node_id=%s AND list_type=%s",
                     vals,
                 )
+            else:
+                vals = list(detail.values()) + [asin, _SITE]
+                _pg_execute(
+                    f"UPDATE product_sightings SET {sets} WHERE asin=%s AND site=%s",
+                    vals,
+                )
+        else:
+            sets = ", ".join(f"{k}=?" for k in detail)
+            conn = db_conn()
+            try:
+                if node_id is not None and list_type is not None:
+                    vals = list(detail.values()) + [asin, _SITE, node_id, list_type]
+                    conn.execute(
+                        f"UPDATE product_sightings SET {sets} "
+                        "WHERE asin=? AND site=? AND node_id=? AND list_type=?",
+                        vals,
+                    )
+                else:
+                    vals = list(detail.values()) + [asin, _SITE]
+                    conn.execute(
+                        f"UPDATE product_sightings SET {sets} WHERE asin=? AND site=?",
+                        vals,
+                    )
                 conn.commit()
             finally:
                 conn.close()
@@ -1077,7 +1214,15 @@ def process_node(node: dict, lists: list, review_max: int,
             if detail_failures:
                 with _stats_lock:
                     _stats["errors"] += detail_failures
-                node_error = f"DETAIL_FETCH_FAILED:{detail_failures}"
+                # 任意详情失败都标 error，断点可重试；已成功 ASIN 由 enrich 跳过，不会重复请求
+                if detail_failures >= len(all_products):
+                    node_error = f"DETAIL_FETCH_FAILED:{detail_failures}"
+                else:
+                    node_error = f"DETAIL_PARTIAL:{detail_failures}/{len(all_products)}"
+                    _log.warning(
+                        "[detail] node=%s list=%s partial_failures=%d/%d（节点记 error 以便重试失败 ASIN）",
+                        node_id, list_type, detail_failures, len(all_products),
+                    )
 
     with _stats_lock:
         _stats["done_nodes"] += 1
@@ -1178,8 +1323,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     _log.info(
         f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单 "
         f"(待处理 {len(remaining)}, 深度优先 {depth_hint}), "
-        f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s",
-        flush=True,
+        f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s"
     )
     _log.info("[fetch_products] run=%s checkpoint=%s", _RUN_ID, _checkpoint.path)
 
@@ -1338,6 +1482,7 @@ if __name__ == "__main__":
     parser.add_argument("--variant-max",  type=int, default=0)
     parser.add_argument("--sellers-min",  type=int, default=0)
     parser.add_argument("--sellers-max",  type=int, default=0)
+    parser.add_argument("--social-proof-min", type=int, default=0)
     parser.add_argument("--weight-min", type=float, default=0)
     parser.add_argument("--weight-max", type=float, default=0)
     parser.add_argument("--dim-l", type=float, default=0)
@@ -1381,6 +1526,7 @@ if __name__ == "__main__":
         "bsr_sub_min": args.bsr_sub_min, "bsr_sub_max": args.bsr_sub_max,
         "variant_min": args.variant_min, "variant_max": args.variant_max,
         "sellers_min": args.sellers_min, "sellers_max": args.sellers_max,
+        "social_proof_min": args.social_proof_min,
         "weight_min": args.weight_min, "weight_max": args.weight_max,
         "dim_l": args.dim_l, "dim_w": args.dim_w, "dim_h": args.dim_h,
         "fba_fee_min": args.fba_fee_min, "fba_fee_max": args.fba_fee_max,

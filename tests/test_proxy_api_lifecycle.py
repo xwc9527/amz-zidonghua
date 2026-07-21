@@ -32,17 +32,25 @@ class TestProxyApiLifecycle(unittest.IsolatedAsyncioTestCase):
                                 with mock.patch.object(api_server, "set_proxy_status") as status_mock:
                                     api_server._watch_and_sleep_proxy(
                                         old_proc, 5, "START-1", "PROXY-OLD", 0.0,
-                                        ["python", "fetch_new_arrivals.py"], {"AMZ_RUN_ID": "START-1"}, 0,
+                                        ["python", "fetch_new_arrivals.py"], {"AMZ_RUN_ID": "STALE"}, 0,
                                     )
         # 运行时恢复委托常驻守护进程（force=False），不再与它抢占 Mihomo 做完整冷启动
         ensure_mock.assert_called_once_with(force=False)
         popen_mock.assert_called_once()
-        self.assertTrue(any(
-            call.args and call.args[0] == api_server.STATUS_RUNNING
+        resume_env = popen_mock.call_args.kwargs.get("env") or {}
+        self.assertEqual(resume_env.get("AMZ_RUN_ID"), "PROXY-OLD")
+        running_calls = [
+            call for call in status_mock.call_args_list
+            if call.args and call.args[0] == api_server.STATUS_RUNNING
             and call.kwargs.get("resumed_from_checkpoint") is True
-            for call in status_mock.call_args_list
-        ))
+        ]
+        self.assertEqual(len(running_calls), 1)
+        self.assertEqual(running_calls[0].kwargs.get("run_id"), "PROXY-OLD")
+        self.assertEqual(running_calls[0].kwargs.get("proxy_prepare_run_id"), "PROXY-RECOVERED")
         thread_mock.assert_called_once()
+        # 看门狗继续跟踪原抓取 run_id，避免 product_stats 切到新 prepare ID
+        self.assertEqual(thread_mock.call_args.kwargs["args"][3], "PROXY-OLD")
+        self.assertEqual(thread_mock.call_args.kwargs["args"][6].get("AMZ_RUN_ID"), "PROXY-OLD")
         self.assertFalse(prepare_lock.locked())
 
     def test_runtime_pool_recovery_is_bounded(self):
@@ -76,8 +84,9 @@ class TestProxyApiLifecycle(unittest.IsolatedAsyncioTestCase):
                 with mock.patch.object(api_server, "_proxy_sleep"):
                     with mock.patch.object(api_server, "set_proxy_status") as status_mock:
                         api_server._watch_and_sleep_proxy(proc, 10, "START-3", "PROXY-3", 0.0)
-        self.assertEqual(status_mock.call_args.args[0], api_server.STATUS_PROXY_FAILED)
+        self.assertEqual(status_mock.call_args.args[0], api_server.STATUS_RETRY_PENDING)
         self.assertEqual(status_mock.call_args.kwargs["error_code"], "CRAWL_RETRY_PENDING")
+        self.assertTrue(status_mock.call_args.kwargs.get("pool_ready"))
 
     def test_natural_end_sets_idle_without_idle_timer(self):
         """常驻守护进程/独立 Mihomo 一直运行，抓取自然结束后不再需要延迟关闭

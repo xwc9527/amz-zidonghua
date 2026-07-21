@@ -112,6 +112,14 @@ def run_single_dimension_tests(col: SuiteCollector):
                   value=3, list_level=False, min_key="variant_min", max_key="variant_max")
     _range_matrix(col, dim="其他卖家数", field="other_sellers_count", product_key="A",
                   value=2, list_level=False, min_key="sellers_min", max_key="sellers_max")
+    social = detail_fields(PRODUCTS["A"])
+    _ok(col, "SD-SOCIAL-MIN-HIT", "月销量", "单维度",
+        check_detail_filters(social, {"social_proof_min": 1000}) is True, True, True)
+    _ok(col, "SD-SOCIAL-MIN-MISS", "月销量", "单维度",
+        check_detail_filters(social, {"social_proof_min": 1001}) is False, False, False)
+    _ok(col, "SD-SOCIAL-MISSING", "月销量", "缺失值",
+        check_detail_filters(detail_fields(PRODUCTS["D"]), {"social_proof_min": 1}) is False,
+        False, False, severity="P1")
     _range_matrix(col, dim="重量", field="weight_lb", product_key="A",
                   value=1.5, list_level=False, min_key="weight_min", max_key="weight_max")
     _range_matrix(col, dim="FBA费用", field="fba_fee", product_key="A",
@@ -225,6 +233,7 @@ def run_scrape_query_consistency(col: SuiteCollector):
         ("CQ-WEIGHT", "重量", {"weight_max": 2.0, "site": "US"}),
         ("CQ-DIM", "尺寸", {"dim_l": 12, "dim_w": 8, "dim_h": 4, "site": "US"}),
         ("CQ-FBA", "FBA费用", {"fba_fee_max": 10, "site": "US"}),
+        ("CQ-SOCIAL", "月销量", {"social_proof_min": 1000, "site": "US"}),
         ("CQ-FT", "配送模式", {"fulfillment_type": "FBA", "site": "US"}),
         ("CQ-COO", "产地", {"country": "China", "site": "US"}),
         ("CQ-AC", "Amazon精选", {"amazons_choice": True, "site": "US"}),

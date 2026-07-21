@@ -109,11 +109,18 @@ def print_report(col: SuiteCollector, started: float, snap_before: dict, snap_af
     # 若哈希变了但无授权写入正式库 → 污染
     iso_fail = any(r.status == "FAIL" and r.dimension == "测试隔离" for r in col.results)
 
-    pw_ok = pw.get("actual_pairs") == 105 and pw.get("expected_pairs") == 105
+    expected_pairs = int(pw.get("expected_pairs") or 0)
+    pw_ok = (
+        expected_pairs > 0
+        and pw.get("actual_pairs") == expected_pairs
+        and not pw.get("missing_pairs")
+        and float(pw.get("coverage_pct") or 0) == 100.0
+    )
+    full_dim_count = int(full.get("full_dim_count") or 0)
     full_ok = (
-        full.get("full_dim_count") == 17
-        and full.get("fail_rotation_count") == 17
-        and full.get("miss_rotation_count") == 17
+        full_dim_count > 0
+        and full.get("fail_rotation_count") == full_dim_count
+        and full.get("miss_rotation_count") == full_dim_count
         and not full.get("uncovered_fail")
         and not full.get("uncovered_miss")
     )
@@ -220,9 +227,15 @@ def print_report(col: SuiteCollector, started: float, snap_before: dict, snap_af
     print()
 
     print("复盘和后续建议：")
-    print(f"  本轮补全后总用例 {total}；Pairwise 105 对×4；强相关全字段轮换；严格全维度 17 因子。")
-    print("  业务代码未修改（除 config.py 增加 DB_FILE 环境覆盖入口）。失败证据已保留。")
-    print("  上线前必须修复根因: RC-PARAM-NONFINITE, RC-CAT-DEDUP；（P2）RC-COO-LABEL")
+    print(
+        f"  本轮总用例 {total}；Pairwise {expected_pairs} 对×4；"
+        f"强相关全字段轮换；严格全维度 {full_dim_count} 因子。"
+    )
+    print("  当前业务代码为被测对象；失败与阻塞证据均保留。")
+    if roots:
+        print("  上线前必须修复根因: " + ", ".join(g["id"] for g in roots))
+    else:
+        print("  当前可执行用例无失败根因。")
     print("  解除阻塞: 提供 PG_TEST_DSN；提供 RUN_LIVE_NA+LIVE_NA_ROOTS 后重跑五场景")
     print("=" * 72)
 

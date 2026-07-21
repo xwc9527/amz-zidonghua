@@ -16,6 +16,11 @@ from fba_fees_us import estimate_fba_fees, parse_weight_lb, parse_dims_inches
 
 _ORIGIN_LABEL_RE = re.compile(r"(?:country\s+of\s+origin|herkunftsland|原産国)\s*[:：]?\s*", re.I)
 _DIRECTIONAL_CONTROLS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_SOCIAL_PROOF_SELECTORS = (
+    "#socialProofingAsinFaceout_feature_div",
+    "#social-proofing-faceout-title-tk_bought",
+    "[data-csa-c-content-id='social-proofing-faceout-title-tk_bought']",
+)
 
 
 def _country_of_origin_from_row(row) -> str | None:
@@ -124,6 +129,51 @@ def extract_detail_image_url(soup: BeautifulSoup) -> str:
         return hires
     return extract_image_url(img_el)
 
+
+def parse_social_proof_count(raw: str | None) -> int | None:
+    """把 Amazon 的月销量展示下限归一化为整数。
+
+    示例：``50+ bought`` → 50，``1K+`` → 1000，``2.5K+`` → 2500。
+    Amazon 给的是区间下限而非精确销量，因此字段语义是“至少售出”。
+    """
+    if not raw:
+        return None
+    text = _DIRECTIONAL_CONTROLS_RE.sub("", str(raw)).replace("\xa0", " ").strip()
+    matches = list(re.finditer(
+        r"(?<!\d)(\d+(?:[.,]\d+)?)\s*([KMB]|千|万)?\s*\+?",
+        text,
+        re.I,
+    ))
+    if not matches:
+        return None
+    # 日语/中文常写成“过去1个月购买500件”，销量数字位于月份数字之后。
+    match = matches[-1]
+
+    number_text = match.group(1)
+    suffix = (match.group(2) or "").upper()
+    if suffix:
+        # 带 K/M/B 时逗号可能是本地化小数分隔符（例如 1,5K）。
+        normalized = number_text.replace(",", ".")
+        try:
+            number = float(normalized)
+        except ValueError:
+            return None
+        multiplier = {
+            "K": 1_000,
+            "M": 1_000_000,
+            "B": 1_000_000_000,
+            "千": 1_000,
+            "万": 10_000,
+        }.get(suffix, 1)
+        return int(number * multiplier)
+
+    # 无缩写时标点是千位分隔符（1,000 / 1.000）。
+    digits = re.sub(r"[.,\s]", "", number_text)
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
 DE_MONTHS = {
     "Januar": 1, "Februar": 2, "März": 3, "April": 4,
     "Mai": 5, "Juni": 6, "Juli": 7, "August": 8,
@@ -174,6 +224,19 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
         badge_blob,
         re.I,
     ) else 0
+
+    social_el = None
+    for selector in _SOCIAL_PROOF_SELECTORS:
+        social_el = soup.select_one(selector)
+        if social_el:
+            break
+    if social_el:
+        social_text = social_el.get_text(" ", strip=True)
+        social_count = parse_social_proof_count(social_text)
+        if social_text:
+            d["social_proof"] = social_text
+        if social_count is not None:
+            d["social_proof_count"] = social_count
 
     # BSR
     bsr_section = (
@@ -425,6 +488,8 @@ def check_detail_filters(detail: dict, filters: dict) -> bool:
     if not _range_check(detail.get("variant_option_count"), "variant_min", "variant_max"):
         return False
     if not _range_check(detail.get("other_sellers_count"), "sellers_min", "sellers_max"):
+        return False
+    if not _range_check(detail.get("social_proof_count"), "social_proof_min", "social_proof_max"):
         return False
 
     # 使用 attach_normalized_dims 已写入的标准化数值，避免重复解析且与 parse_weight_lb/parse_dims_inches 不一致

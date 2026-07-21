@@ -16,7 +16,7 @@ DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
 # PG config（SQLite 模式可不设置 PG_DSN）
 from pg_config import PG_DSN, get_pg_dsn
-from config import PROXY_MIN_START_NODES, PROXY_RUNTIME_RECOVERY_ATTEMPTS
+from config import DB_FILE, PROXY_MIN_START_NODES, PROXY_RUNTIME_RECOVERY_ATTEMPTS
 
 # 代理池：API 运行期间守护进程持续验证/增补/淘汰节点；点击开始时只需
 # 活池达到最低启动门槛。API 正常关闭时默认连带清理，避免后台孤儿进程；
@@ -26,6 +26,7 @@ from proxy_pool_manager import (
     STATUS_PREPARING,
     STATUS_PROXY_FAILED,
     STATUS_PROXY_READY,
+    STATUS_RETRY_PENDING,
     STATUS_RUNNING,
     STATUS_STARTING_CRAWLER,
     STATUS_STOPPING,
@@ -39,8 +40,8 @@ from proxy_pool_manager import (
     stop_proxy_pool,
 )
 
-# SQLite fallback
-DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
+# SQLite fallback（尊重 DB_FILE / AMZ_DB_FILE 隔离变量）
+DB_PATH = DB_FILE
 
 _product_proc = None
 _product_lock = threading.Lock()
@@ -130,12 +131,12 @@ def _watch_and_sleep_proxy(
             set_proxy_status(STATUS_IDLE, run_id=run_id, pool_ready=True)
             logging.info("[proxy] 抓取自然结束 run_id=%s", run_id)
         elif return_code == 4:
-            _proxy_sleep("crawl_retry_pending")
+            # 业务节点未完成（非代理池故障）：独立生命周期，禁止伪装成 proxy_failed
             set_proxy_status(
-                STATUS_PROXY_FAILED,
+                STATUS_RETRY_PENDING,
                 run_id=run_id,
-                pool_ready=False,
-                reason="部分节点/ASIN请求失败，断点已保留；再次开始将只重试失败项",
+                pool_ready=True,
+                reason="部分节点/商品请求失败，断点已保留；再次开始将只重试失败项",
                 error_code="CRAWL_RETRY_PENDING",
                 return_code=return_code,
             )
@@ -208,10 +209,12 @@ def _recover_proxy_and_resume(
         )
         prep = ensure_proxy_ready(force=False)
         if not prep.ok:
+            # 仍保留原抓取 run_id，避免恢复失败后 product_stats 切到新代理 prepare ID
             set_proxy_status(
                 STATUS_PROXY_FAILED,
-                run_id=prep.run_id,
+                run_id=previous_run_id,
                 request_id=request_id,
+                proxy_prepare_run_id=prep.run_id,
                 pool_ready=False,
                 reason=prep.reason or prep.error_code,
                 error_code=prep.error_code or "POOL_RECOVERY_FAILED",
@@ -219,12 +222,17 @@ def _recover_proxy_and_resume(
             )
             return
 
+        # 同一轮续跑：爬虫 AMZ_RUN_ID / 生命周期 run_id 必须保持 previous_run_id
+        resume_env = dict(env or os.environ.copy())
+        if previous_run_id:
+            resume_env["AMZ_RUN_ID"] = previous_run_id
+
         with _product_lock:
             if generation != _crawl_generation:
                 return
             try:
                 _product_proc = subprocess.Popen(
-                    cmd, cwd=BASE_DIR, env=env or os.environ.copy(),
+                    cmd, cwd=BASE_DIR, env=resume_env,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
                 )
             except Exception as exc:
@@ -232,8 +240,9 @@ def _recover_proxy_and_resume(
                 _proxy_sleep("crawler_resume_failed")
                 set_proxy_status(
                     STATUS_PROXY_FAILED,
-                    run_id=prep.run_id,
+                    run_id=previous_run_id,
                     request_id=request_id,
+                    proxy_prepare_run_id=prep.run_id,
                     pool_ready=False,
                     reason=str(exc),
                     error_code="CRAWLER_RESUME_FAILED",
@@ -245,19 +254,23 @@ def _recover_proxy_and_resume(
         resumed_at = time.monotonic()
         set_proxy_status(
             STATUS_RUNNING,
-            run_id=prep.run_id,
+            run_id=previous_run_id,
             request_id=request_id,
+            proxy_prepare_run_id=prep.run_id,
             pid=resumed_proc.pid,
             resumed_from_checkpoint=True,
             recovery_attempt=next_attempt,
         )
         logging.info(
-            "[crawl] resumed from checkpoint request_id=%s run_id=%s pid=%d recovery_attempt=%d",
-            request_id, prep.run_id, resumed_proc.pid, next_attempt,
+            "[crawl] resumed from checkpoint request_id=%s run_id=%s proxy_prepare_run_id=%s pid=%d recovery_attempt=%d",
+            request_id, previous_run_id, prep.run_id, resumed_proc.pid, next_attempt,
         )
         threading.Thread(
             target=_watch_and_sleep_proxy,
-            args=(resumed_proc, generation, request_id, prep.run_id, resumed_at, cmd, env, next_attempt),
+            args=(
+                resumed_proc, generation, request_id, previous_run_id,
+                resumed_at, cmd, resume_env, next_attempt,
+            ),
             daemon=True,
         ).start()
     finally:
@@ -291,6 +304,7 @@ _NONNEG_FILTER_KEYS = [
     ("bsr_sub_min", "BSR子类排名最小"), ("bsr_sub_max", "BSR子类排名最大"),
     ("variant_min", "变体选项数最小"), ("variant_max", "变体选项数最大"),
     ("sellers_min", "其他卖家数最小"), ("sellers_max", "其他卖家数最大"),
+    ("social_proof_min", "月销量最小"),
     ("weight_min", "商品重量最小"), ("weight_max", "商品重量最大"),
     ("fba_fee_min", "FBA运费最小"), ("fba_fee_max", "FBA运费最大"),
     ("dim_l", "尺寸长"), ("dim_w", "尺寸宽"), ("dim_h", "尺寸高"),
@@ -303,6 +317,7 @@ _INT_FILTER_KEYS = {
     "bsr_sub_min", "bsr_sub_max",
     "variant_min", "variant_max",
     "sellers_min", "sellers_max",
+    "social_proof_min",
 }
 
 
@@ -510,6 +525,8 @@ _PRODUCT_EXTRA_COLS = [
     ("bsr_sub_category", "TEXT"),
     ("variant_option_count", "INTEGER"),
     ("other_sellers_count", "INTEGER"),
+    ("social_proof", "TEXT"),
+    ("social_proof_count", "INTEGER"),
     ("item_weight", "TEXT"),
     ("item_dimensions", "TEXT"),
     ("weight_lb", "REAL"),
@@ -525,6 +542,7 @@ _PRODUCT_EXTRA_COLS = [
     ("country_of_origin", "TEXT"),
     ("is_amazon_choice", "INTEGER DEFAULT 0"),
     ("is_bestseller", "INTEGER DEFAULT 0"),
+    ("run_id", "TEXT"),
 ]
 
 async def _ensure_product_columns():
@@ -537,6 +555,9 @@ async def _ensure_product_columns():
         for col, typ in _PRODUCT_EXTRA_COLS:
             if col not in existing:
                 await db.execute(f"ALTER TABLE product_sightings ADD COLUMN {col} {typ}")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ps_social_proof ON product_sightings(social_proof_count)"
+        )
         await db.commit()
         # 回填：有文本重量/尺寸但缺数值字段的历史行
         cur = await db.execute(
@@ -850,6 +871,7 @@ async def category_scope_count(body: dict):
     }
 
 async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
+    q = (q or "").strip()
     if na_only:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
                  (SELECT COUNT(DISTINCT d.node_id) FROM categories d
@@ -864,17 +886,32 @@ async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
                    ))"""
         args = [site]
         if parent == "root":
-            sql += " AND c.depth = 0"
+            if q:
+                # 根层带搜索：跨层按名称匹配 NEW 导航链上的节点
+                sql += f" AND c.name ILIKE ${len(args)+1}"
+                args.append(f"%{q}%")
+            else:
+                sql += " AND c.depth = 0"
         else:
             sql += " AND c.parent_node_id = $2"
             args.append(parent)
-        if q:
-            sql += f" AND c.name ILIKE ${len(args)+1}"
-            args.append(f"%{q}%")
+            if q:
+                sql += f" AND c.name ILIKE ${len(args)+1}"
+                args.append(f"%{q}%")
         sql += f" ORDER BY c.name LIMIT ${len(args)+1} OFFSET ${len(args)+2}"
         args.extend([limit, offset])
         return await pg_query(sql, *args)
     if parent == "root":
+        if q:
+            sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
+                     (SELECT COUNT(DISTINCT c2.node_id) FROM categories c2
+                      WHERE c2.path <@ c.path AND c2.id != c.id) AS child_count
+                     FROM categories c
+                     WHERE c.site = $1 AND c.node_id IS NOT NULL AND c.node_id != ''
+                       AND c.name ILIKE $2
+                     ORDER BY c.depth, c.name
+                     LIMIT $3 OFFSET $4"""
+            return await pg_query(sql, site, f"%{q}%", limit, offset)
         total = await pg_scalar("SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1", site)
         root_rows = await pg_query("SELECT node_id, name FROM categories WHERE depth = 0 AND site = $1", site)
         if root_rows:
@@ -911,6 +948,7 @@ async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
 
 async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
     # 最新到货模式：保留 NEW 节点及其祖先导航链，仍按 parent_node_id 逐层展示。
+    q = (q or "").strip()
     if na_only:
         sql = """WITH RECURSIVE ancestry(new_node_id, ancestor_id) AS (
                      SELECT node_id, parent_node_id
@@ -938,17 +976,37 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
                  WHERE c.site = ?"""
         params = [site, site, site, site]
         if parent == "root":
-            sql += " AND c.depth = 0"
+            if q:
+                sql += " AND c.name LIKE ?"
+                params.append(f"%{q}%")
+            else:
+                sql += " AND c.depth = 0"
         else:
             sql += " AND c.parent_node_id = ?"
             params.append(parent)
-        if q:
-            sql += " AND c.name LIKE ?"
-            params.append(f"%{q}%")
+            if q:
+                sql += " AND c.name LIKE ?"
+                params.append(f"%{q}%")
         sql += f" ORDER BY c.name LIMIT {limit} OFFSET {offset}"
         return await _sqlite_query(sql, params)
 
     if parent == "root":
+        # 根层带搜索词：跨深度按名称匹配，不再忽略 q
+        if q:
+            sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
+                     (WITH RECURSIVE sub AS (
+                         SELECT node_id FROM categories WHERE parent_node_id = c.node_id AND site = c.site
+                         UNION
+                         SELECT cat.node_id FROM categories cat INDEXED BY idx_categories_parent_site
+                         JOIN sub s ON cat.parent_node_id = s.node_id
+                         WHERE cat.site = c.site
+                     ) SELECT COUNT(*) FROM sub) as child_count
+                     FROM categories c
+                     WHERE c.site = ? AND c.node_id IS NOT NULL AND c.node_id != ''
+                       AND c.name LIKE ?
+                     ORDER BY c.depth, c.name
+                     LIMIT ? OFFSET ?"""
+            return await _sqlite_query(sql, [site, f"%{q}%", limit, offset])
         # 递归统计某根 node_id 下全部后代（通过 parent_node_id 链）
         async def _descendant_count(root_node_id):
             return await _sqlite_scalar(
@@ -1074,6 +1132,7 @@ async def products(
     bsr_sub_min: int = None, bsr_sub_max: int = None,
     variant_min: int = None, variant_max: int = None,
     sellers_min: int = None, sellers_max: int = None,
+    social_proof_min: int = None,
     weight_min: float = None, weight_max: float = None,
     dim_l: float = None, dim_w: float = None, dim_h: float = None,
     fba_fee_min: float = None, fba_fee_max: float = None,
@@ -1093,6 +1152,7 @@ async def products(
         bsr_sub_min=bsr_sub_min, bsr_sub_max=bsr_sub_max,
         variant_min=variant_min, variant_max=variant_max,
         sellers_min=sellers_min, sellers_max=sellers_max,
+        social_proof_min=social_proof_min,
         weight_min=weight_min, weight_max=weight_max,
         dim_l=dim_l, dim_w=dim_w, dim_h=dim_h,
         fba_fee_min=fba_fee_min, fba_fee_max=fba_fee_max,
@@ -1130,6 +1190,7 @@ def _build_product_where(filters, style="sqlite"):
         ("bsr_sub_min", ">=", "bsr_sub_rank"), ("bsr_sub_max", "<=", "bsr_sub_rank"),
         ("variant_min", ">=", "variant_option_count"), ("variant_max", "<=", "variant_option_count"),
         ("sellers_min", ">=", "other_sellers_count"), ("sellers_max", "<=", "other_sellers_count"),
+        ("social_proof_min", ">=", "social_proof_count"),
         ("fba_fee_min", ">=", "fba_fee"), ("fba_fee_max", "<=", "fba_fee"),
         ("weight_min", ">=", "weight_lb"), ("weight_max", "<=", "weight_lb"),
     ]:
@@ -1190,7 +1251,8 @@ async def _products_pg(**filters):
     sql = """SELECT name, asin, price, review_count, rank, rating, image_url, product_url,
              list_type, category_name, site, scraped_at,
              bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
-             variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             variant_option_count, other_sellers_count, social_proof, social_proof_count,
+             item_weight, item_dimensions,
              weight_lb, dim_l_in, dim_w_in, dim_h_in,
              date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
              country_of_origin, is_amazon_choice, is_bestseller, fba_fee, placement_fee,
@@ -1212,7 +1274,8 @@ async def _products_sqlite(**filters):
     sql = """SELECT name, asin, price, price_raw, review_count, rank, rating,
              image_url, product_url, list_type, category_name, scraped_at, site,
              bsr_main_rank, bsr_main_category, bsr_sub_rank, bsr_sub_category,
-             variant_option_count, other_sellers_count, item_weight, item_dimensions,
+             variant_option_count, other_sellers_count, social_proof, social_proof_count,
+             item_weight, item_dimensions,
              weight_lb, dim_l_in, dim_w_in, dim_h_in,
              date_first_available, shipping_fee, shipping_fee_value, fulfillment_type,
              country_of_origin, is_amazon_choice, is_bestseller, fba_fee, placement_fee,
@@ -1248,6 +1311,7 @@ def _build_new_arrivals_where(filters: dict, style: str = "sqlite"):
         ("bsr_sub_min", ">=", "bsr_sub_rank"), ("bsr_sub_max", "<=", "bsr_sub_rank"),
         ("variant_min", ">=", "variant_option_count"), ("variant_max", "<=", "variant_option_count"),
         ("sellers_min", ">=", "other_sellers_count"), ("sellers_max", "<=", "other_sellers_count"),
+        ("social_proof_min", ">=", "social_proof_count"),
         ("fba_fee_min", ">=", "fba_fee"), ("fba_fee_max", "<=", "fba_fee"),
         ("weight_min", ">=", "weight_lb"), ("weight_max", "<=", "weight_lb"),
     ]:
@@ -1305,6 +1369,7 @@ def _build_new_arrivals_where(filters: dict, style: str = "sqlite"):
 _NA_SELECT = """SELECT asin, title AS name, title, price, price_value, rating, review_count,
               listing_date, listing_date AS date_first_available, listing_age_days,
               bsr_main_category, bsr_main_rank, bsr_sub_rank, bsr_sub_category,
+              social_proof, social_proof_count,
               image_url, product_url, node_id, category_name, category_depth,
               site, item_weight, item_dimensions, weight_lb, dim_l_in, dim_w_in, dim_h_in,
               fba_fee, placement_fee, fulfillment_type, country_of_origin,
@@ -1361,6 +1426,7 @@ async def new_arrivals_api(
     bsr_sub_min: int = None, bsr_sub_max: int = None,
     variant_min: int = None, variant_max: int = None,
     sellers_min: int = None, sellers_max: int = None,
+    social_proof_min: int = None,
     weight_min: float = None, weight_max: float = None,
     dim_l: float = None, dim_w: float = None, dim_h: float = None,
     fba_fee_min: float = None, fba_fee_max: float = None,
@@ -1379,6 +1445,7 @@ async def new_arrivals_api(
         bsr_sub_min=bsr_sub_min, bsr_sub_max=bsr_sub_max,
         variant_min=variant_min, variant_max=variant_max,
         sellers_min=sellers_min, sellers_max=sellers_max,
+        social_proof_min=social_proof_min,
         weight_min=weight_min, weight_max=weight_max,
         dim_l=dim_l, dim_w=dim_w, dim_h=dim_h,
         fba_fee_min=fba_fee_min, fba_fee_max=fba_fee_max,
@@ -1395,33 +1462,133 @@ async def new_arrivals_api(
     return await _new_arrivals_sqlite(filters)
 
 @app.get("/api/v2/product_stats")
-async def product_stats():
-    running, lifecycle, run_id = _crawl_lifecycle_state()
+async def product_stats(
+    site: str = Query(None, description="Marketplace site, e.g. US"),
+    run_id: str = Query(None, description="可选；默认用当前生命周期 run_id，隔离本次详情成败"),
+):
+    """大盘统计；site 隔离站点；detail_ok/detail_failed 按 run_id 隔离本次运行。"""
+    running, lifecycle, lifecycle_run_id = _crawl_lifecycle_state()
+    site = (site or "").strip().upper() or None
+    stats_run_id = (run_id or "").strip() or (lifecycle_run_id or "").strip() or None
     total, by_list, multi, na_total = 0, [], 0, 0
+    detail_ok, detail_failed = 0, 0
     try:
         if DB_BACKEND == "pg":
-            total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
-            by_list = await pg_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
-            multi = await pg_scalar(
-                "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t"
-            )
-            try:
-                na_total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
-            except Exception as e:
-                logging.warning(f"new_arrivals pg stats failed: {e}")
+            if site:
+                total = await pg_scalar(
+                    "SELECT COUNT(DISTINCT asin) FROM product_sightings WHERE site=$1", site
+                )
+                by_list = await pg_query(
+                    "SELECT list_type, COUNT(*) as cnt FROM product_sightings WHERE site=$1 GROUP BY list_type",
+                    site,
+                )
+                multi = await pg_scalar(
+                    "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings WHERE site=$1 "
+                    "GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t",
+                    site,
+                )
+                if stats_run_id:
+                    detail_ok = await pg_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                        "WHERE site=$1 AND run_id=$2 AND detail_scraped=1",
+                        site, stats_run_id,
+                    ) or 0
+                    detail_failed = await pg_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                        "WHERE site=$1 AND run_id=$2 AND detail_scraped=2",
+                        site, stats_run_id,
+                    ) or 0
+                try:
+                    na_total = await pg_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM new_arrivals WHERE site=$1", site
+                    )
+                except Exception as e:
+                    logging.warning(f"new_arrivals pg stats failed: {e}")
+            else:
+                total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+                by_list = await pg_query(
+                    "SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type"
+                )
+                multi = await pg_scalar(
+                    "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings "
+                    "GROUP BY asin HAVING COUNT(DISTINCT list_type)>1) t"
+                )
+                if stats_run_id:
+                    detail_ok = await pg_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                        "WHERE run_id=$1 AND detail_scraped=1",
+                        stats_run_id,
+                    ) or 0
+                    detail_failed = await pg_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                        "WHERE run_id=$1 AND detail_scraped=2",
+                        stats_run_id,
+                    ) or 0
+                try:
+                    na_total = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
+                except Exception as e:
+                    logging.warning(f"new_arrivals pg stats failed: {e}")
         else:
             try:
-                total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
-                by_list = await _sqlite_query("SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type")
-                multi = await _sqlite_scalar(
-                    "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
-                )
+                if site:
+                    total = await _sqlite_scalar(
+                        "SELECT COUNT(DISTINCT asin) FROM product_sightings WHERE site=?", (site,)
+                    )
+                    by_list = await _sqlite_query(
+                        "SELECT list_type, COUNT(*) as cnt FROM product_sightings "
+                        "WHERE site=? GROUP BY list_type",
+                        (site,),
+                    )
+                    multi = await _sqlite_scalar(
+                        "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings WHERE site=? "
+                        "GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)",
+                        (site,),
+                    )
+                    if stats_run_id:
+                        detail_ok = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                            "WHERE site=? AND run_id=? AND detail_scraped=1",
+                            (site, stats_run_id),
+                        ) or 0
+                        detail_failed = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                            "WHERE site=? AND run_id=? AND detail_scraped=2",
+                            (site, stats_run_id),
+                        ) or 0
+                    try:
+                        na_total = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM new_arrivals WHERE site=?", (site,)
+                        )
+                    except Exception as e:
+                        logging.warning(f"new_arrivals stats failed: {e}")
+                else:
+                    total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
+                    by_list = await _sqlite_query(
+                        "SELECT list_type, COUNT(*) as cnt FROM product_sightings GROUP BY list_type"
+                    )
+                    multi = await _sqlite_scalar(
+                        "SELECT COUNT(*) FROM (SELECT asin FROM product_sightings "
+                        "GROUP BY asin HAVING COUNT(DISTINCT list_type)>1)"
+                    )
+                    if stats_run_id:
+                        detail_ok = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                            "WHERE run_id=? AND detail_scraped=1",
+                            (stats_run_id,),
+                        ) or 0
+                        detail_failed = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM product_sightings "
+                            "WHERE run_id=? AND detail_scraped=2",
+                            (stats_run_id,),
+                        ) or 0
+                    try:
+                        na_total = await _sqlite_scalar(
+                            "SELECT COUNT(DISTINCT asin) FROM new_arrivals"
+                        )
+                    except Exception as e:
+                        logging.warning(f"new_arrivals stats failed: {e}")
             except Exception as e:
                 logging.warning(f"product_sightings stats failed: {e}")
-            try:
-                na_total = await _sqlite_scalar("SELECT COUNT(DISTINCT asin) FROM new_arrivals")
-            except Exception as e:
-                logging.warning(f"new_arrivals stats failed: {e}")
     except Exception as e:
         logging.warning(f"product_stats failed: {e}")
     return {
@@ -1429,9 +1596,12 @@ async def product_stats():
         "new_arrivals": na_total,
         "by_list": by_list or [],
         "multi_list": multi,
+        "detail_ok": detail_ok,
+        "detail_failed": detail_failed,
+        "site": site,
         "running": running,
         "lifecycle": lifecycle,
-        "run_id": run_id,
+        "run_id": stats_run_id or lifecycle_run_id or "",
     }
 
 @app.get("/api/v2/product_progress")
@@ -1567,6 +1737,7 @@ _FILTER_PARAM_FLAGS = [
     ("bsr_sub_min", "--bsr-sub-min"), ("bsr_sub_max", "--bsr-sub-max"),
     ("variant_min", "--variant-min"), ("variant_max", "--variant-max"),
     ("sellers_min", "--sellers-min"), ("sellers_max", "--sellers-max"),
+    ("social_proof_min", "--social-proof-min"),
     ("weight_min", "--weight-min"), ("weight_max", "--weight-max"),
     ("dim_l", "--dim-l"), ("dim_w", "--dim-w"), ("dim_h", "--dim-h"),
     ("fba_fee_min", "--fba-fee-min"), ("fba_fee_max", "--fba-fee-max"),
@@ -1817,7 +1988,8 @@ async def start_products(body: dict):
             env["DB_BACKEND"] = DB_BACKEND
             env["PROXY_REQUIRED"] = "1"
             env["ALLOW_DIRECT_FALLBACK"] = "0"
-            env["AMZ_RUN_ID"] = request_id
+            # 与 proxy 状态 / product_stats 共用 prep.run_id，避免 request_id 与 run_id 不一致
+            env["AMZ_RUN_ID"] = prep.run_id
             try:
                 _product_proc = subprocess.Popen(
                     cmd, cwd=BASE_DIR, env=env,

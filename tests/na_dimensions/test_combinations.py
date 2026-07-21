@@ -38,6 +38,7 @@ FULL_PASS_FILTERS = {
     "bsr_sub_min": 1, "bsr_sub_max": 5000,
     "variant_min": 1, "variant_max": 20,
     "sellers_min": 0, "sellers_max": 100,  # 0 会被剥离，用 sellers_max only
+    "social_proof_min": 1000,
     "weight_min": 0.1, "weight_max": 10,
     "dim_l": 20, "dim_w": 15, "dim_h": 10,
     "fba_fee_min": 1, "fba_fee_max": 20,
@@ -126,6 +127,7 @@ def run_pairwise_tests(col: SuiteCollector):
         ("bsr_sub", {"bsr_sub_max": 5000}),
         ("variant", {"variant_max": 20}),
         ("sellers", {"sellers_max": 100}),
+        ("social", {"social_proof_min": 50}),
         ("weight", {"weight_max": 10}),
         ("dim", {"dim_l": 40, "dim_w": 30, "dim_h": 20}),
         ("fba", {"fba_fee_max": 40}),
@@ -187,6 +189,7 @@ def run_full_dimension_tests(col: SuiteCollector):
         ("BSR子类", {"bsr_sub_max": 1}),
         ("变体数", {"variant_min": 50}),
         ("其他卖家数", {"sellers_min": 100}),
+        ("月销量", {"social_proof_min": 99999}),
         ("重量", {"weight_max": 0.1}),
         ("尺寸", {"dim_l": 1, "dim_w": 1, "dim_h": 1}),
         ("FBA费用", {"fba_fee_max": 0.1}),
