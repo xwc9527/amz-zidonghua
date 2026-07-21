@@ -14,10 +14,11 @@ fetch_new_arrivals.py — 最新到货商品抓取（多 worker 并发）
   python fetch_new_arrivals.py --site DE --max-pages 5 --phase1-only
 """
 
-import json, os, re, sys, time, random, sqlite3, threading, argparse, logging, traceback
+import json, os, re, sys, time, random, sqlite3, threading, argparse, logging, traceback, hashlib
+from collections import Counter
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -33,25 +34,41 @@ _sh.setLevel(logging.INFO)
 _sh.setFormatter(logging.Formatter("%(message)s"))
 _log.addHandler(_fh)
 _log.addHandler(_sh)
+_AUDIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fetch_new_arrivals_attempts.jsonl")
+_RUN_ID = os.getenv("AMZ_RUN_ID") or datetime.now().strftime("NA-%Y%m%d-%H%M%S")
 
 from curl_cffi import requests as requests
-from curl_cffi.requests import RequestsError
 from bs4 import BeautifulSoup
 
 from config import (
     HEADERS, DATA_DIR, DB_FILE, get_marketplace,
+    PROXY_MAX_CRAWL_WORKERS,
+    PROXY_MIN_START_NODES,
 )
+from crawl_autoscale import run_autoscaled_queue
+from proxy_daemon import touch_crawl_activity
 from proxy_session import (
     ForcedProxyPool,
     ProxyRequiredError,
     assert_session_has_proxy,
     make_forced_session,
 )
+from proxy_worker import (
+    AttemptAuditor,
+    FetchOutcome,
+    WorkerProxyClient as SharedWorkerProxyClient,
+    classify_request_exception as _classify_request_exception,
+    has_us_currency_mismatch,
+    is_captcha_page as _is_captcha_page,
+    raise_if_pool_below_minimum as _raise_if_pool_below_minimum,
+    pool_aware_delay,
+)
 from detail_parser import (
     parse_detail_fields, check_detail_filters, attach_normalized_dims,
     extract_image_url,
 )
 from fba_fees_us import estimate_fba_fees
+from crawl_checkpoint import NewArrivalsCheckpoint, canonical_signature
 
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
@@ -113,11 +130,18 @@ _DETAIL_FILTERS: dict = {}
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class ProxyPool(ForcedProxyPool):
-    """兼容旧名称；强制代理，禁止静默直连。"""
+    """兼容旧名称；强制代理，禁止静默直连。
+
+    min_usable 用 PROXY_MIN_START_NODES（默认1）：常驻验证守护进程持续在
+    后台增补节点，这里不再要求启动时就凑够一大批；enable_live_reload 让
+    运行期间能持续感知守护进程新增/淘汰的节点。
+    """
 
     def __init__(self):
-        super().__init__(required=True)
-        _log.info(f"[pool] 强制加载 {self.size} 个代理端口")
+        super().__init__(
+            required=True, min_usable=PROXY_MIN_START_NODES, enable_live_reload=True,
+        )
+        _log.info(f"[pool] 强制加载 {self.size} 个代理端口（min_usable={self.min_usable}，活池热重载已开启）")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -390,6 +414,7 @@ def _save_products(products: list) -> int:
 def _load_nodes(site: str, depths: list[int] | None = None,
                 root_ids: list[str] | None = None,
                 include_descendants: bool = True) -> list[dict]:
+    """加载最新到货目标节点：仅 na_valid=1（NEW 标记）类目。"""
     if DB_BACKEND == "pg":
         return _load_nodes_pg(site, depths, root_ids, include_descendants=include_descendants)
     conn = sqlite3.connect(DB_FILE, timeout=15)
@@ -399,24 +424,28 @@ def _load_nodes(site: str, depths: list[int] | None = None,
         if include_descendants:
             rows = conn.execute(
                 f"""WITH RECURSIVE sub AS (
-                        SELECT node_id, name, depth FROM categories
+                        SELECT node_id, name, depth, na_valid FROM categories
                         WHERE node_id IN ({ph}) AND site = ?
                         UNION ALL
-                        SELECT c.node_id, c.name, c.depth FROM categories c
+                        SELECT c.node_id, c.name, c.depth, c.na_valid FROM categories c
                         JOIN sub s ON c.parent_node_id = s.node_id WHERE c.site = ?
-                    ) SELECT node_id, name, depth FROM sub""",
+                    ) SELECT node_id, name, depth FROM sub
+                    WHERE na_valid = 1
+                    ORDER BY depth DESC, name""",
                 (*root_ids, site, site)
             ).fetchall()
         else:
             rows = conn.execute(
                 f"""SELECT node_id, name, depth FROM categories
-                    WHERE node_id IN ({ph}) AND site = ?
-                    ORDER BY depth, name""",
+                    WHERE node_id IN ({ph}) AND site = ? AND na_valid = 1
+                    ORDER BY depth DESC, name""",
                 (*root_ids, site),
             ).fetchall()
     else:
+        # 未指定 roots = 全站全部 NEW 类目
         rows = conn.execute(
-            "SELECT node_id, name, depth FROM categories WHERE site = ? AND depth > 0 ORDER BY depth, name",
+            "SELECT node_id, name, depth FROM categories WHERE site = ? AND na_valid = 1 "
+            "ORDER BY depth DESC, name",
             (site,)
         ).fetchall()
     conn.close()
@@ -442,29 +471,33 @@ def _dedupe_nodes(nodes: list[dict]) -> list[dict]:
 def _load_nodes_pg(site: str, depths: list[int] | None = None,
                    root_ids: list[str] | None = None,
                    include_descendants: bool = True) -> list[dict]:
+    """加载最新到货目标节点：仅 na_valid=1（NEW 标记）类目。"""
     if root_ids:
         ph = ",".join(["%s"] * len(root_ids))
         if include_descendants:
             rows = _pg_fetchall(
                 f"""WITH RECURSIVE sub AS (
-                        SELECT node_id, name, depth FROM categories
+                        SELECT node_id, name, depth, na_valid FROM categories
                         WHERE node_id IN ({ph}) AND site = %s
                         UNION ALL
-                        SELECT c.node_id, c.name, c.depth FROM categories c
+                        SELECT c.node_id, c.name, c.depth, c.na_valid FROM categories c
                         JOIN sub s ON c.parent_node_id = s.node_id WHERE c.site = %s
-                    ) SELECT node_id, name, depth FROM sub""",
+                    ) SELECT node_id, name, depth FROM sub
+                    WHERE na_valid = 1
+                    ORDER BY depth DESC, name""",
                 (*root_ids, site, site),
             )
         else:
             rows = _pg_fetchall(
                 f"""SELECT node_id, name, depth FROM categories
-                    WHERE node_id IN ({ph}) AND site = %s
-                    ORDER BY depth, name""",
+                    WHERE node_id IN ({ph}) AND site = %s AND na_valid = 1
+                    ORDER BY depth DESC, name""",
                 (*root_ids, site),
             )
     else:
         rows = _pg_fetchall(
-            "SELECT node_id, name, depth FROM categories WHERE site = %s AND depth > 0 ORDER BY depth, name",
+            "SELECT node_id, name, depth FROM categories WHERE site = %s AND na_valid = 1 "
+            "ORDER BY depth DESC, name",
             (site,),
         )
     result = [{"node_id": r["node_id"], "name": r["name"], "depth": r["depth"]} for r in rows]
@@ -490,32 +523,18 @@ def _make_session(worker_id: int, proxy_entry: dict | None) -> requests.Session:
         "Upgrade-Insecure-Requests": "1",
     }
     session = make_forced_session(proxy_entry, headers=hdrs, required=True)
+    currency_code = _mp.get("currency_code")
+    if currency_code:
+        session.cookies.set("i18n-prefs", currency_code)
     assert_session_has_proxy(session, required=True)
     return session
 
 
-def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | None:
-    for attempt in range(retries):
-        try:
-            r = session.get(url, timeout=18)
-            if r.status_code == 200:
-                if "captcha" in r.text.lower() or "Type the characters" in r.text:
-                    _log.info("    [CAPTCHA] 等待 30s 后重试")
-                    time.sleep(30 + random.uniform(0, 15))
-                    continue
-                return r.text
-            if r.status_code == 429:
-                wait = 60 + random.uniform(0, 30)
-                _log.info(f"    [429] 限速 {wait:.0f}s")
-                time.sleep(wait)
-            elif r.status_code == 503:
-                time.sleep(15 + random.uniform(0, 10))
-            else:
-                return None
-        except RequestsError:
-            wait = 5 * (2 ** attempt) + random.uniform(0, 3)
-            time.sleep(wait)
-    return None
+def _has_marketplace_currency_mismatch(text: str) -> bool:
+    """仅检查价格组件，避免代理地理位置把 US 价格本地化为 JPY/S$/CA$。"""
+    if _SITE != "US":
+        return False
+    return has_us_currency_mismatch(text)
 
 
 def _warmup(session: requests.Session):
@@ -527,6 +546,22 @@ def _warmup(session: requests.Session):
         time.sleep(1 + random.uniform(0, 1))
     except Exception as e:
         _log.warning(f"[session] warmup 失败 proxy={proxy}: {e}")
+
+
+class WorkerProxyClient(SharedWorkerProxyClient):
+    """最新到货 Worker：注入站点 Session / 币种错配检测。"""
+
+    def __init__(self, pool: ProxyPool, worker_id: int, *, warmup: bool = True):
+        super().__init__(
+            pool,
+            worker_id,
+            make_session=_make_session,
+            warmup=_warmup if warmup else None,
+            # 每次新建，便于测试 patch _AUDIT_PATH
+            auditor=AttemptAuditor(_AUDIT_PATH, _RUN_ID),
+            is_captcha=_is_captcha_page,
+            is_currency_mismatch=_has_marketplace_currency_mismatch,
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -812,123 +847,195 @@ stats = {
     "details_ok": 0, "details_filtered": 0, "details_error": 0,
     "saved": 0,
     "captcha": 0, "p1_error": 0,
+    "errors_by_reason": Counter(), "attempt_failures": Counter(),
+    "pool_usable": 0, "pool_cooling": 0, "pool_disabled": 0,
 }
 all_asins = {}  # asin -> list meta + node info
+checkpoint: NewArrivalsCheckpoint | None = None
+
+
+def _update_pool_stats(pool: ProxyPool):
+    snapshot = pool.health_snapshot()
+    stats["pool_usable"] = snapshot["usable"]
+    stats["pool_cooling"] = snapshot["cooling"]
+    stats["pool_disabled"] = snapshot["disabled"]
+
+
+def _record_fetch_failure(outcome: FetchOutcome):
+    stats["errors_by_reason"][outcome.final_reason or outcome.error_code] += 1
+
+
+def _record_attempt_reasons(outcome: FetchOutcome):
+    for reason in outcome.reasons:
+        stats["attempt_failures"][reason] += 1
+        if reason == "CAPTCHA":
+            stats["captcha"] += 1
 
 
 def _worker_phase1(worker_id: int, task_q: Queue, pool: ProxyPool, max_pages: int):
-    proxy_entry = pool.acquire()
-    session = _make_session(worker_id, proxy_entry)
-    _warmup(session)
+    client = WorkerProxyClient(pool, worker_id, warmup=False)
+    try:
+        while True:
+            try:
+                node = task_q.get(timeout=3)
+            except Empty:
+                break
 
-    while True:
-        try:
-            node = task_q.get(timeout=3)
-        except Empty:
-            break
+            node_id = node["node_id"]
+            node_items = []
+            node_error = ""
+            node_attempts = 0
 
-        node_id = node["node_id"]
-        node_items = []
-
-        for page in range(1, max_pages + 1):
-            url = _build_search_url(node_id, page)
-            html = _safe_get(session, url)
-            time.sleep(random.uniform(1.5, 3.0))
-
-            if html is None:
+            for page in range(1, max_pages + 1):
+                url = _build_search_url(node_id, page)
+                outcome = client.get(url, phase="P1", item_id=f"{node_id}:p{page}")
+                node_attempts += outcome.attempts
                 with lock:
-                    stats["p1_error"] += 1
-                break
+                    _record_attempt_reasons(outcome)
+                time.sleep(pool_aware_delay(1.5, 3.0, pool.usable_count))
 
-            parsed = _parse_listing_page(html, _LIST_FILTERS)
-            if parsed["status"] == "captcha":
-                with lock:
-                    stats["captcha"] += 1
-                break
+                if not outcome.ok:
+                    _raise_if_pool_below_minimum(outcome)
+                    node_error = outcome.final_reason or outcome.error_code
+                    with lock:
+                        stats["p1_error"] += 1
+                        _record_fetch_failure(outcome)
+                        _update_pool_stats(pool)
+                    break
 
-            node_items.extend(parsed["items"])
-            if not parsed["has_next"]:
-                break
+                parsed = _parse_listing_page(outcome.html or "", _LIST_FILTERS)
+                if parsed["status"] == "captcha":
+                    node_error = "CAPTCHA"
+                    client._release("CAPTCHA")
+                    with lock:
+                        stats["p1_error"] += 1
+                        stats["captcha"] += 1
+                        stats["errors_by_reason"]["CAPTCHA"] += 1
+                        stats["attempt_failures"]["CAPTCHA"] += 1
+                        _update_pool_stats(pool)
+                    break
 
-        with lock:
-            stats["nodes_done"] += 1
-            stats["asins_found"] += len(node_items)
-            for item in node_items:
-                asin = item["asin"]
-                if asin not in all_asins:
-                    all_asins[asin] = {
-                        **item,
-                        "node_id": node_id,
-                        "name": node["name"],
-                        "depth": node["depth"],
-                    }
-            stats["asins_unique"] = len(all_asins)
-            if stats["nodes_done"] % 50 == 0:
-                _print_p1_progress()
+                node_items.extend(parsed["items"])
+                if not parsed["has_next"]:
+                    break
 
-    if proxy_entry:
-        pool.release(proxy_entry)
+            full_items = [{
+                **item,
+                "node_id": node_id,
+                "name": node["name"],
+                "depth": node["depth"],
+            } for item in node_items]
+            if checkpoint is not None:
+                checkpoint.save_p1_node(
+                    node_id, full_items, status="error" if node_error else "done",
+                    error_code=node_error, attempts=node_attempts,
+                )
+
+            with lock:
+                stats["nodes_done"] += 1
+                stats["asins_found"] += len(full_items)
+                for item in full_items:
+                    if item["asin"] not in all_asins:
+                        all_asins[item["asin"]] = item
+                stats["asins_unique"] = len(all_asins)
+                _update_pool_stats(pool)
+                if stats["nodes_done"] % 50 == 0:
+                    _print_p1_progress()
+    finally:
+        client.close()
 
 
 def _worker_phase2(worker_id: int, task_q: Queue, pool: ProxyPool):
-    proxy_entry = pool.acquire()
-    session = _make_session(worker_id, proxy_entry)
-    _warmup(session)
-    session.headers["Referer"] = f"{_DOMAIN}/s?k=new"
+    client = WorkerProxyClient(pool, worker_id, warmup=False)
+    try:
+        while True:
+            try:
+                item = task_q.get(timeout=3)
+            except Empty:
+                break
 
-    batch = []
-    while True:
-        try:
-            item = task_q.get(timeout=3)
-        except Empty:
-            break
-
-        asin = item["asin"]
-        url = f"{_DOMAIN}/dp/{asin}"
-        session.headers["Referer"] = _build_search_url(item["node_id"])
-        html = _safe_get(session, url)
-        time.sleep(random.uniform(3.0, 6.0))
-
-        if html is None:
+            asin = item["asin"]
+            url = f"{_DOMAIN}/dp/{asin}"
+            outcome = client.get(
+                url, phase="P2", item_id=asin,
+                referer=_build_search_url(item["node_id"]),
+            )
             with lock:
-                stats["details_error"] += 1
-            continue
+                _record_attempt_reasons(outcome)
+            time.sleep(pool_aware_delay(3.0, 6.0, pool.usable_count))
 
-        try:
-            product = _build_product_from_detail(html, asin, item)
-        except Exception as e:
-            _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
-            with lock:
-                stats["details_error"] += 1
-            continue
+            if not outcome.ok:
+                _raise_if_pool_below_minimum(outcome)
+                if checkpoint is not None:
+                    checkpoint.save_p2_result(
+                        asin, "error", error_code=outcome.error_code,
+                        final_reason=outcome.final_reason, attempts=outcome.attempts,
+                        exit_ips=outcome.exit_ips, reasons=outcome.reasons,
+                    )
+                with lock:
+                    stats["details_error"] += 1
+                    _record_fetch_failure(outcome)
+                    _update_pool_stats(pool)
+                continue
 
-        with lock:
+            try:
+                product = _build_product_from_detail(outcome.html or "", asin, item)
+            except Exception as exc:
+                _log.error(f"[detail] asin={asin} reason=DETAIL_PARSE_ERROR error={exc}\n{traceback.format_exc()}")
+                if checkpoint is not None:
+                    checkpoint.save_p2_result(
+                        asin, "error", error_code="DETAIL_PARSE_ERROR",
+                        final_reason="DETAIL_PARSE_ERROR", attempts=outcome.attempts,
+                        exit_ips=outcome.exit_ips, reasons=[*outcome.reasons, "DETAIL_PARSE_ERROR"],
+                    )
+                with lock:
+                    stats["details_error"] += 1
+                    stats["errors_by_reason"]["DETAIL_PARSE_ERROR"] += 1
+                continue
+
             if product is None:
-                stats["details_filtered"] += 1
+                if checkpoint is not None:
+                    checkpoint.save_p2_result(
+                        asin, "filtered", attempts=outcome.attempts,
+                        exit_ips=outcome.exit_ips, reasons=outcome.reasons,
+                    )
+                with lock:
+                    stats["details_filtered"] += 1
             else:
-                stats["details_ok"] += 1
                 product["node_id"] = item["node_id"]
                 product["category_name"] = item["name"]
                 product["category_depth"] = item["depth"]
                 product["site"] = _SITE
-                batch.append(product)
-
-                if len(batch) >= 20:
-                    saved = _save_products(batch)
+                try:
+                    saved = _save_products([product])
+                except Exception as exc:
+                    _log.error(f"[detail] asin={asin} reason=DB_SAVE_ERROR error={exc}")
+                    if checkpoint is not None:
+                        checkpoint.save_p2_result(
+                            asin, "error", error_code="DB_SAVE_ERROR",
+                            final_reason="DB_SAVE_ERROR", attempts=outcome.attempts,
+                            exit_ips=outcome.exit_ips, reasons=[*outcome.reasons, "DB_SAVE_ERROR"],
+                        )
+                    with lock:
+                        stats["details_error"] += 1
+                        stats["errors_by_reason"]["DB_SAVE_ERROR"] += 1
+                    continue
+                if checkpoint is not None:
+                    checkpoint.save_p2_result(
+                        asin, "matched", attempts=outcome.attempts,
+                        exit_ips=outcome.exit_ips, reasons=outcome.reasons,
+                    )
+                with lock:
+                    stats["details_ok"] += 1
                     stats["saved"] += saved
-                    batch.clear()
 
-            done = stats["details_ok"] + stats["details_filtered"] + stats["details_error"]
-            if done % 50 == 0:
-                _print_p2_progress()
-
-    if batch:
-        with lock:
-            saved = _save_products(batch)
-            stats["saved"] += saved
-
-    if proxy_entry:
-        pool.release(proxy_entry)
+            with lock:
+                _update_pool_stats(pool)
+                done = stats["details_ok"] + stats["details_filtered"] + stats["details_error"]
+                if done % 50 == 0:
+                    _print_p2_progress()
+    finally:
+        client.close()
 
 
 def _print_p1_progress():
@@ -937,7 +1044,8 @@ def _print_p1_progress():
     _log.info(
         f"  [P1 {n}/{t}] ASIN总={stats['asins_found']} "
         f"去重={stats['asins_unique']} captcha={stats['captcha']} "
-        f"err={stats['p1_error']}"
+        f"err={stats['p1_error']} reasons={dict(stats['errors_by_reason'])} "
+        f"pool={stats['pool_usable']}可用/{stats['pool_cooling']}冷却/{stats['pool_disabled']}禁用"
     )
 
 
@@ -947,7 +1055,9 @@ def _print_p2_progress():
     _log.info(
         f"  [P2 {done}/{total}] 命中={stats['details_ok']} "
         f"过滤={stats['details_filtered']} "
-        f"入库={stats['saved']} err={stats['details_error']}"
+        f"入库={stats['saved']} err={stats['details_error']} "
+        f"reasons={dict(stats['errors_by_reason'])} "
+        f"pool={stats['pool_usable']}可用/{stats['pool_cooling']}冷却/{stats['pool_disabled']}禁用"
     )
 
 
@@ -985,7 +1095,7 @@ def _build_filters_from_args(args) -> tuple[dict, dict]:
 
 def main():
     global _mp, _SITE, _DOMAIN, _LANG, _DECIMAL_SEP, _RATING_PAT
-    global _LIST_FILTERS, _DETAIL_FILTERS
+    global _LIST_FILTERS, _DETAIL_FILTERS, checkpoint
 
     parser = argparse.ArgumentParser(description="Amazon 最新到货商品抓取")
     parser.add_argument("--site", default="DE", help="站点代码: US, DE, JP, UK, FR")
@@ -1027,6 +1137,7 @@ def main():
         "--exact-roots", action="store_true",
         help="仅抓 --roots 所选类目本身，不展开全部下级（默认会展开）",
     )
+    parser.add_argument("--no-resume", action="store_true", help="忽略同配置断点并重新开始")
     args = parser.parse_args()
 
     _SITE = args.site.upper()
@@ -1044,9 +1155,13 @@ def main():
     except ProxyRequiredError as e:
         _log.error(f"[proxy] 强制代理失败: {e.code} {e}")
         raise SystemExit(2) from e
-    num_workers = pool.size
-    if num_workers < 1:
-        _log.error("[proxy] 代理池为空，拒绝启动")
+    num_workers = max(1, min(pool.usable_count, PROXY_MAX_CRAWL_WORKERS))
+    touch_crawl_activity(active=True, source="fetch_new_arrivals")
+    if pool.usable_count < PROXY_MIN_START_NODES:
+        _log.error(
+            "[proxy] 启动拒绝：可用代理=%d，最低要求=%d",
+            pool.usable_count, PROXY_MIN_START_NODES,
+        )
         raise SystemExit(2)
 
     nodes = _load_nodes(
@@ -1055,89 +1170,199 @@ def main():
         root_ids=args.roots,
         include_descendants=not args.exact_roots,
     )
+    depth_hint = (
+        f"L{nodes[0]['depth']}→L{nodes[-1]['depth']}" if nodes else "?"
+    )
     _log.info(
         f"类目范围: {'仅抓所选' if args.exact_roots else '所选及全部下级'} "
-        f"(roots={len(args.roots or [])} → nodes={len(nodes)})"
+        f"(roots={len(args.roots or [])} → nodes={len(nodes)}, "
+        f"深度优先: {depth_hint})"
     )
     if args.sample > 0:
-        random.shuffle(nodes)
+        sample_seed = canonical_signature({
+            "site": _SITE,
+            "roots": sorted(args.roots or []),
+            "depth": sorted(args.depth or []),
+            "exact_roots": bool(args.exact_roots),
+            "sample": args.sample,
+        })
+        random.Random(sample_seed).shuffle(nodes)
         nodes = nodes[:args.sample]
-    stats["nodes_total"] = len(nodes)
+
+    try:
+        max_details = int(os.getenv("AMZ_MAX_DETAILS", "0") or "0")
+    except ValueError:
+        max_details = 0
+
+    checkpoint_config = {
+        "site": _SITE,
+        "db_backend": DB_BACKEND,
+        "db_target_sha256": hashlib.sha256(
+            (
+                os.path.abspath(DB_FILE)
+                if DB_BACKEND != "pg"
+                else __import__("pg_config").get_pg_dsn()
+            ).encode("utf-8")
+        ).hexdigest()[:20],
+        "roots": sorted(args.roots or []),
+        "depth": sorted(args.depth or []),
+        "exact_roots": bool(args.exact_roots),
+        "max_pages": args.max_pages,
+        "max_details": max_details,
+        "sample": args.sample,
+        "node_count": len(nodes),
+        "node_ids_sha256": hashlib.sha256(
+            "\n".join(sorted(str(n["node_id"]) for n in nodes)).encode("utf-8")
+        ).hexdigest(),
+        "list_filters": _LIST_FILTERS,
+        "detail_filters": _DETAIL_FILTERS,
+    }
+    signature = canonical_signature(checkpoint_config)
+    checkpoint = NewArrivalsCheckpoint(
+        signature, checkpoint_config, resume=not args.no_resume,
+    )
+    restored_asins = checkpoint.load_asins()
+    all_asins.clear()
+    all_asins.update(restored_asins)
+    done_nodes = checkpoint.p1_done_ids()
+    cp_summary = checkpoint.summary()
+    stats.update({
+        "nodes_done": len(done_nodes),
+        "nodes_total": len(nodes),
+        "asins_unique": len(all_asins),
+        "details_ok": cp_summary["p2"].get("matched", 0),
+        "details_filtered": cp_summary["p2"].get("filtered", 0),
+        "details_error": cp_summary["p2"].get("error", 0),
+        "saved": cp_summary["p2"].get("matched", 0),
+    })
+    _update_pool_stats(pool)
 
     _log.info(f"=== 最新到货抓取 [{_mp['name']}] ===")
     _log.info(f"DB_BACKEND: {DB_BACKEND}")
     _log.info(f"节点数: {len(nodes)}, Worker数: {num_workers}, 最大翻页: {args.max_pages}")
     _log.info(f"列表筛选: {_LIST_FILTERS or '(无)'}")
     _log.info(f"详情筛选: {_DETAIL_FILTERS or '(无)'}")
+    _log.info(
+        "运行编号: %s, 断点=%s, 恢复节点=%d, 恢复ASIN=%d",
+        _RUN_ID, checkpoint.path, len(done_nodes), len(all_asins),
+    )
     _log.info("")
 
-    # ── Phase 1 ──
-    _log.info("━━━ Phase 1: 搜索列表页收集 ASIN（含价格/评分/评论筛选） ━━━")
     t0 = time.time()
-    task_q = Queue()
-    for n in nodes:
-        task_q.put(n)
-
-    with ThreadPoolExecutor(max_workers=num_workers) as exe:
-        futs = [exe.submit(_worker_phase1, i, task_q, pool, args.max_pages)
-                for i in range(num_workers)]
-        for f in as_completed(futs):
-            f.result()
-
-    p1_time = time.time() - t0
-    _log.info(
-        f"\n[P1 完成] {p1_time:.0f}s — 节点={stats['nodes_done']}, "
-        f"ASIN总={stats['asins_found']}, 去重={stats['asins_unique']}, "
-        f"captcha={stats['captcha']}"
-    )
-
-    if args.phase1_only or not all_asins:
-        _log.info("[结束] phase1-only 模式或无 ASIN")
-        return
-
-    # 测试/冒烟硬限制：AMZ_MAX_DETAILS>0 时截断详情队列（不改变筛选规则）
     try:
-        _max_details = int(os.getenv("AMZ_MAX_DETAILS", "0") or "0")
-    except ValueError:
-        _max_details = 0
-    if _max_details > 0 and len(all_asins) > _max_details:
-        keep = dict(list(all_asins.items())[:_max_details])
+        # ── Phase 1 ──
+        checkpoint.set_phase("P1")
+        remaining_nodes = [n for n in nodes if str(n["node_id"]) not in done_nodes]
         _log.info(
-            f"[限制] AMZ_MAX_DETAILS={_max_details}，"
-            f"详情 ASIN {len(all_asins)} → {len(keep)}"
+            "━━━ Phase 1: 搜索列表页收集 ASIN（待处理 %d / 总计 %d） ━━━",
+            len(remaining_nodes), len(nodes),
         )
+        p1_started = time.time()
+        if remaining_nodes:
+            task_q = Queue()
+            for node in remaining_nodes:
+                task_q.put(node)
+            run_autoscaled_queue(
+                _worker_phase1, task_q, pool,
+                initial_workers=num_workers,
+                max_workers=PROXY_MAX_CRAWL_WORKERS,
+                worker_args=(args.max_pages,),
+                log_prefix="P1",
+            )
+
         all_asins.clear()
-        all_asins.update(keep)
+        all_asins.update(checkpoint.load_asins())
+        stats["asins_unique"] = len(all_asins)
+        final_p1_done = checkpoint.p1_done_ids()
+        p1_time = time.time() - p1_started
+        _log.info(
+            "\n[P1 完成] %.0fs — 节点=%d/%d, 去重ASIN=%d, captcha=%d, 原因=%s",
+            p1_time, stats["nodes_done"], stats["nodes_total"],
+            stats["asins_unique"], stats["captcha"], dict(stats["errors_by_reason"]),
+        )
 
-    # ── Phase 2 ──
-    p2_workers = min(num_workers, max(num_workers // 2, 4))
-    _log.info(f"\n━━━ Phase 2: {len(all_asins)} 个 ASIN 详情页解析 (worker={p2_workers}) ━━━")
-    t1 = time.time()
-    detail_q = Queue()
-    for asin, info in all_asins.items():
-        detail_q.put({"asin": asin, **info})
+        p1_pending = [
+            str(node["node_id"]) for node in nodes
+            if str(node["node_id"]) not in final_p1_done
+        ]
+        if p1_pending:
+            checkpoint.set_phase("P1_RETRY_PENDING")
+            _log.error(
+                "[未完成] P1仍有%d个节点失败，断点已保留；下次只重试失败节点",
+                len(p1_pending),
+            )
+            raise SystemExit(4)
 
-    with ThreadPoolExecutor(max_workers=p2_workers) as exe:
-        futs = [exe.submit(_worker_phase2, i, detail_q, pool)
-                for i in range(p2_workers)]
-        for f in as_completed(futs):
-            f.result()
+        if args.phase1_only:
+            checkpoint.set_phase("P1_COMPLETE")
+            _log.info("[结束] phase1-only；P1断点已保留，可直接续跑P2")
+            return
+        if not all_asins:
+            checkpoint.complete()
+            _log.info("[结束] 未发现 ASIN")
+            return
 
-    p2_time = time.time() - t1
-    total_time = time.time() - t0
-    _log.info(
-        f"\n[P2 完成] {p2_time:.0f}s — 命中={stats['details_ok']}, "
-        f"过滤={stats['details_filtered']}, 入库={stats['saved']}"
-    )
-    _log.info(f"\n=== 总计 {total_time:.0f}s ===")
-    _log.info(f"  P1: {stats['nodes_done']}节点 → {stats['asins_unique']} ASIN")
-    _log.info(
-        f"  P2: {stats['details_ok']}命中 / {stats['details_filtered']}过滤 / "
-        f"{stats['details_error']}失败"
-    )
-    _log.info(f"  入库: {stats['saved']} 条")
+        if max_details > 0 and len(all_asins) > max_details:
+            keep = dict(list(all_asins.items())[:max_details])
+            _log.info(
+                "[限制] AMZ_MAX_DETAILS=%d，详情 ASIN %d → %d",
+                max_details, len(all_asins), len(keep),
+            )
+            all_asins.clear()
+            all_asins.update(keep)
 
-    _export_summary()
+        # ── Phase 2 ──
+        checkpoint.set_phase("P2")
+        p2_done = checkpoint.p2_done_ids()
+        remaining_asins = {asin: info for asin, info in all_asins.items() if asin not in p2_done}
+        p2_workers = max(1, min(pool.usable_count, PROXY_MAX_CRAWL_WORKERS, max(num_workers, 4)))
+        _log.info(
+            "\n━━━ Phase 2: 待处理 %d / 总计 %d 个 ASIN (初始worker=%d, 可动态扩容) ━━━",
+            len(remaining_asins), len(all_asins), p2_workers,
+        )
+        p2_started = time.time()
+        if remaining_asins:
+            detail_q = Queue()
+            for asin, info in remaining_asins.items():
+                detail_q.put({"asin": asin, **info})
+            run_autoscaled_queue(
+                _worker_phase2, detail_q, pool,
+                initial_workers=p2_workers,
+                max_workers=PROXY_MAX_CRAWL_WORKERS,
+                log_prefix="P2",
+            )
+
+        p2_time = time.time() - p2_started
+        final_cp = checkpoint.summary()
+        p2_errors = final_cp["p2"].get("error", 0)
+        if p2_errors:
+            checkpoint.set_phase("P2_RETRY_PENDING")
+            _log.error(
+                "[未完成] P2仍有%d个ASIN失败，断点已保留；下次只重试失败ASIN",
+                p2_errors,
+            )
+            raise SystemExit(4)
+        checkpoint.complete()
+        total_time = time.time() - t0
+        _log.info(
+            "\n[P2 完成] %.0fs — 命中=%d, 过滤=%d, 失败=%d, 入库=%d",
+            p2_time, stats["details_ok"], stats["details_filtered"],
+            stats["details_error"], stats["saved"],
+        )
+        _log.info(
+            "[完成] run=%s 总耗时=%.0fs pool=%s 尝试失败=%s",
+            _RUN_ID, total_time, pool.health_snapshot(), dict(stats["attempt_failures"]),
+        )
+        _export_summary()
+    except ProxyRequiredError as exc:
+        checkpoint.set_phase("PAUSED_PROXY")
+        _log.critical(
+            "[安全暂停] run=%s code=%s error=%s checkpoint=%s pool=%s",
+            _RUN_ID, exc.code, exc, checkpoint.path, pool.health_snapshot(),
+        )
+        raise SystemExit(3) from exc
+    finally:
+        checkpoint.close()
 
 
 def _export_summary():

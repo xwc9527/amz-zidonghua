@@ -205,6 +205,127 @@
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
+
+    /* ── 常驻代理池实时状态条 ── */
+    .proxy-live-badge {
+      position: fixed; right: 18px; top: 12px; z-index: 1100;
+      display: flex; align-items: center; gap: 6px;
+      background: #fff; border: 1px solid var(--border); border-radius: 999px;
+      padding: 5px 12px 5px 9px; font-size: 11.5px; color: var(--fg);
+      box-shadow: 0 2px 8px rgba(0,0,0,.08); cursor: default;
+      transition: background .15s;
+    }
+    .proxy-live-badge .plb-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #D1D5DB; flex-shrink: 0;
+    }
+    .proxy-live-badge .plb-dot.alive {
+      background: var(--success);
+      box-shadow: 0 0 0 0 rgba(16,185,129,.5); animation: logPulse 1.8s infinite;
+    }
+    .proxy-live-badge .plb-dot.dead { background: var(--danger, #EF4444); }
+    .proxy-live-badge .plb-text { white-space: nowrap; }
+    .proxy-live-badge .plb-text b { color: var(--primary); font-weight: 700; }
+    .proxy-live-badge.warn {
+      border-color: #F59E0B; background: #FFFBEB; color: #92400E;
+    }
+    .proxy-live-badge.warn .plb-text b { color: #D97706; }
+    .proxy-live-badge .plb-dot.warn-dot {
+      background: #F59E0B;
+      box-shadow: 0 0 0 0 rgba(245,158,11,.45); animation: logPulse 1.8s infinite;
+    }
+
+    /* ── 行动日志浮层 ── */
+    .log-fab {
+      position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+      z-index: 1100; writing-mode: vertical-rl; text-orientation: mixed;
+      border: 1px solid var(--border); border-right: none;
+      border-radius: 8px 0 0 8px; background: #fff; color: var(--fg);
+      font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+      padding: 14px 8px; cursor: pointer;
+      box-shadow: -2px 2px 10px rgba(0,0,0,.08);
+      display: flex; align-items: center; gap: 6px;
+      transition: background .15s, color .15s, padding .15s;
+    }
+    .log-fab:hover { background: #EEF2FF; color: var(--primary); }
+    .log-fab.active { background: var(--primary); color: #fff; }
+    .log-fab .log-fab-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: #D1D5DB;
+      writing-mode: horizontal-tb; flex-shrink: 0;
+    }
+    .log-fab .log-fab-dot.live {
+      background: var(--success);
+      box-shadow: 0 0 0 0 rgba(16,185,129,.5);
+      animation: logPulse 1.6s infinite;
+    }
+    @keyframes logPulse {
+      0% { box-shadow: 0 0 0 0 rgba(16,185,129,.45); }
+      70% { box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+      100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+    }
+    .log-panel {
+      position: fixed; right: 18px; bottom: 88px;
+      width: 360px; height: 320px;
+      min-width: 260px; min-height: 180px;
+      max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+      z-index: 1090; background: #fff;
+      border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.14);
+      display: flex; flex-direction: column;
+      opacity: 0; pointer-events: none;
+      transform: translateY(10px) scale(.98);
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    .log-panel.open {
+      opacity: 1; pointer-events: auto;
+      transform: translateY(0) scale(1);
+    }
+    .log-panel.resizing { transition: none; user-select: none; }
+    .log-panel-head {
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+      background: #FAFAFA; border-radius: 10px 10px 0 0;
+      cursor: move;
+    }
+    .log-rs {
+      position: absolute; z-index: 2;
+    }
+    .log-rs-n  { top: -3px; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+    .log-rs-s  { bottom: -3px; left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+    .log-rs-e  { right: -3px; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+    .log-rs-w  { left: -3px; top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+    .log-rs-nw { top: -4px; left: -4px; width: 12px; height: 12px; cursor: nwse-resize; }
+    .log-rs-ne { top: -4px; right: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
+    .log-rs-sw { bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: nesw-resize; }
+    .log-rs-se {
+      bottom: 2px; right: 2px; width: 14px; height: 14px; cursor: nwse-resize;
+      background:
+        linear-gradient(135deg, transparent 50%, #CBD5E1 50%, #CBD5E1 60%, transparent 60%),
+        linear-gradient(135deg, transparent 68%, #CBD5E1 68%, #CBD5E1 78%, transparent 78%);
+      border-radius: 0 0 8px 0;
+    }
+    .log-panel-title { font-size: 13px; font-weight: 700; color: var(--fg); }
+    .log-panel-meta { font-size: 11px; color: var(--gray); margin-left: 2px; }
+    .log-panel-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    .log-panel-actions button {
+      border: 1px solid var(--border); background: #fff; border-radius: 5px;
+      font-size: 11px; padding: 3px 8px; cursor: pointer; color: var(--fg);
+    }
+    .log-panel-actions button:hover { background: #F3F4F6; }
+    .log-panel-actions button.on { background: #EEF2FF; color: var(--primary); border-color: #C7D2FE; }
+    .log-body {
+      flex: 1; overflow: auto; margin: 0; padding: 8px 10px;
+      background: #0F172A; color: #E2E8F0; border-radius: 0 0 10px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    }
+    .log-line { display: block; padding: 1px 0; }
+    .log-line.warn { color: #FBBF24; }
+    .log-line.error { color: #F87171; }
+    .log-line.info { color: #93C5FD; }
+    .log-empty { color: #64748B; padding: 24px 8px; text-align: center; }
+    .log-backdrop {
+      display: none; /* 小弹窗不遮罩整页 */
+    }
   </style>
 </head>
 <body>
@@ -457,6 +578,42 @@
     </div>
   </div>
 
+  <!-- 常驻代理池实时状态：守护进程持续验证/增补/淘汰节点，随时可见，不再有"卡在准备中"的困惑 -->
+  <div class="proxy-live-badge" id="proxyLiveBadge" title="常驻验证守护进程实时状态">
+    <span class="plb-dot" id="plbDot"></span>
+    <span class="plb-text" id="plbText">代理池: 检测中…</span>
+  </div>
+
+  <!-- 行动日志：侧边悬浮按钮 + 可展开面板（默认隐藏） -->
+  <button type="button" class="log-fab" id="logFab" onclick="toggleActionLog()" title="展开行动日志">
+    <span class="log-fab-dot" id="logFabDot"></span>
+    行动日志
+  </button>
+  <div class="log-backdrop" id="logBackdrop" onclick="closeActionLog()"></div>
+  <aside class="log-panel" id="logPanel" aria-hidden="true">
+    <div class="log-rs log-rs-n" data-dir="n" title="拉伸高度"></div>
+    <div class="log-rs log-rs-s" data-dir="s" title="拉伸高度"></div>
+    <div class="log-rs log-rs-e" data-dir="e" title="拉伸宽度"></div>
+    <div class="log-rs log-rs-w" data-dir="w" title="拉伸宽度"></div>
+    <div class="log-rs log-rs-nw" data-dir="nw"></div>
+    <div class="log-rs log-rs-ne" data-dir="ne"></div>
+    <div class="log-rs log-rs-sw" data-dir="sw"></div>
+    <div class="log-rs log-rs-se" data-dir="se" title="拖拽拉伸"></div>
+    <div class="log-panel-head" id="logPanelHead">
+      <div>
+        <div class="log-panel-title">行动日志</div>
+        <div class="log-panel-meta" id="logMeta">读取爬虫 FileHandler 日志</div>
+      </div>
+      <div class="log-panel-actions">
+        <button type="button" id="logAutoBtn" class="on" onclick="toggleLogAutoscroll()" title="自动滚到底部">跟随</button>
+        <button type="button" onclick="refreshActionLog(true)" title="立即刷新">刷新</button>
+        <button type="button" onclick="clearActionLogView()" title="仅清空本面板显示">清屏</button>
+        <button type="button" onclick="closeActionLog()" title="收起">✕</button>
+      </div>
+    </div>
+    <pre class="log-body" id="logBody"><div class="log-empty">打开后面会自动拉取最新日志</div></pre>
+  </aside>
+
   <script>
     let _currentChart = 'nr';
     let _currentSite = 'us';
@@ -578,8 +735,7 @@
       if (!wasOpen) el.style.display = 'block';
     }
     // 已选类目与站点/榜单强绑定：node_id 只在 (node_id, 站点) 组合下唯一，
-    // 且"最新到货"只认 na_valid 节点，切换后旧选择必须清空，否则会把
-    // 上一个站点/榜单选中的节点原样带进新的抓取任务。
+    // 切换后旧选择必须清空，否则会把上一个站点/榜单选中的节点带进新任务。
     function _clearSelectionOnContextSwitch() {
       if (_selectedNodes.size > 0) _selectedNodes.clear();
       updateSelectionCount();
@@ -780,6 +936,8 @@
     let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
     let taskSearchKeyword = '';
     const _selectedNodes = new Map();
+    // 合成根选中标记：表示抓取当前站点全部类目（不传 --roots）
+    const ALL_CATEGORIES_KEY = '__ALL__';
     // descendants = 所选 + 全部下级（默认，兼容现有行为）；selected = 仅抓所选类目本身
     let _categoryScope = 'descendants';
     function setCategoryScope(scope) {
@@ -790,12 +948,26 @@
       if (descBtn) descBtn.classList.toggle('active', _categoryScope === 'descendants');
       updateSelectionCount();
     }
+    function _isAllCategoriesSelected() {
+      return _selectedNodes.has(ALL_CATEGORIES_KEY);
+    }
+    function toggleSelectAllCategories() {
+      if (_isAllCategoriesSelected()) {
+        _selectedNodes.delete(ALL_CATEGORIES_KEY);
+      } else {
+        _selectedNodes.clear();
+        _selectedNodes.set(ALL_CATEGORIES_KEY, '🏠 全部分类');
+      }
+      updateSelectionCount();
+      loadTaskDrillDown();
+    }
     let _selectionCountRequest = 0;
     async function updateSelectionCount() {
       const badge = document.getElementById('selCount');
-      const roots = [..._selectedNodes.keys()].filter(Boolean);
+      const allSelected = _isAllCategoriesSelected();
+      const roots = [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
       const requestId = ++_selectionCountRequest;
-      if (!roots.length) {
+      if (!allSelected && !roots.length) {
         badge.innerText = '-';
         badge.title = '实际抓取类目数';
         return;
@@ -807,22 +979,30 @@
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            roots,
+            roots: allSelected ? [] : roots,
+            all_categories: allSelected,
+            chart: _currentChart,
             site: _currentSite.toUpperCase(),
             include_descendants: _categoryScope !== 'selected',
           }),
         });
         if (response.status === 404) {
           if (requestId !== _selectionCountRequest) return;
-          badge.innerText = String(roots.length);
-          badge.title = '服务待重启，暂显示已选入口 ' + roots.length + ' 个';
+          badge.innerText = allSelected ? '全部' : String(roots.length);
+          badge.title = allSelected
+            ? '服务待重启，已选全部分类'
+            : ('服务待重启，暂显示已选入口 ' + roots.length + ' 个');
           return;
         }
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const result = await response.json();
         if (requestId !== _selectionCountRequest) return;
         badge.innerText = String(result.count || 0);
-        badge.title = '实际抓取 ' + (result.count || 0) + ' 个类目（已选入口 ' + roots.length + ' 个）';
+        badge.title = allSelected
+          ? (_currentChart === 'la'
+            ? ('实际抓取全部 NEW 类目 ' + (result.count || 0) + ' 个')
+            : ('实际抓取全部 ' + (result.count || 0) + ' 个类目'))
+          : ('实际抓取 ' + (result.count || 0) + ' 个类目（已选入口 ' + roots.length + ' 个）');
       } catch (e) {
         if (requestId !== _selectionCountRequest) return;
         badge.innerText = '!';
@@ -838,14 +1018,15 @@
     function _renderDrillItem(child, idx) {
       const hasChild = child.child_count > 0;
       const key = child.node_id;
-      const isSel = _selectedNodes.has(key);
+      // 全选时子项视觉上也视为选中（实际抓取由 __ALL__ 驱动）
+      const isSel = _isAllCategoriesSelected() || _selectedNodes.has(key);
       const d = child.depth != null ? child.depth : 1;
       const depthLabel = d > 0 ? 'L' + d : '';
 
-      // 最新到货模式：叶子节点按 na_valid 控制，父节点始终可导航
+      // 最新到货：NEW 叶子可抓；父/根节点也可勾选（表示抓该类目及全部下级）
       const isLA = _currentChart === 'la';
       const naSupported = child.na_valid === 1;
-      const laDisabled = isLA && !naSupported;
+      const allMode = _isAllCategoriesSelected();
 
       // 链接：最新到货模式用搜索 URL，其它模式用新品榜 URL
       const siteDomains = {
@@ -862,15 +1043,17 @@
         ? (domain + '/s?rh=n%3A' + child.node_id + '&s=date-desc-rank')
         : (domain + '/gp/new-releases/' + (child.slug || 'home-garden') + '/' + child.node_id + '/');
 
-      const disabledStyle = laDisabled && !hasChild ? 'opacity:0.38; pointer-events:none;' : '';
       const naTag = isLA && naSupported ? '<span style="font-size:10px; color:#16a34a; font-weight:700; margin-left:4px; flex-shrink:0;">NEW</span>' : '';
-      const itemName = isLA && !naSupported
-        ? '<span class="item-name" title="仅用于层级导航">' + child.name + '</span>'
-        : '<a class="item-name" href="' + itemUrl + '" target="_blank" title="' + child.name + '" onclick="event.stopPropagation()' + (laDisabled ? '; return false;' : '') + '">' + child.name + '</a>';
+      const itemTitle = isLA && !naSupported
+        ? (hasChild ? '勾选后抓取其全部下级' : '仅用于层级导航')
+        : child.name;
+      const itemName = isLA && !naSupported && !hasChild
+        ? '<span class="item-name" title="' + itemTitle + '">' + child.name + '</span>'
+        : '<a class="item-name" href="' + itemUrl + '" target="_blank" title="' + itemTitle + '" onclick="event.stopPropagation()">' + child.name + '</a>';
 
       return '<div class="drill-item ' + (isSel ? 'selected' : '') + '" ondblclick="' + (hasChild ? 'taskDiveIn(' + idx + ')' : '') + '">' +
-          '<input type="checkbox" ' + (isSel ? 'checked' : '') + (laDisabled ? ' disabled' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')">' +
-          '<span class="item-name-wrap" style="' + disabledStyle + '">' + itemName + '</span>' +
+          '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onclick="event.stopPropagation(); toggleSelect(\'' + key + '\',\'' + child.name.replace(/'/g, "\\'") + '\')" title="' + (allMode ? '点击后退出全选并只抓该类目' : '') + '">' +
+          '<span class="item-name-wrap">' + itemName + '</span>' +
           naTag +
           (depthLabel ? '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:24px; text-align:right;">' + depthLabel + '</span>' : '') +
           '<span style="font-size:11px; color:var(--gray); flex-shrink:0; width:30px; text-align:right;">' + (hasChild ? child.child_count : '-') + '</span>' +
@@ -887,9 +1070,21 @@
 
     async function loadTaskDrillDown() {
       const current = taskCurrentPath[taskCurrentPath.length - 1];
+      const allSelected = _isAllCategoriesSelected();
+      const allowRootSelect = _currentChart === 'la';
       const bcHtml = (taskCurrentPath.length > 1 ? '<span class="bc-link" onclick="navTaskTo(' + (taskCurrentPath.length - 2) + ')" style="margin-right:6px; font-size:14px; cursor:pointer;" title="返回上一级">←</span>' : '') +
         taskCurrentPath.map((node, idx) => {
         const isLast = idx === taskCurrentPath.length - 1;
+        const isSyntheticRoot = node.node_id === 'root';
+        if (isSyntheticRoot && allowRootSelect) {
+          const label = isLast
+            ? ('<span>' + node.name + '</span>')
+            : ('<span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span>');
+          return '<div class="bc-item' + (isLast ? ' bc-current' : '') + '" style="display:flex; align-items:center; gap:6px;">' +
+            '<input type="checkbox" ' + (allSelected ? 'checked' : '') +
+            ' onclick="event.stopPropagation(); toggleSelectAllCategories()" title="勾选后抓取全部类目">' +
+            label + '</div>';
+        }
         if (isLast) return '<div class="bc-item bc-current">' + node.name + '</div>';
         return '<div class="bc-item"><span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span></div>';
       }).join('');
@@ -961,8 +1156,15 @@
       loadTaskDrillDown();
     }
     function toggleSelect(key, name) {
-      if (_selectedNodes.has(key)) _selectedNodes.delete(key);
-      else _selectedNodes.set(key, name || key);
+      if (_isAllCategoriesSelected()) {
+        // 全选模式下点击子项：退出全选，改为只勾该项
+        _selectedNodes.clear();
+        _selectedNodes.set(key, name || key);
+      } else if (_selectedNodes.has(key)) {
+        _selectedNodes.delete(key);
+      } else {
+        _selectedNodes.set(key, name || key);
+      }
       updateSelectionCount();
       loadTaskDrillDown();
     }
@@ -981,25 +1183,35 @@
     }
     function renderSelectedModal() {
       const list = document.getElementById('selModalList');
-      document.getElementById('selModalCount').textContent = _selectedNodes.size;
+      document.getElementById('selModalCount').textContent = _isAllCategoriesSelected() ? '全部' : _selectedNodes.size;
       if (_selectedNodes.size === 0) {
         list.innerHTML = '<div style="padding:30px; text-align:center; color:var(--gray); font-size:13px;">暂无已选类目</div>';
         return;
       }
       let html = '';
       _selectedNodes.forEach((name, nid) => {
+        const uncheck = nid === ALL_CATEGORIES_KEY
+          ? 'toggleSelectAllCategories(); renderSelectedModal();'
+          : 'toggleSelect(\'' + nid + '\'); renderSelectedModal(); loadTaskDrillDown();';
         html += '<div style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--border); font-size:13px;">' +
-          '<input type="checkbox" checked onclick="toggleSelect(\'' + nid + '\'); renderSelectedModal(); loadTaskDrillDown();">' +
+          '<input type="checkbox" checked onclick="' + uncheck + '">' +
           '<span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="' + name + '">' + name + '</span>' +
-          '<span style="font-size:11px; color:var(--gray); font-family:monospace;">' + nid + '</span>' +
+          '<span style="font-size:11px; color:var(--gray); font-family:monospace;">' + (nid === ALL_CATEGORIES_KEY ? '全部类目' : nid) + '</span>' +
         '</div>';
       });
       list.innerHTML = html;
     }
     function selModalSelectAll() {
-      currentTaskChildren.forEach(c => {
-        if (!_selectedNodes.has(c.node_id)) _selectedNodes.set(c.node_id, c.name);
-      });
+      // 最新到货 + 根层：一键全选 = 抓全部类目；其它情况勾选当前可见项
+      if (_currentChart === 'la' && taskCurrentPath.length === 1 && taskCurrentPath[0].node_id === 'root') {
+        _selectedNodes.clear();
+        _selectedNodes.set(ALL_CATEGORIES_KEY, '🏠 全部分类');
+      } else {
+        _selectedNodes.delete(ALL_CATEGORIES_KEY);
+        currentTaskChildren.forEach(c => {
+          if (!_selectedNodes.has(c.node_id)) _selectedNodes.set(c.node_id, c.name);
+        });
+      }
       updateSelectionCount();
       renderSelectedModal();
       loadTaskDrillDown();
@@ -1018,6 +1230,15 @@
     let _isRunning = false;
     let _isStarting = false;
     let _startingLabel = '准备中';
+    let _lastProxyAlertKey = '';
+    const PROXY_FAIL_ALERTS = {
+      CRAWL_RETRY_PENDING: '部分节点/商品请求失败，断点已保留；再次开始将只重试失败项',
+      POOL_RECOVERY_EXHAUSTED: '运行时可用代理不足，自动重建次数已用尽；断点已保留',
+      POOL_RECOVERY_LOCK_BUSY: '代理恢复与其他准备冲突，断点已保留',
+      POOL_RECOVERY_FAILED: '运行时代理重建失败，断点已保留',
+      CRAWLER_EXIT_FAILED: '抓取进程异常退出',
+      CRAWLER_RESUME_FAILED: '断点续跑失败',
+    };
     function updateRunBtn() {
       const btn = document.getElementById('btnToggleRun');
       if (_isStarting) {
@@ -1035,6 +1256,40 @@
       }
     }
 
+    function updateProxyLiveBadge(proxyState) {
+      const badge = document.getElementById('proxyLiveBadge');
+      const dot = document.getElementById('plbDot');
+      const text = document.getElementById('plbText');
+      if (!dot || !text) return;
+      const daemon = (proxyState && proxyState.daemon) || {};
+      if (!daemon.alive) {
+        if (badge) badge.classList.remove('warn');
+        dot.className = 'plb-dot dead';
+        text.innerHTML = '代理池: 守护进程未运行';
+        return;
+      }
+      const verified = daemon.verified ?? 0;
+      const hot = daemon.hot ?? verified;
+      const warm = daemon.warm ?? Math.max(0, verified - hot);
+      const candidates = daemon.candidates ?? 0;
+      const checking = daemon.checking ?? 0;
+      const failed = daemon.failed ?? 0;
+      const lowWatermark = daemon.low_watermark ?? 10;
+      const target = daemon.target_pool_size ?? 14;
+      const poolLow = daemon.pool_low === true || hot < lowWatermark;
+      const idle = !!daemon.idle_mode;
+      if (badge) badge.classList.toggle('warn', poolLow);
+      dot.className = poolLow ? 'plb-dot warn-dot' : 'plb-dot alive';
+      let extra = '';
+      if (checking) extra += ` · 验证中 ${checking}`;
+      if (failed) extra += ` · 待重试 ${failed}`;
+      if (warm) extra += ` · 温池 ${warm}`;
+      if (idle) extra += ' · 空闲放缓';
+      if (!poolLow && hot < target) extra += ` · 补池中(目标${target})`;
+      if (poolLow) extra += ` · 低于警戒线${lowWatermark}，已自动降载`;
+      text.innerHTML = `代理池: <b>${hot}</b> 热 / ${candidates} 候选${extra}`;
+    }
+
     async function refreshProductStats() {
       try {
         const stamp = Date.now();
@@ -1044,6 +1299,7 @@
         ]);
         const d = await r.json();
         const proxyState = proxyR.ok ? await proxyR.json() : {};
+        updateProxyLiveBadge(proxyState);
         // 最新到货看 new_arrivals，榜单看 product_sightings
         const total = _currentChart === 'la' ? (d.new_arrivals || 0) : (d.total_asins || 0);
         document.getElementById('p_total_side').textContent = total;
@@ -1060,6 +1316,7 @@
             start_mihomo: '启动代理',
             restart_mihomo: '恢复代理',
             quick_verify: '快速验证',
+            runtime_recovery: '重建代理并续跑',
             health_check: detail.candidate_nodes
               ? `验证 ${detail.checked_nodes || 0}/${detail.candidate_nodes}`
               : '验证代理',
@@ -1068,6 +1325,20 @@
         } else if (!_isStarting || lifecycle) {
           _isStarting = false;
           _isRunning = !!d.running;
+        }
+        // 后台看门狗写入的异步失败：只提示一次，避免轮询刷屏
+        if (lifecycle === 'proxy_failed') {
+          const detail = proxyState.detail || {};
+          const code = detail.error_code || '';
+          const reason = detail.reason || '';
+          const key = (proxyState.run_id || '') + '|' + code + '|' + reason;
+          if (key !== _lastProxyAlertKey && (code || reason)) {
+            _lastProxyAlertKey = key;
+            const msg = PROXY_FAIL_ALERTS[code] || reason || code || '代理/抓取失败';
+            alert('抓取已停止\n' + msg + (code ? '\n错误码: ' + code : ''));
+          }
+        } else if (lifecycle === 'running' || lifecycle === 'idle') {
+          _lastProxyAlertKey = '';
         }
         updateRunBtn();
       } catch(e) {}
@@ -1287,8 +1558,9 @@
           updateRunBtn();
         } catch(e) { alert('停止失败: ' + e); }
       } else {
-        const allSelected = [..._selectedNodes.keys()].filter(Boolean);
-        if (!allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
+        const selectAllCategories = _isAllCategoriesSelected();
+        const allSelected = [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
+        if (!selectAllCategories && !allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
 
         const chartMap = {nr:'new-releases', bs:'bestsellers', ms:'movers-and-shakers', mw:'most-wished-for', mg:'most-gifted'};
         const enabledLists = _currentChart === 'la' ? [] : [chartMap[_currentChart]];
@@ -1296,7 +1568,8 @@
         const rangeError = validateFilterRanges(filters);
         if (rangeError) { alert('⚠️ 筛选条件不合法\n\n' + rangeError); return; }
         const params = {
-          roots: allSelected,
+          roots: selectAllCategories ? [] : allSelected,
+          all_categories: selectAllCategories,
           lists: enabledLists,
           site: _currentSite.toUpperCase(),
           chart: _currentChart,
@@ -1431,7 +1704,276 @@
     initResize('treeResizeHandle', 'treePanelEl', 'amz_tree_w');
     window.addEventListener('resize', clampSidePanels);
 
+    // ── 行动日志（直接读取 fetch_*.log FileHandler）──
+    let _logOpen = false;
+    let _logPos = 0;
+    let _logAutoscroll = true;
+    let _logTimer = null;
+    let _logFetching = false;
+    let _logChart = '';
+
+    function _logLineClass(line) {
+      if (/\b(ERROR|CRITICAL|Traceback)\b/i.test(line)) return 'error';
+      if (/\b(WARNING|WARN)\b/i.test(line)) return 'warn';
+      if (/\b(INFO)\b/i.test(line) || /\[P[12]\s|\[fetch_|\[proxy\]|\[pool\]|━━━|完成/.test(line)) return 'info';
+      return '';
+    }
+    function _appendLogLines(lines, reset) {
+      const body = document.getElementById('logBody');
+      if (!body) return;
+      if (reset) body.innerHTML = '';
+      if (!lines || !lines.length) {
+        if (!body.textContent.trim() || body.querySelector('.log-empty')) {
+          body.innerHTML = '<div class="log-empty">暂无日志（尚未启动抓取或日志文件为空）</div>';
+        }
+        return;
+      }
+      if (body.querySelector('.log-empty')) body.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      lines.forEach(line => {
+        const span = document.createElement('span');
+        span.className = 'log-line ' + _logLineClass(line);
+        span.textContent = line;
+        frag.appendChild(span);
+        frag.appendChild(document.createTextNode('\n'));
+      });
+      body.appendChild(frag);
+      // 防止面板无限膨胀：只保留最后约 1500 行 DOM 节点
+      const nodes = body.querySelectorAll('.log-line');
+      if (nodes.length > 1500) {
+        const removeCount = nodes.length - 1500;
+        for (let i = 0; i < removeCount; i++) {
+          const n = nodes[i];
+          const next = n.nextSibling;
+          n.remove();
+          if (next && next.nodeType === 3) next.remove();
+        }
+      }
+      if (_logAutoscroll) body.scrollTop = body.scrollHeight;
+    }
+    function _setLogLive(live) {
+      const dot = document.getElementById('logFabDot');
+      if (dot) dot.classList.toggle('live', !!live);
+    }
+    async function refreshActionLog(forceFull) {
+      if (_logFetching) return;
+      _logFetching = true;
+      try {
+        if (_logChart && _logChart !== _currentChart) {
+          forceFull = true;
+          _logPos = 0;
+        }
+        _logChart = _currentChart;
+        const since = forceFull ? 0 : _logPos;
+        const url = API + '/api/v2/crawl_logs?chart=' + encodeURIComponent(_currentChart)
+          + '&lines=300&since_pos=' + since + '&t=' + Date.now();
+        const r = await fetch(url);
+        // 404 = 旧 API 进程未加载接口 / 文件路由未命中 → 按空日志处理，不弹红错
+        if (r.status === 404) {
+          const meta = document.getElementById('logMeta');
+          if (meta) meta.textContent = '暂无日志（接口未就绪或文件为空，请重启 API）';
+          if (forceFull) _appendLogLines([], true);
+          return;
+        }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const meta = document.getElementById('logMeta');
+        if (meta) {
+          if (!d.exists) {
+            meta.textContent = (d.source || 'log') + ' · 暂无日志文件';
+          } else {
+            const state = d.running ? (d.lifecycle || 'running') : (d.lifecycle || 'idle');
+            meta.textContent = (d.source || 'log') + ' · ' + state
+              + (d.run_id ? ' · ' + d.run_id : '')
+              + (d.size != null ? ' · ' + Math.round(d.size / 1024) + 'KB' : '');
+          }
+        }
+        _setLogLive(!!d.running || ['preparing_proxy', 'proxy_ready', 'starting_crawler', 'running'].includes(d.lifecycle));
+        if (forceFull || !d.incremental) {
+          _appendLogLines(d.lines || [], true);
+        } else if ((d.lines || []).length) {
+          _appendLogLines(d.lines, false);
+        }
+        _logPos = d.pos || 0;
+      } catch (e) {
+        const meta = document.getElementById('logMeta');
+        if (meta) meta.textContent = '暂无日志';
+        if (forceFull) _appendLogLines([], true);
+      } finally {
+        _logFetching = false;
+      }
+    }
+    function _scheduleLogPoll() {
+      if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+      if (!_logOpen) return;
+      _logTimer = setInterval(() => refreshActionLog(false), 2000);
+    }
+    function _logBounds() {
+      return {
+        minW: 260, minH: 180,
+        maxW: Math.max(260, window.innerWidth - 24),
+        maxH: Math.max(180, window.innerHeight - 24),
+      };
+    }
+    function _applyLogBox(box) {
+      const panel = document.getElementById('logPanel');
+      if (!panel || !box) return;
+      const b = _logBounds();
+      const w = Math.max(b.minW, Math.min(b.maxW, box.w));
+      const h = Math.max(b.minH, Math.min(b.maxH, box.h));
+      let right = Math.max(8, box.right);
+      let bottom = Math.max(8, box.bottom);
+      // 保证不超出视口
+      right = Math.min(right, Math.max(8, window.innerWidth - w - 8));
+      bottom = Math.min(bottom, Math.max(8, window.innerHeight - h - 8));
+      panel.style.width = w + 'px';
+      panel.style.height = h + 'px';
+      panel.style.right = right + 'px';
+      panel.style.bottom = bottom + 'px';
+      return { w, h, right, bottom };
+    }
+    function _saveLogBox() {
+      const panel = document.getElementById('logPanel');
+      if (!panel) return;
+      const box = {
+        w: panel.offsetWidth,
+        h: panel.offsetHeight,
+        right: parseFloat(panel.style.right) || 18,
+        bottom: parseFloat(panel.style.bottom) || 88,
+      };
+      try { localStorage.setItem('amz_log_box', JSON.stringify(box)); } catch (e) {}
+    }
+    function _restoreLogBox() {
+      try {
+        const raw = localStorage.getItem('amz_log_box');
+        if (!raw) return;
+        _applyLogBox(JSON.parse(raw));
+      } catch (e) {}
+    }
+    function _initLogResize() {
+      const panel = document.getElementById('logPanel');
+      const head = document.getElementById('logPanelHead');
+      if (!panel) return;
+      _restoreLogBox();
+
+      let drag = null;
+      function onMove(e) {
+        if (!drag) return;
+        const dx = e.clientX - drag.x;
+        const dy = e.clientY - drag.y;
+        let { w, h, right, bottom } = drag.start;
+        const dir = drag.dir;
+        if (dir === 'move') {
+          right = drag.start.right - dx;
+          bottom = drag.start.bottom - dy;
+        } else {
+          if (dir.includes('e')) { w = drag.start.w + dx; right = drag.start.right - dx; }
+          if (dir.includes('w')) { w = drag.start.w - dx; }
+          if (dir.includes('s')) { h = drag.start.h + dy; bottom = drag.start.bottom - dy; }
+          if (dir.includes('n')) { h = drag.start.h - dy; }
+        }
+        _applyLogBox({ w, h, right, bottom });
+      }
+      function onUp() {
+        if (!drag) return;
+        panel.classList.remove('resizing');
+        drag = null;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        _saveLogBox();
+      }
+      function startDrag(dir, e) {
+        e.preventDefault();
+        e.stopPropagation();
+        drag = {
+          dir,
+          x: e.clientX,
+          y: e.clientY,
+          start: {
+            w: panel.offsetWidth,
+            h: panel.offsetHeight,
+            right: parseFloat(panel.style.right) || 18,
+            bottom: parseFloat(panel.style.bottom) || 88,
+          },
+        };
+        panel.classList.add('resizing');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      }
+      panel.querySelectorAll('.log-rs').forEach(el => {
+        el.addEventListener('mousedown', e => startDrag(el.dataset.dir, e));
+      });
+      if (head) {
+        head.addEventListener('mousedown', e => {
+          if (e.target.closest('button')) return;
+          startDrag('move', e);
+        });
+      }
+      window.addEventListener('resize', () => {
+        _applyLogBox({
+          w: panel.offsetWidth,
+          h: panel.offsetHeight,
+          right: parseFloat(panel.style.right) || 18,
+          bottom: parseFloat(panel.style.bottom) || 88,
+        });
+      });
+    }
+    function openActionLog() {
+      _logOpen = true;
+      _restoreLogBox();
+      document.getElementById('logPanel').classList.add('open');
+      document.getElementById('logBackdrop').classList.add('open');
+      document.getElementById('logFab').classList.add('active');
+      document.getElementById('logPanel').setAttribute('aria-hidden', 'false');
+      refreshActionLog(true);
+      _scheduleLogPoll();
+    }
+    function closeActionLog() {
+      _logOpen = false;
+      _saveLogBox();
+      document.getElementById('logPanel').classList.remove('open');
+      document.getElementById('logBackdrop').classList.remove('open');
+      document.getElementById('logFab').classList.remove('active');
+      document.getElementById('logPanel').setAttribute('aria-hidden', 'true');
+      if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+    }
+    function toggleActionLog() {
+      if (_logOpen) closeActionLog();
+      else openActionLog();
+    }
+    function toggleLogAutoscroll() {
+      _logAutoscroll = !_logAutoscroll;
+      const btn = document.getElementById('logAutoBtn');
+      if (btn) btn.classList.toggle('on', _logAutoscroll);
+      if (_logAutoscroll) {
+        const body = document.getElementById('logBody');
+        if (body) body.scrollTop = body.scrollHeight;
+      }
+    }
+    function clearActionLogView() {
+      const body = document.getElementById('logBody');
+      if (body) body.innerHTML = '<div class="log-empty">已清屏（文件未删除，刷新可重新载入）</div>';
+    }
+    // 用户上滚时暂停跟随，滚到底部恢复
+    (function() {
+      const body = document.getElementById('logBody');
+      if (!body) return;
+      body.addEventListener('scroll', () => {
+        const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+        if (!nearBottom && _logAutoscroll) {
+          _logAutoscroll = false;
+          const btn = document.getElementById('logAutoBtn');
+          if (btn) btn.classList.remove('on');
+        } else if (nearBottom && !_logAutoscroll) {
+          _logAutoscroll = true;
+          const btn = document.getElementById('logAutoBtn');
+          if (btn) btn.classList.add('on');
+        }
+      });
+    })();
+
     // ── 初始化 ──
+    _initLogResize();
     loadStats();
     updateChartAvailability();
     updateCurrencyLabels();
@@ -1443,6 +1985,15 @@
     loadLiveProducts();
     setInterval(() => { refreshProductStats(); loadLiveProducts(); refreshProductProgress(); }, 10000);
     setInterval(loadStats, 15000);
+    // 即使面板收起也轻量刷新状态点，便于发现抓取中
+    setInterval(async () => {
+      if (_logOpen) return;
+      try {
+        const r = await fetch(API + '/api/v2/product_progress?t=' + Date.now());
+        const d = await r.json();
+        _setLogLive(!!d.running || ['preparing_proxy', 'proxy_ready', 'starting_crawler', 'running'].includes(d.lifecycle || ''));
+      } catch (e) {}
+    }, 8000);
   </script>
 </body>
 </html>

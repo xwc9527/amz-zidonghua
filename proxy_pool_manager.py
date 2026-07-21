@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -19,6 +21,7 @@ from config import (
     PROXY_BASE_PORT,
     PROXY_LOCK_FILE,
     PROXY_MIN_AMAZON_OK,
+    PROXY_MIN_START_NODES,
     PROXY_MIN_UNIQUE_IPS,
     PROXY_MIN_VERIFIED_NODES,
     PROXY_POOL_CANDIDATE_FILE,
@@ -28,6 +31,12 @@ from config import (
     PROXY_POOL_STATUS_FILE,
     PROXY_PROBE_CACHE_FILE,
     PROXY_PROBE_CACHE_TTL,
+)
+from proxy_daemon import (
+    is_daemon_alive,
+    read_daemon_state,
+    request_daemon_stop,
+    touch_crawl_activity,
 )
 from proxy_health import (
     get_reference_ips,
@@ -54,6 +63,7 @@ STATUS_STOPPING = "stopping"
 
 _state_lock = threading.RLock()
 _refresh_lock = threading.Lock()
+_daemon_spawn_lock = threading.Lock()
 _status = {
     "status": STATUS_IDLE,
     "run_id": "",
@@ -97,6 +107,15 @@ def set_status(status: str, run_id: str = "", **detail) -> dict:
         _atomic_write_json(PROXY_POOL_STATUS_FILE, snap)
     except Exception as e:
         log.warning("[status] 写入失败: %s", e)
+    # 抓取活跃时给守护进程心跳，使其保持正常验证节奏；idle 时标记 inactive
+    try:
+        active = status in (
+            STATUS_PREPARING, STATUS_PROXY_READY, STATUS_STARTING_CRAWLER,
+            STATUS_RUNNING, STATUS_STOPPING,
+        )
+        touch_crawl_activity(active=active, source=f"status:{status}")
+    except Exception:
+        pass
     return snap
 
 
@@ -295,6 +314,101 @@ def _record_failure(run_id: str, payload: dict) -> None:
         log.warning("[publish] 失败记录写入异常: %s", e)
 
 
+# ── 常驻验证守护进程控制 ─────────────────────────────────────────
+# 守护进程独立于 api_server / 抓取生命周期：一直运行、持续验证/增补/淘汰节点，
+# 并独占管理它自己的 Mihomo 实例。这里只负责“确保它活着”和“需要时停止它”。
+
+def daemon_alive() -> int | None:
+    return is_daemon_alive()
+
+
+def daemon_status() -> dict:
+    return read_daemon_state() or {}
+
+
+def ensure_daemon_running(*, wait_pid_sec: float = 5.0) -> dict:
+    """确保常驻验证守护进程存活；不在其中等待验证结果，只保证进程已启动。"""
+    pid = daemon_alive()
+    if pid:
+        return {"ok": True, "pid": pid, "started": False}
+    with _daemon_spawn_lock:
+        pid = daemon_alive()
+        if pid:
+            return {"ok": True, "pid": pid, "started": False}
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_daemon.py")
+        try:
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = 0x00000008 | getattr(subprocess, "CREATE_NO_WINDOW", 0)  # DETACHED_PROCESS
+            subprocess.Popen(
+                [sys.executable, "-u", script],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        except Exception as exc:
+            log.exception("[manager] 拉起守护进程失败")
+            return {"ok": False, "error": str(exc), "error_code": "DAEMON_SPAWN_FAILED"}
+    deadline = time.time() + max(0.5, wait_pid_sec)
+    while time.time() < deadline:
+        pid = daemon_alive()
+        if pid:
+            log.info("[manager] 守护进程已拉起 pid=%s", pid)
+            return {"ok": True, "pid": pid, "started": True}
+        time.sleep(0.2)
+    return {"ok": False, "error": "守护进程启动后未在超时内写入 PID 文件", "error_code": "DAEMON_START_TIMEOUT"}
+
+
+def stop_daemon(wait_sec: float = 10.0) -> dict:
+    """停止常驻守护进程（连带它持有的独立 Mihomo）。仅用于人工维护/测试，正常运行不需要调用。"""
+    pid = daemon_alive()
+    if not pid:
+        return {"ok": True, "error": "无运行记录", "error_code": "NOT_RUNNING"}
+    # 先走文件信号，让 daemon.run_forever() 进入 finally，正常关闭线程池、
+    # Mihomo 并清理 PID 文件。Windows 的 taskkill /F 不会执行 finally，正是
+    # 此前留下 Mihomo 孤儿进程的根因。
+    try:
+        request_daemon_stop(pid)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "error_code": "STOP_SIGNAL_FAILED"}
+    deadline = time.time() + max(0.0, wait_sec)
+    while time.time() < deadline and daemon_alive():
+        time.sleep(0.2)
+    still_alive = bool(daemon_alive())
+    forced = False
+    if still_alive:
+        # 最后兜底：先显式清理 Mihomo，再终止 daemon。/T 防止遗漏仍挂在
+        # daemon 进程树下的辅助进程；所有 subprocess 都禁止弹窗。
+        stop_owned_mihomo()
+        forced = True
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            else:
+                os.kill(pid, 9)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "error_code": "STOP_FAILED"}
+        deadline = time.time() + 3.0
+        while time.time() < deadline and daemon_alive():
+            time.sleep(0.2)
+        still_alive = bool(daemon_alive())
+    return {
+        "ok": not still_alive,
+        "forced": forced,
+        "error_code": "" if not still_alive else "STILL_ALIVE",
+    }
+
+
 def prepare_proxy_pool(
     *,
     max_nodes: int | None = None,
@@ -302,10 +416,24 @@ def prepare_proxy_pool(
     force: bool = True,
 ) -> PrepareResult:
     """
-    完整构建并原子发布代理池。
+    独立工具/测试用途的完整冷启动验证（不在常规抓取启动路径上）。
+    抓取启动请使用 ensure_proxy_ready()：它委托常驻守护进程（proxy_daemon.py）
+    持续验证/增补/淘汰节点，不再阻塞等待整批验证完成。
+
     force=True：每次开始都重新验证（默认，符合验收要求）。
+
+    注意：本函数会启停独立 Mihomo（复用与守护进程相同的 PID 文件），若常驻
+    守护进程正在运行，两者会互相抢占同一个 Mihomo 实例；因此这里会拒绝在
+    守护进程存活时执行，避免打断它正在维护的活池。
     """
     run_id = f"PROXY-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    daemon_pid = daemon_alive()
+    if daemon_pid:
+        return PrepareResult(
+            ok=False, status=STATUS_PROXY_FAILED, run_id=run_id,
+            reason=f"常驻验证守护进程正在运行(pid={daemon_pid})，请先 stop_daemon() 再执行完整冷启动体检",
+            error_code="DAEMON_ACTIVE",
+        )
     lock = RefreshLock()
     if not lock.acquire(timeout=0.5):
         return PrepareResult(
@@ -382,7 +510,7 @@ def _prepare_locked(
 
     # 非强制入口优先复用同一订阅指纹下、仍在完整验证有效期内的健康池。
     # 复用并非盲信文件：会恢复/确认 Mihomo，并重新验证池内全部健康节点；
-    # 只有最终仍达到硬门槛（默认 11）才允许抓取启动。
+    # 只有最终仍达到硬门槛（默认 8）才允许抓取启动。
     cache_hits = read_probe_cache(fp) if not force else None
     if cache_hits:
         reused = _try_reuse_pool(run_id, loaded, cache_hits)
@@ -623,7 +751,7 @@ def _try_reuse_pool(run_id: str, loaded, cache_hits: list[dict]) -> PrepareResul
         cached_entries=len(previous_entries),
     )
     started = time.monotonic()
-    # 对历史健康池全部并发复核，而不是只抽样；由此严格保证发布时仍有 >=11 个
+    # 对历史健康池全部并发复核，而不是只抽样；严格保证发布时仍达启动门槛。
     # 独立、Amazon 可用、非 IPRoyal（完整验证期内）的出口。
     refs = get_reference_ips()
     banned = {ip for ip in (refs.get("direct_ip"), refs.get("main_proxy_ip")) if ip}
@@ -677,20 +805,75 @@ def _try_reuse_pool(run_id: str, loaded, cache_hits: list[dict]) -> PrepareResul
     )
 
 
-def ensure_proxy_ready(*, force: bool = False) -> PrepareResult:
+def ensure_proxy_ready(*, force: bool = False, timeout: float = 60.0) -> PrepareResult:
     """
-    API / 抓取启动入口。默认优先走热/温启动；仅在订阅变化、缓存过期、
-    运行时缺失且无法恢复、或复核后少于硬门槛时进入完整冷启动。
-    返回结构化结果；失败不启动抓取。
+    API / 抓取启动入口（新架构：委托常驻验证守护进程）。
+
+    正常路径（force=False）：
+      1. 确保常驻守护进程（proxy_daemon.py）存活——若未运行则拉起，
+         但不在这里等待它完成任何验证。
+      2. 轮询守护进程持续维护的活池（PROXY_POOL_FILE），直到可用节点数
+         达到 PROXY_MIN_START_NODES（默认 8）或超时。
+    守护进程通常早已常驻运行多时，活池是热的，这里往往几乎瞬时返回；
+    只有守护进程刚被拉起、还没来得及验证出第一个可用节点时才需要等待。
+    其余候选节点会在抓取运行期间由守护进程持续验证增补/淘汰，
+    抓取侧的 ForcedProxyPool 通过热重载感知这些变化，不需要重新调用本函数。
+
+    force=True：跳过守护进程委托，直接执行一次完整冷启动体检
+    （prepare_proxy_pool，独立工具路径；调用前会检查并拒绝与常驻守护进程冲突）。
     """
-    return prepare_proxy_pool(force=force, stop_owned_after=False)
+    if force:
+        return prepare_proxy_pool(force=True, stop_owned_after=False)
+
+    spawn = ensure_daemon_running()
+    if not spawn.get("ok"):
+        run_id = ""
+        set_status(STATUS_PROXY_FAILED, run_id=run_id, reason=spawn.get("error"))
+        return PrepareResult(
+            ok=False, status=STATUS_PROXY_FAILED, run_id=run_id,
+            reason=spawn.get("error") or "守护进程未能启动",
+            error_code=spawn.get("error_code") or "DAEMON_START_FAILED",
+        )
+
+    deadline = time.monotonic() + max(1.0, timeout)
+    while True:
+        pool = _read_json(PROXY_POOL_FILE) or {}
+        entries = pool.get("entries") if isinstance(pool, dict) else pool
+        usable = len(entries) if isinstance(entries, list) else 0
+        state = daemon_status()
+        run_id = str(state.get("run_id") or pool.get("run_id") or "")
+        if usable >= PROXY_MIN_START_NODES:
+            return PrepareResult(
+                ok=True, status=STATUS_PROXY_READY, run_id=run_id,
+                candidate_nodes=int(state.get("candidates") or 0),
+                verified_nodes=usable, unique_ips=usable, amazon_ok=usable,
+                reason="ok",
+                fingerprint=state.get("fingerprint"),
+                stats={"source": "proxy_daemon", **state},
+            )
+        if time.monotonic() >= deadline:
+            reason = (
+                f"守护进程活池不足：可用={usable} < {PROXY_MIN_START_NODES}，"
+                f"候选={state.get('candidates', 0)} 验证中={state.get('checking', 0)} "
+                f"待重试={state.get('failed', 0)}"
+            )
+            return PrepareResult(
+                ok=False, status=STATUS_PROXY_FAILED, run_id=run_id,
+                candidate_nodes=int(state.get("candidates") or 0),
+                verified_nodes=usable, unique_ips=usable,
+                reason=reason, error_code="DAEMON_POOL_NOT_READY",
+                stats={"source": "proxy_daemon", **state},
+            )
+        time.sleep(1.0)
 
 
 def stop_proxy_pool() -> dict:
-    set_status(STATUS_STOPPING)
-    res = stop_owned_mihomo()
-    set_status(STATUS_IDLE, stop=res.to_dict())
-    return res.to_dict()
+    """新架构下 Mihomo 归常驻守护进程持有并一直运行；这里只重置抓取生命周期
+    状态，不再停止独立 Mihomo（避免打断守护进程正在维护的活池）。
+    如需真正停止验证与 Mihomo，请显式调用 stop_daemon()。
+    """
+    set_status(STATUS_IDLE)
+    return {"ok": True, "note": "守护进程与其独立 Mihomo 常驻运行，未被停止"}
 
 
 # ── 运行时动态池（供 probe_na_valid 等复用）────────────────────────

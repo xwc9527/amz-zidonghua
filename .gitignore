@@ -34,12 +34,29 @@ data/proxy_pool.last_failed.json
 data/proxy_pool_status.json
 data/proxy_pool.lock
 data/lb_instance/
+data/proxy_daemon_pid.json
+data/proxy_daemon_pid.json.lock
+data/proxy_daemon_state.json
+data/proxy_daemon_port_map.json
+data/proxy_daemon_activity.json
+data/api_server_*.lock
+data/api_server_*.lock.owner.json
+data/*_supervisor.pid
+data/terminal_monitor_baseline.json
 
 # 代理池审计/冒烟产物（诊断用，非交付物）
 data/proxy_audit_*.json
 data/proxy_smoke_*.json
 data/proxy_smoke_*.log
 data/categories_proxy_smoke_*.db
+
+# 抓取断点（逐节点/逐ASIN恢复用SQLite，运行期产物）
+data/checkpoints/
+
+# 抓取请求审计/测试摘要（诊断用，非交付物）
+data/fetch_new_arrivals_attempts.jsonl
+data/fetch_products_attempts.jsonl
+data/na_test_summary_*.json
 
 # 样本HTML（调试用，不入库）
 data/sample_*.html

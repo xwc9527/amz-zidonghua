@@ -256,18 +256,110 @@ class TestThresholdAndPublish(unittest.TestCase):
                 self.assertTrue(last_failed.is_file())
 
 
-class TestReadyPoolReuse(unittest.TestCase):
-    def test_ensure_defaults_to_reuse_path(self):
+class TestDaemonDelegation(unittest.TestCase):
+    """ensure_proxy_ready 新语义：委托常驻守护进程，不再阻塞式冷启动整批验证。"""
+
+    def test_ensure_proxy_ready_force_true_still_cold_starts(self):
         expected = proxy_pool_manager.PrepareResult(
             ok=True, status=proxy_pool_manager.STATUS_PROXY_READY, run_id="R"
         )
         with mock.patch.object(
             proxy_pool_manager, "prepare_proxy_pool", return_value=expected
         ) as prepare_mock:
-            result = proxy_pool_manager.ensure_proxy_ready()
+            result = proxy_pool_manager.ensure_proxy_ready(force=True)
         self.assertIs(result, expected)
-        prepare_mock.assert_called_once_with(force=False, stop_owned_after=False)
+        prepare_mock.assert_called_once_with(force=True, stop_owned_after=False)
 
+    def test_ensure_proxy_ready_returns_immediately_when_pool_already_hot(self):
+        """守护进程早已常驻、活池已有 >= PROXY_MIN_START_NODES 个节点时，几乎瞬时返回。"""
+        with tempfile.TemporaryDirectory() as td:
+            pool_path = Path(td) / "proxy_pool.json"
+            pool_path.write_text(json.dumps({
+                "run_id": "DAEMON-1",
+                "entries": [{"name": "n1", "port": 18001, "proxy": "http://127.0.0.1:18001", "exit_ip": "1.1.1.1"}],
+            }), encoding="utf-8")
+            with mock.patch.object(proxy_pool_manager, "PROXY_POOL_FILE", str(pool_path)):
+                with mock.patch.object(proxy_pool_manager, "PROXY_MIN_START_NODES", 1):
+                    with mock.patch.object(
+                        proxy_pool_manager, "ensure_daemon_running",
+                        return_value={"ok": True, "pid": 111, "started": False},
+                    ) as spawn_mock:
+                        with mock.patch.object(
+                            proxy_pool_manager, "daemon_status",
+                            return_value={"run_id": "DAEMON-1", "candidates": 3, "checking": 1, "failed": 0},
+                        ):
+                            with mock.patch.object(proxy_pool_manager, "set_status"):
+                                start = time.monotonic()
+                                result = proxy_pool_manager.ensure_proxy_ready(force=False, timeout=5)
+                                elapsed = time.monotonic() - start
+        spawn_mock.assert_called_once()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, proxy_pool_manager.STATUS_PROXY_READY)
+        self.assertEqual(result.verified_nodes, 1)
+        self.assertEqual(result.candidate_nodes, 3)
+        self.assertLess(elapsed, 2.0, "活池已达标时应几乎立即返回，不应等待整个 timeout")
+
+    def test_ensure_proxy_ready_times_out_when_daemon_pool_insufficient(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool_path = Path(td) / "proxy_pool.json"
+            pool_path.write_text(json.dumps({"run_id": "DAEMON-2", "entries": []}), encoding="utf-8")
+            with mock.patch.object(proxy_pool_manager, "PROXY_POOL_FILE", str(pool_path)):
+                with mock.patch.object(proxy_pool_manager, "PROXY_MIN_START_NODES", 1):
+                    with mock.patch.object(
+                        proxy_pool_manager, "ensure_daemon_running", return_value={"ok": True, "pid": 111},
+                    ):
+                        with mock.patch.object(
+                            proxy_pool_manager, "daemon_status",
+                            return_value={"run_id": "DAEMON-2", "candidates": 0, "checking": 0, "failed": 0},
+                        ):
+                            with mock.patch.object(proxy_pool_manager, "set_status"):
+                                result = proxy_pool_manager.ensure_proxy_ready(force=False, timeout=0.3)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "DAEMON_POOL_NOT_READY")
+
+    def test_ensure_proxy_ready_fails_fast_when_daemon_cannot_start(self):
+        with mock.patch.object(
+            proxy_pool_manager, "ensure_daemon_running",
+            return_value={"ok": False, "error": "spawn boom", "error_code": "DAEMON_SPAWN_FAILED"},
+        ):
+            with mock.patch.object(proxy_pool_manager, "set_status"):
+                result = proxy_pool_manager.ensure_proxy_ready(force=False, timeout=5)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "DAEMON_SPAWN_FAILED")
+
+    def test_prepare_proxy_pool_rejects_when_daemon_alive(self):
+        """冷启动体检工具与常驻守护进程共用同一个 Mihomo 归属文件，二者不能同时跑。"""
+        with mock.patch.object(proxy_pool_manager, "daemon_alive", return_value=4321):
+            result = proxy_pool_manager.prepare_proxy_pool(force=True)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "DAEMON_ACTIVE")
+
+    def test_ensure_daemon_running_spawns_when_not_alive(self):
+        calls = {"n": 0}
+
+        def _fake_alive():
+            # 前两次调用（拉起前的存活检查 + 拿锁后的二次确认）都返回 None，
+            # 第三次起（拉起后轮询 PID 文件）才返回真实 pid。
+            calls["n"] += 1
+            return None if calls["n"] <= 2 else 777
+
+        with mock.patch.object(proxy_pool_manager, "daemon_alive", side_effect=_fake_alive):
+            with mock.patch.object(proxy_pool_manager.subprocess, "Popen") as popen_mock:
+                result = proxy_pool_manager.ensure_daemon_running(wait_pid_sec=1)
+        popen_mock.assert_called_once()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["started"])
+        self.assertEqual(result["pid"], 777)
+
+    def test_ensure_daemon_running_noop_when_already_alive(self):
+        with mock.patch.object(proxy_pool_manager, "daemon_alive", return_value=555):
+            with mock.patch.object(proxy_pool_manager.subprocess, "Popen") as popen_mock:
+                result = proxy_pool_manager.ensure_daemon_running()
+        popen_mock.assert_not_called()
+        self.assertEqual(result, {"ok": True, "pid": 555, "started": False})
+
+
+class TestReadyPoolReuse(unittest.TestCase):
     def test_hot_reuse_requires_and_publishes_at_least_eleven(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -368,6 +460,80 @@ class TestForcedProxy(unittest.TestCase):
                         self.assertFalse(loaded.allow_direct)
 
 
+class TestLiveReload(unittest.TestCase):
+    """ForcedProxyPool 活池热重载 + acquire() 有界等待（取代立即崩溃）。"""
+
+    def _entry(self, name: str, ip: str) -> dict:
+        return {"name": name, "port": 0, "proxy": f"http://127.0.0.1:{name}", "exit_ip": ip}
+
+    def test_reload_from_file_adds_new_and_evicts_missing(self):
+        pool = ForcedProxyPool(
+            entries=[self._entry("a", "1.1.1.1")], required=True, min_usable=1,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            pool_path = Path(td) / "proxy_pool.json"
+            pool_path.write_text(json.dumps({
+                "entries": [self._entry("b", "2.2.2.2"), self._entry("c", "3.3.3.3")],
+            }), encoding="utf-8")
+            pool._pool_path = str(pool_path)
+            result = pool.reload_from_file()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["added"], 2)
+        self.assertEqual(result["removed"], 1)  # "a" 消失
+        keys = set(pool._states.keys())
+        self.assertEqual(keys, {"http://127.0.0.1:b", "http://127.0.0.1:c"})
+
+    def test_reload_defers_removal_of_in_use_entry_until_release(self):
+        pool = ForcedProxyPool(entries=[self._entry("a", "1.1.1.1")], required=True, min_usable=1)
+        entry = pool.acquire(timeout=1)
+        self.assertIsNotNone(entry)
+        with tempfile.TemporaryDirectory() as td:
+            pool_path = Path(td) / "proxy_pool.json"
+            pool_path.write_text(json.dumps({"entries": []}), encoding="utf-8")
+            pool._pool_path = str(pool_path)
+            pool.reload_from_file()
+        # 正被占用：不能立即物理移除，只标记 pending_removal
+        self.assertIn("http://127.0.0.1:a", pool._states)
+        self.assertTrue(pool._states["http://127.0.0.1:a"]["pending_removal"])
+        pool.release(entry, outcome="SUCCESS")
+        self.assertNotIn("http://127.0.0.1:a", pool._states)
+
+    def test_acquire_waits_then_raises_when_pool_stays_below_minimum(self):
+        pool = ForcedProxyPool(
+            entries=[self._entry("a", "1.1.1.1")], required=True, min_usable=2,
+            wait_for_replenish_sec=0.3,
+        )
+        started = time.monotonic()
+        with self.assertRaises(ProxyRequiredError) as ctx:
+            pool.acquire(timeout=5)
+        elapsed = time.monotonic() - started
+        self.assertEqual(ctx.exception.code, "POOL_BELOW_MINIMUM")
+        # 应该等待了一段时间（而不是立即报错），但不超过 replenish 上限太多
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 3.0)
+
+    def test_acquire_succeeds_once_live_reload_replenishes_pool(self):
+        pool = ForcedProxyPool(
+            entries=[self._entry("a", "1.1.1.1")], required=True, min_usable=2,
+            wait_for_replenish_sec=5,
+        )
+
+        def _replenish_soon():
+            time.sleep(0.2)
+            with pool._cv:
+                pool._add_entry_locked(self._entry("b", "2.2.2.2"))
+                pool._cv.notify_all()
+
+        t = threading.Thread(target=_replenish_soon, daemon=True)
+        t.start()
+        started = time.monotonic()
+        entry = pool.acquire(timeout=5)
+        elapsed = time.monotonic() - started
+        t.join(timeout=2)
+        self.assertIsNotNone(entry)
+        self.assertLess(elapsed, 2.0, "补充节点后应很快被唤醒并成功获取，不应等到超时")
+
+
 class TestRuntimeLock(unittest.TestCase):
     def test_refresh_lock_single_instance(self):
         with tempfile.TemporaryDirectory() as td:
@@ -428,7 +594,8 @@ class TestPrepareFailurePropagation(unittest.TestCase):
                                     },
                                 ):
                                     with mock.patch.object(proxy_pool_manager, "stop_owned_mihomo"):
-                                        res = proxy_pool_manager.prepare_proxy_pool(force=True)
+                                        with mock.patch.object(proxy_pool_manager, "daemon_alive", return_value=None):
+                                            res = proxy_pool_manager.prepare_proxy_pool(force=True)
             self.assertFalse(res.ok)
             self.assertEqual(res.error_code, "THRESHOLD_NOT_MET")
             self.assertEqual(pool.read_text(encoding="utf-8"), before)
@@ -453,7 +620,8 @@ class TestPrepareFailurePropagation(unittest.TestCase):
                 with mock.patch.object(proxy_pool_manager, "write_probe_cache"):
                     with mock.patch.object(proxy_pool_manager, "_record_failure"):
                         with mock.patch.object(proxy_pool_manager, "set_status"):
-                            res = proxy_pool_manager.prepare_proxy_pool(force=True)
+                            with mock.patch.object(proxy_pool_manager, "daemon_alive", return_value=None):
+                                res = proxy_pool_manager.prepare_proxy_pool(force=True)
         self.assertFalse(res.ok)
         self.assertEqual(res.status, "proxy_failed")
         self.assertEqual(res.error_code, "PROCESS_EXITED")
@@ -477,7 +645,8 @@ class TestPrepareFailurePropagation(unittest.TestCase):
                     ) as stop_mock:
                         with mock.patch.object(proxy_pool_manager, "_record_failure") as record_mock:
                             with mock.patch.object(proxy_pool_manager, "set_status"):
-                                result = proxy_pool_manager.prepare_proxy_pool(force=True)
+                                with mock.patch.object(proxy_pool_manager, "daemon_alive", return_value=None):
+                                    result = proxy_pool_manager.prepare_proxy_pool(force=True)
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "PREPARE_EXCEPTION")
         stop_mock.assert_called_once()

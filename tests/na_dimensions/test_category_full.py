@@ -138,11 +138,11 @@ def run_category_full(col: SuiteCollector):
                 severity="P1",
             ))
 
-            # 空 roots → 全部 depth>0
+            # 空 roots → 全部 NEW（na_valid=1）类目
             n = na._load_nodes("US", root_ids=None, include_descendants=True)
             col.add(CaseResult(
                 "CAT2-EMPTY-ROOTS", "类目范围", "类目展开",
-                "PASS" if len(n) >= 8 else "FAIL", ">=8", len(n),
+                "PASS" if len(n) >= 7 else "FAIL", ">=7 NEW", len(n),
             ))
 
             # 不存在 root

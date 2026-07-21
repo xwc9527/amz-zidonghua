@@ -55,6 +55,12 @@ def main() -> int:
     conn.commit()
     conn.close()
 
+    from proxy_pool_manager import ensure_proxy_ready
+    prep = ensure_proxy_ready(force=False)
+    if not prep.ok:
+        print("POOL_PREPARE_FAIL", prep.error_code, prep.reason)
+        return 2
+
     from proxy_session import load_proxy_pool
     from proxy_health import fetch_exit_ip
 
@@ -83,6 +89,7 @@ def main() -> int:
         "PROXY_REQUIRED": "1",
         "ALLOW_DIRECT_FALLBACK": "0",
         "AMZ_MAX_DETAILS": "20",
+        "AMZ_RUN_ID": RUN_ID,
         "PYTHONIOENCODING": "utf-8",
     })
 
@@ -100,17 +107,37 @@ def main() -> int:
     print("RUN", RUN_ID, flush=True)
     print("CMD", cmd, flush=True)
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd=str(ROOT), env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    runs = []
+    recovery = []
+    for attempt in range(2):
+        proc = subprocess.run(
+            cmd, cwd=str(ROOT), env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        runs.append({
+            "attempt": attempt + 1,
+            "exit_code": proc.returncode,
+            "stdout": proc.stdout or "",
+            "stderr": proc.stderr or "",
+        })
+        if proc.returncode != 3 or attempt > 0:
+            break
+        rebuilt = ensure_proxy_ready(force=True)
+        recovery.append(rebuilt.to_dict())
+        if not rebuilt.ok:
+            break
     elapsed = round(time.time() - t0, 1)
     log_path = ROOT / "data" / f"proxy_smoke_{RUN_ID}.log"
-    log_path.write_text(
-        (proc.stdout or "") + "\n---STDERR---\n" + (proc.stderr or ""),
-        encoding="utf-8",
+    combined = "\n".join(
+        f"=== ATTEMPT {run['attempt']} EXIT {run['exit_code']} ===\n"
+        f"{run['stdout']}\n---STDERR---\n{run['stderr']}"
+        for run in runs
     )
+    log_path.write_text(combined, encoding="utf-8")
     print("EXIT", proc.returncode, "ELAPSED", elapsed, "LOG", log_path)
 
     # 代理携带证据：日志中应出现强制加载 / warmup proxy=
-    out = (proc.stdout or "") + (proc.stderr or "")
+    out = combined
     proxy_loaded = "强制加载" in out or "强制代理池就绪" in out or "[pool] 强制加载" in out
     warmup_proxy = "proxy=" in out
     no_direct = "使用直连" not in out and "allow_direct" not in out.lower()
@@ -141,6 +168,8 @@ def main() -> int:
     report = {
         "run_id": RUN_ID,
         "exit_code": proc.returncode,
+        "attempt_exit_codes": [run["exit_code"] for run in runs],
+        "runtime_recovery": recovery,
         "elapsed_sec": elapsed,
         "proxy_loaded_in_log": proxy_loaded,
         "warmup_proxy_logged": warmup_proxy,

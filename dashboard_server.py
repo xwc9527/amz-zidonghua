@@ -492,6 +492,7 @@ def _start_scraper():
             [sys.executable, "-u", SCRAPER],
             stdin=subprocess.PIPE,
             cwd=BASE_DIR,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
         _is_paused = False
         print(f"[爬虫] 已启动 PID={_proc.pid}", flush=True)
@@ -578,7 +579,10 @@ def _start_product_scraper(params: dict):
             cmd += ["--price-max", str(params["price_max"])]
         if params.get("delay"):
             cmd += ["--delay", str(params["delay"])]
-        _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR)
+        _product_proc = subprocess.Popen(
+            cmd, cwd=BASE_DIR,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
     print(f"[商品] 已启动 PID={_product_proc.pid}", flush=True)
     return {"status": "started", "pid": _product_proc.pid}
 
@@ -627,60 +631,8 @@ def get_mtimes(files):
 
 
 def main():
-    # 启用自修复与代码热重载机制 (开发/守护模式)
-    ENV_VAR = "DASHBOARD_SERVER_CHILD"
-    if ENV_VAR not in os.environ:
-        import time
-        print("[守护进程] 自修复与代码热重载机制已启动。", flush=True)
-        p = None
-        try:
-            while True:
-                child_env = os.environ.copy()
-                child_env[ENV_VAR] = "1"
-                p = subprocess.Popen([sys.executable] + sys.argv, env=child_env)
-                
-                py_files = get_py_files()
-                mtimes = get_mtimes(py_files)
-                
-                restarted = False
-                while p.poll() is None:
-                    time.sleep(1)
-                    current_files = get_py_files()
-                    current_mtimes = get_mtimes(current_files)
-                    
-                    changed = False
-                    if set(current_files) != set(py_files):
-                        changed = True
-                    else:
-                        for f in current_files:
-                            if current_mtimes.get(f) != mtimes.get(f):
-                                changed = True
-                                break
-                    if changed:
-                        print("[守护进程] 检测到代码修改，正在自动重启后端服务...", flush=True)
-                        p.terminate()
-                        try:
-                            p.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            p.kill()
-                        restarted = True
-                        break
-                
-                if not restarted:
-                    code = p.returncode
-                    print(f"[守护进程] 后端服务已退出 (退出码: {code})。自修复机制将在 2 秒后自动重启服务...", flush=True)
-                    time.sleep(2)
-        except KeyboardInterrupt:
-            print("\n[守护进程] 正在停止守护与后端服务...", flush=True)
-            if p and p.poll() is None:
-                p.terminate()
-                try:
-                    p.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-        sys.exit(0)
-
-    # 子进程执行的实际 HTTP 服务逻辑
+    # 旧看板入口只运行单个 HTTP 进程。统一的守护、单实例和有限重启由
+    # start_server.py 负责；这里不得再套一层无上限自重启循环。
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 
     if not os.path.exists(DB_FILE):

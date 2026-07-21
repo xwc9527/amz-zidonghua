@@ -3,11 +3,9 @@ fetch_products.py — 商品抓取脚本（独立进程）
 从 categories.db 读取有效节点，抓取 3 个 SSR 榜单的商品数据
 用法: python fetch_products.py
 """
-import sqlite3, threading, time, sys, os, re, json, argparse, logging, traceback, random
+import sqlite3, threading, time, sys, os, re, json, argparse, logging, traceback, random, hashlib
 from curl_cffi import requests as requests
-from curl_cffi.requests import RequestsError
 from datetime import datetime
-from queue import Queue, Empty
 from bs4 import BeautifulSoup
 from fba_fees_us import estimate_fba_fees
 from detail_parser import (
@@ -16,6 +14,9 @@ from detail_parser import (
     attach_normalized_dims,
     extract_image_url,
 )
+from crawl_checkpoint import ProductsCheckpoint, canonical_signature
+from config import PROXY_MIN_START_NODES, get_marketplace
+from proxy_daemon import touch_crawl_activity
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -37,7 +38,6 @@ BASE    = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "data", "categories.db")
 DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
-from config import get_marketplace
 _mp     = get_marketplace("US")
 _SITE   = "US"
 _DOMAIN = _mp["domain"]
@@ -46,6 +46,8 @@ _CURRENCY     = _mp["currency"]
 _DECIMAL_SEP  = _mp["decimal_sep"]
 _RATING_PAT   = _mp["rating_pattern"]
 _RESULTS_PAT  = _mp["results_pattern"]
+_RUN_ID = os.getenv("AMZ_RUN_ID") or datetime.now().strftime("PS-%Y%m%d-%H%M%S")
+_AUDIT_PATH = os.path.join(BASE, "data", "fetch_products_attempts.jsonl")
 
 # PG support
 _pg_conn = None
@@ -87,11 +89,30 @@ HEADERS = {
 }
 
 from proxy_session import (
+    ForcedProxyPool,
     ProxyRequiredError,
     assert_session_has_proxy,
-    load_proxy_pool,
     make_forced_session,
 )
+from proxy_worker import (
+    AttemptAuditor,
+    WorkerProxyClient as SharedWorkerProxyClient,
+    has_us_currency_mismatch,
+    is_captcha_page,
+    pool_aware_delay,
+    raise_if_pool_below_minimum,
+)
+
+
+def _pool_delay(delay: float, pool=None) -> float:
+    """在基础 delay 上按可用代理数放大（低可用时更保守）。"""
+    usable = PROXY_MIN_START_NODES
+    try:
+        if pool is not None:
+            usable = pool.usable_count
+    except Exception:
+        pass
+    return pool_aware_delay(delay, delay * 1.5, usable)
 
 LIST_LABELS = {
     "new-releases":       "新品榜",
@@ -111,95 +132,78 @@ LIST_COL_MAP = {
 
 _db_lock = threading.Lock()
 _stats = {"total_nodes": 0, "done_nodes": 0, "skipped": 0,
-          "products_found": 0, "products_saved": 0, "products_dup": 0, "errors": 0}
+          "products_found": 0, "products_saved": 0, "products_dup": 0, "errors": 0,
+          "pool_usable": 0, "pool_cooling": 0, "pool_disabled": 0}
 _stats_lock = threading.Lock()
 _seen_asins = set()
 _seen_lock = threading.Lock()
+_checkpoint: ProductsCheckpoint | None = None
 
-# ── 代理池（强制代理，禁止静默直连）────────────────────────────────
-
-_proxy_pool: list[dict] = []
-_proxy_idx = 0
-
-def _validate_proxy_pool():
-    """强制加载已发布代理池；空池/过期直接失败。"""
-    global _proxy_pool
-    loaded = load_proxy_pool(required=True, allow_direct=False)
-    if not loaded.ok:
-        raise ProxyRequiredError(loaded.error, loaded.error_code)
-    _proxy_pool = list(loaded.entries)
-    ips = {e.get("exit_ip") for e in _proxy_pool if e.get("exit_ip")}
-    _log.info(f"[proxy] 强制代理池就绪: {len(_proxy_pool)} 节点, {len(ips)} 独立IP")
+# ── 代理池（强制代理 + 独立出口轮换，与最新到货共用 Worker）────────
 
 
-def _next_proxy() -> dict:
-    """轮询返回下一个代理；无代理视为程序错误。"""
-    global _proxy_idx
-    if not _proxy_pool:
-        raise ProxyRequiredError("代理池为空", "POOL_EMPTY")
-    p = _proxy_pool[_proxy_idx % len(_proxy_pool)]
-    _proxy_idx += 1
-    return p
+class ProxyPool(ForcedProxyPool):
+    def __init__(self):
+        # min_usable 用 PROXY_MIN_START_NODES（默认 8）：常驻验证守护进程持续
+        # 在后台增补节点，这里不再要求启动时就凑够一大批；enable_live_reload
+        # 让运行期间能持续感知守护进程新增/淘汰的节点。
+        super().__init__(
+            required=True, min_usable=PROXY_MIN_START_NODES, enable_live_reload=True,
+        )
+        _log.info(f"[pool] 强制加载 {self.size} 个代理端口（min_usable={self.min_usable}，活池热重载已开启）")
 
 
-def _make_session(warmup: bool = True) -> requests.Session:
-    """创建强制带代理的 session。"""
-    ua = random.choice(USER_AGENTS)
+def _has_marketplace_currency_mismatch(text: str) -> bool:
+    if _SITE != "US":
+        return False
+    return has_us_currency_mismatch(text)
+
+
+def _make_session(worker_id: int, proxy_entry: dict) -> requests.Session:
+    ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
     hdrs = {
         **HEADERS,
         "User-Agent": ua,
         "Accept-Language": _LANG,
     }
-    proxy = _next_proxy()
-    session = make_forced_session(proxy, headers=hdrs, required=True)
+    session = make_forced_session(proxy_entry, headers=hdrs, required=True)
+    currency_code = _mp.get("currency_code")
+    if currency_code:
+        session.cookies.set("i18n-prefs", currency_code)
     assert_session_has_proxy(session, required=True)
-    if warmup:
-        try:
-            session.get(f"{_DOMAIN}/", timeout=15)
-            _log.info(
-                f"[session] warmup 完成, cookies={len(session.cookies)}, "
-                f"proxy={proxy.get('exit_ip')}"
-            )
-            time.sleep(1 + random.uniform(0, 1))
-        except Exception as e:
-            _log.warning(f"[session] warmup 失败: {e}")
     return session
 
-def _safe_get(session: requests.Session, url: str,
-              referer: str = "", retries: int = 3) -> requests.Response | None:
-    """带 CAPTCHA/429/503 检测和重试的 GET 请求。"""
-    if referer:
-        session.headers["Referer"] = referer
-    for attempt in range(retries):
-        try:
-            r = session.get(url, timeout=18)
-            if r.status_code == 200:
-                if "captcha" in r.text.lower() or "Type the characters" in r.text:
-                    _log.warning(f"  [CAPTCHA] {url} — 等待 30s 后重试 ({attempt+1}/{retries})")
-                    time.sleep(30 + random.uniform(0, 15))
-                    session.headers["User-Agent"] = random.choice(USER_AGENTS)
-                    proxy = _next_proxy()
-                    session.proxies.update({"http": proxy["proxy"], "https": proxy["proxy"]})
-                    assert_session_has_proxy(session, required=True)
-                    continue
-                return r
-            if r.status_code == 429:
-                wait = 60 + random.uniform(0, 30)
-                _log.warning(f"  [429] {url} — 限速 {wait:.0f}s ({attempt+1}/{retries})")
-                time.sleep(wait)
-            elif r.status_code == 503:
-                wait = 15 + random.uniform(0, 10)
-                _log.warning(f"  [503] {url} — 等待 {wait:.0f}s ({attempt+1}/{retries})")
-                time.sleep(wait)
-            else:
-                _log.debug(f"  [HTTP {r.status_code}] {url}")
-                return None
-        except RequestsError as e:
-            wait = 5 * (2 ** attempt) + random.uniform(0, 3)
-            _log.warning(f"  [网络异常] {url}: {e} — 重试等待 {wait:.0f}s")
-            time.sleep(wait)
-    _log.error(f"  [放弃] {url} — {retries} 次重试均失败")
-    return None
+
+def _warmup(session: requests.Session):
+    assert_session_has_proxy(session, required=True)
+    proxy = (getattr(session, "proxies", None) or {}).get("https") or ""
+    try:
+        session.get(f"{_DOMAIN}/", timeout=10)
+        _log.info(f"[session] warmup ok proxy={proxy}")
+        time.sleep(1 + random.uniform(0, 1))
+    except Exception as e:
+        _log.warning(f"[session] warmup 失败 proxy={proxy}: {e}")
+
+
+class WorkerProxyClient(SharedWorkerProxyClient):
+    def __init__(self, pool: ProxyPool, worker_id: int = 0, *, warmup: bool = False):
+        super().__init__(
+            pool,
+            worker_id,
+            make_session=_make_session,
+            warmup=_warmup if warmup else None,
+            auditor=AttemptAuditor(_AUDIT_PATH, _RUN_ID),
+            is_captcha=is_captcha_page,
+            is_currency_mismatch=_has_marketplace_currency_mismatch,
+        )
+
+
+def _update_pool_stats(pool: ProxyPool):
+    snap = pool.health_snapshot()
+    with _stats_lock:
+        _stats["pool_usable"] = snap["usable"]
+        _stats["pool_cooling"] = snap["cooling"]
+        _stats["pool_disabled"] = snap["disabled"]
 
 
 # ── DB 工具 ─────────────────────────────────────────────────────────
@@ -801,25 +805,30 @@ _log.info("[fetch_products] 模块加载完成")
 
 
 
-def enrich_with_details(products: list, session: requests.Session,
-                        delay: float, filters: dict = None):
+def enrich_with_details(products: list, client: WorkerProxyClient,
+                        delay: float, filters: dict = None) -> int:
     """对列表页抓到的商品逐个请求详情页，补全字段并 UPDATE 到数据库。
     不符合筛选条件的商品从数据库删除。
-    详情请求/解析失败时标记 detail_scraped=2，结果接口默认不展示。"""
+    详情请求/解析失败时标记 detail_scraped=2，结果接口默认不展示。
+    返回详情抓取失败（非"筛选剔除"）的商品数，供调用方判断是否需要
+    将本节点标记为 error 以便下次断点重试详情阶段。"""
     if not products:
-        return
+        return 0
     if filters is None:
         filters = {}
+    fetch_failures = 0
     for p in products:
         asin = p["asin"]
         url = f"{_DOMAIN}/dp/{asin}"
         referer = p.get("product_url", f"{_DOMAIN}/s?k={asin}")
         try:
-            r = _safe_get(session, url, referer=referer)
-            if r is None or r.status_code != 200:
+            outcome = client.get(url, phase="DETAIL", item_id=asin, referer=referer)
+            raise_if_pool_below_minimum(outcome)
+            if not outcome.ok or outcome.status_code != 200:
                 _mark_detail_failed(asin)
+                fetch_failures += 1
                 continue
-            detail = parse_detail_fields(r.text)
+            detail = parse_detail_fields(outcome.html or "")
             if not detail:
                 _mark_detail_failed(asin)
                 continue
@@ -849,13 +858,18 @@ def enrich_with_details(products: list, session: requests.Session,
             # UPDATE DB — 按 asin+site
             _update_sighting_detail(asin, detail)
             p.update(detail)
+        except ProxyRequiredError:
+            raise
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             _mark_detail_failed(asin)
+            fetch_failures += 1
             _log.error(f"  [detail] {asin} 解析异常: {e}\n{traceback.format_exc()}")
         except Exception as e:
             _mark_detail_failed(asin)
+            fetch_failures += 1
             _log.error(f"  [detail] {asin} 未知异常: {e}\n{traceback.format_exc()}")
-        time.sleep(delay + random.uniform(delay * 0.3, delay * 0.8))
+        time.sleep(_pool_delay(delay, getattr(client, "pool", None)) + random.uniform(0, delay * 0.3))
+    return fetch_failures
 
 
 def _delete_sighting(asin: str):
@@ -925,14 +939,14 @@ def _update_sighting_detail(asin: str, detail: dict):
 # ── Worker 主循环 ───────────────────────────────────────────────────
 
 def process_node(node: dict, lists: list, review_max: int,
-                 min_list_size: int, session: requests.Session,
+                 min_list_size: int, client: WorkerProxyClient,
                  price_min: float = 0.0, price_max: float = 0.0,
                  review_min: int = 0,
                  rating_min: float = 0.0, rating_max: float = 0.0,
                  max_pages: int = 2, delay: float = 2.0,
                  detail_filters: dict = None,
-                 list_limit: int = 0):
-    """处理单个节点的所有榜单。"""
+                 list_limit: int = 0) -> tuple[str, str, int, int]:
+    """处理单个节点的所有榜单。返回 (status, error_code, products_found, attempts)。"""
     node_id = node["node_id"]
     slug    = extract_slug(node["url"])
     name    = node["name"]
@@ -943,24 +957,30 @@ def process_node(node: dict, lists: list, review_max: int,
         list_limit = 0
     list_limit = max(0, min(list_limit, 100))
     max_pages = max(1, min(int(max_pages), 2))
+    node_found = 0
+    node_attempts = 0
+    node_error = ""
 
     for list_type in lists:
         url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
-
-        r = _safe_get(session, url_base, referer=f"{_DOMAIN}/")
-        if r is None:
+        outcome = client.get(
+            url_base, phase="LIST", item_id=f"{node_id}:{list_type}",
+            referer=f"{_DOMAIN}/",
+        )
+        node_attempts += outcome.attempts
+        raise_if_pool_below_minimum(outcome)
+        if not outcome.ok:
             with _stats_lock:
                 _stats["errors"] += 1
+            node_error = outcome.final_reason or outcome.error_code
             continue
 
-        save_link_validity(node_id, list_type, 1 if r.status_code == 200 else 0)
-
-        if r.status_code != 200:
+        save_link_validity(node_id, list_type, 1 if outcome.status_code == 200 else 0)
+        if outcome.status_code != 200:
             continue
 
-        time.sleep(delay + random.uniform(0, delay * 0.5))
-
-        html = r.text
+        time.sleep(_pool_delay(delay, getattr(client, "pool", None)))
+        html = outcome.html or ""
 
         total = extract_list_total(html)
         if min_list_size > 0 and total < min_list_size:
@@ -980,18 +1000,26 @@ def process_node(node: dict, lists: list, review_max: int,
         for pg in range(2, max_pages + 1):
             if list_limit > 0 and position_start > list_limit:
                 break
-            rp = _safe_get(session, url_base + f"?pg={pg}", referer=url_base)
-            if rp is None or rp.status_code != 200:
+            page_outcome = client.get(
+                url_base + f"?pg={pg}", phase="LIST",
+                item_id=f"{node_id}:{list_type}:p{pg}", referer=url_base,
+            )
+            node_attempts += page_outcome.attempts
+            raise_if_pool_below_minimum(page_outcome)
+            if not page_outcome.ok or page_outcome.status_code != 200:
+                if not page_outcome.ok:
+                    node_error = page_outcome.final_reason or page_outcome.error_code
                 break
             all_products += parse_products(
-                rp.text, node_id, name, slug, depth,
+                page_outcome.html or "", node_id, name, slug, depth,
                 list_type, total, review_max, price_min, price_max,
                 review_min, rating_min, rating_max,
                 list_limit, position_start
             )
-            position_start += _count_product_items(rp.text)
-            time.sleep(delay + random.uniform(0, delay * 0.5))
+            position_start += _count_product_items(page_outcome.html or "")
+            time.sleep(_pool_delay(delay, getattr(client, "pool", None)))
 
+        node_found += len(all_products)
         with _stats_lock:
             _stats["products_found"] += len(all_products)
 
@@ -999,10 +1027,17 @@ def process_node(node: dict, lists: list, review_max: int,
             saved = save_products(all_products)
             with _stats_lock:
                 _stats["products_saved"] += saved
-            enrich_with_details(all_products, session, delay, detail_filters)
+            detail_failures = enrich_with_details(all_products, client, delay, detail_filters)
+            if detail_failures:
+                with _stats_lock:
+                    _stats["errors"] += detail_failures
+                node_error = f"DETAIL_FETCH_FAILED:{detail_failures}"
 
     with _stats_lock:
         _stats["done_nodes"] += 1
+    if node_error:
+        return ("error", node_error, node_found, node_attempts)
+    return ("done", "", node_found, node_attempts)
 
 
 def run_batch(root_ids: list, lists: list, review_max: int,
@@ -1014,8 +1049,10 @@ def run_batch(root_ids: list, lists: list, review_max: int,
               slugs: list = None,
               detail_filters: dict = None,
               list_limit: int = 0,
-              include_descendants: bool = True):
+              include_descendants: bool = True,
+              resume: bool = True):
     """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
+    global _checkpoint
     if slugs:
         # --slugs 语义本身就是 L1 下全部后代；exact 模式对 slug 入口不适用，仍展开
         nodes = get_nodes_by_slugs(slugs, lists, site=_SITE)
@@ -1025,6 +1062,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         )
     _stats["total_nodes"] = len(nodes)
     _stats["products_dup"] = 0
+    _stats["done_nodes"] = 0
     with _seen_lock:
         _seen_asins.clear()
     try:
@@ -1039,48 +1077,129 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         return
 
     try:
-        _validate_proxy_pool()
-        session = _make_session()
+        pool = ProxyPool()
     except ProxyRequiredError as e:
         _log.error(f"[fetch_products] 代理强制模式失败: {e.code} {e}")
         raise SystemExit(2) from e
+    if pool.usable_count < PROXY_MIN_START_NODES:
+        _log.error(
+            "[proxy] 启动拒绝：可用代理=%d，最低要求=%d",
+            pool.usable_count, PROXY_MIN_START_NODES,
+        )
+        raise SystemExit(2)
+    touch_crawl_activity(active=True, source="fetch_products")
+
+    checkpoint_config = {
+        "site": _SITE,
+        "db_backend": DB_BACKEND,
+        "roots": sorted(root_ids or []),
+        "slugs": sorted(slugs or []),
+        "lists": sorted(lists or []),
+        "exact_roots": not include_descendants,
+        "max_pages": max_pages,
+        "list_limit": list_limit,
+        "review_max": review_max,
+        "review_min": review_min,
+        "min_list_size": min_list_size,
+        "price_min": price_min,
+        "price_max": price_max,
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "detail_filters": detail_filters or {},
+        "node_count": len(nodes),
+        "node_ids_sha256": hashlib.sha256(
+            "\n".join(sorted(str(n["node_id"]) for n in nodes)).encode("utf-8")
+        ).hexdigest(),
+    }
+    signature = canonical_signature(checkpoint_config)
+    _checkpoint = ProductsCheckpoint(signature, checkpoint_config, resume=resume)
+    done_nodes = _checkpoint.done_ids()
+    remaining = [n for n in nodes if str(n["node_id"]) not in done_nodes]
+    _stats["done_nodes"] = len(done_nodes)
+    _stats["total_nodes"] = len(nodes)
+    _update_pool_stats(pool)
 
     t0 = time.time()
     price_info = ""
     if price_min > 0 or price_max > 0:
         c = _CURRENCY
         price_info = f" 价格{c}{price_min:.0f}-{c}{price_max:.0f}" if price_max > 0 else f" 价格>{c}{price_min:.0f}"
-    _log.info(f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单, "
-          f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s",
-          flush=True)
+    depth_hint = f"L{nodes[0]['depth']}→L{nodes[-1]['depth']}" if nodes else "?"
+    _log.info(
+        f"[fetch_products] 开始抓取: {len(nodes)} 节点 × {len(lists)} 榜单 "
+        f"(待处理 {len(remaining)}, 深度优先 {depth_hint}), "
+        f"评论<{review_max}, 最少{min_list_size}商品{price_info}, 延迟{delay}s",
+        flush=True,
+    )
+    _log.info("[fetch_products] run=%s checkpoint=%s", _RUN_ID, _checkpoint.path)
 
-    for node in nodes:
-        process_node(node, lists, review_max, min_list_size, session,
-                     price_min, price_max, review_min,
-                     rating_min, rating_max, max_pages, delay,
-                     detail_filters,
-                     list_limit)
-        n = _stats["done_nodes"]
-        total = _stats["total_nodes"]
-        if n % 10 == 0 or n == total:
-            elapsed = time.time() - t0
-            rate = n / elapsed if elapsed > 0 else 0
-            _log.info(f"  [{n}/{total}] {rate:.1f}节点/s "
-                  f"找到:{_stats['products_found']} "
-                  f"录入:{_stats['products_saved']} "
-                  f"跳过:{_stats['skipped']}")
+    client = WorkerProxyClient(pool, worker_id=0, warmup=False)
+    try:
+        _checkpoint.set_phase("LIST")
+        for node in remaining:
+            try:
+                status, err_code, found, attempts = process_node(
+                    node, lists, review_max, min_list_size, client,
+                    price_min, price_max, review_min,
+                    rating_min, rating_max, max_pages, delay,
+                    detail_filters,
+                    list_limit,
+                )
+                _checkpoint.save_node(
+                    str(node["node_id"]), status=status,
+                    error_code=err_code,
+                    products_found=found, attempts=attempts,
+                )
+            except ProxyRequiredError as exc:
+                _checkpoint.set_phase("PAUSED_PROXY")
+                _log.critical(
+                    "[安全暂停] run=%s code=%s error=%s checkpoint=%s pool=%s",
+                    _RUN_ID, exc.code, exc, _checkpoint.path, pool.health_snapshot(),
+                )
+                raise SystemExit(3) from exc
+            _update_pool_stats(pool)
+            n = _stats["done_nodes"]
+            total = _stats["total_nodes"]
+            if n % 10 == 0 or n == total:
+                elapsed = time.time() - t0
+                rate = n / elapsed if elapsed > 0 else 0
+                _log.info(
+                    f"  [{n}/{total}] {rate:.1f}节点/s "
+                    f"找到:{_stats['products_found']} "
+                    f"录入:{_stats['products_saved']} "
+                    f"跳过:{_stats['skipped']} "
+                    f"pool={_stats['pool_usable']}可用/"
+                    f"{_stats['pool_cooling']}冷却/{_stats['pool_disabled']}禁用"
+                )
 
-    elapsed = time.time() - t0
-    _log.info(f"\n[fetch_products] 完成！"
-              f"\n  耗时: {elapsed:.0f}s"
-              f"\n  节点: {_stats['done_nodes']}/{_stats['total_nodes']}"
-              f"\n  找到: {_stats['products_found']} 个符合条件商品"
-              f"\n  录入: {_stats['products_saved']} 条（去重后）"
-              f"\n  跳过: {_stats['skipped']} 个冷门榜单"
-              f"\n  去重: {_stats['products_dup']} 个重复ASIN已跳过"
-              f"\n  错误: {_stats['errors']}")
+        pending = [
+            str(n["node_id"]) for n in nodes
+            if str(n["node_id"]) not in _checkpoint.done_ids()
+        ]
+        if pending:
+            _checkpoint.set_phase("RETRY_PENDING")
+            _log.error(
+                "[未完成] 仍有%d个节点失败，断点已保留；下次只重试失败节点",
+                len(pending),
+            )
+            raise SystemExit(4)
 
-    export_excel()
+        _checkpoint.complete()
+        elapsed = time.time() - t0
+        _log.info(f"\n[fetch_products] 完成！"
+                  f"\n  耗时: {elapsed:.0f}s"
+                  f"\n  节点: {_stats['done_nodes']}/{_stats['total_nodes']}"
+                  f"\n  找到: {_stats['products_found']} 个符合条件商品"
+                  f"\n  录入: {_stats['products_saved']} 条（去重后）"
+                  f"\n  跳过: {_stats['skipped']} 个冷门榜单"
+                  f"\n  去重: {_stats['products_dup']} 个重复ASIN已跳过"
+                  f"\n  错误: {_stats['errors']}")
+        export_excel()
+    finally:
+        client.close()
+        if _checkpoint is not None:
+            _checkpoint.close()
+            _checkpoint = None
 
 
 def export_excel():
@@ -1189,11 +1308,13 @@ if __name__ == "__main__":
         "--exact-roots", action="store_true",
         help="仅抓 --roots 所选类目本身，不展开全部下级（默认会展开）",
     )
+    parser.add_argument("--no-resume", action="store_true", help="忽略同配置断点并重新开始")
     args = parser.parse_args()
     args.list_limit = max(0, min(args.list_limit, 100))
     args.max_pages = max(1, min(args.max_pages, 2))
 
     mp = get_marketplace(args.site)
+    _mp = mp
     _SITE   = args.site.upper()
     _DOMAIN = mp["domain"]
     _LANG   = mp["lang"]
@@ -1236,4 +1357,5 @@ if __name__ == "__main__":
         detail_filters=detail_filters,
         list_limit=args.list_limit,
         include_descendants=not args.exact_roots,
+        resume=not args.no_resume,
     )

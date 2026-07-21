@@ -16,9 +16,11 @@ DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
 # PG config（SQLite 模式可不设置 PG_DSN）
 from pg_config import PG_DSN, get_pg_dsn
-from config import PROXY_IDLE_TTL
+from config import PROXY_MIN_START_NODES, PROXY_RUNTIME_RECOVERY_ATTEMPTS
 
-# 代理池：点击开始时真实验证，失败不得启动抓取；结束后关闭独立 Mihomo
+# 代理池：API 运行期间守护进程持续验证/增补/淘汰节点；点击开始时只需
+# 活池达到最低启动门槛。API 正常关闭时默认连带清理，避免后台孤儿进程；
+# 只有显式 PROXY_DAEMON_PERSIST=1 才允许它跨 API 生命周期常驻。
 from proxy_pool_manager import (
     STATUS_IDLE,
     STATUS_PREPARING,
@@ -27,9 +29,13 @@ from proxy_pool_manager import (
     STATUS_RUNNING,
     STATUS_STARTING_CRAWLER,
     STATUS_STOPPING,
+    daemon_alive,
+    daemon_status,
+    ensure_daemon_running,
     ensure_proxy_ready,
     get_status as get_proxy_status,
     set_status as set_proxy_status,
+    stop_daemon,
     stop_proxy_pool,
 )
 
@@ -64,31 +70,16 @@ def _crawl_lifecycle_state():
 
 
 def _proxy_sleep(reason: str = "idle_timeout"):
-    """关闭独立 Mihomo（不触碰主 Clash）。"""
+    """重置抓取生命周期状态为 idle。
+
+    新架构下常驻验证守护进程与其独立 Mihomo 一直运行（不再随每轮抓取
+    启停），这里不再停止 Mihomo；stop_proxy_pool() 现在只重置状态。
+    """
     try:
         stop_proxy_pool()
-        logging.info("[proxy] 独立代理池已停止 reason=%s", reason)
+        logging.info("[proxy] 抓取生命周期已重置为 idle reason=%s", reason)
     except Exception as e:
-        logging.warning(f"[proxy] 自动停止失败: {e}")
-
-
-def _stop_proxy_after_idle(generation: int, run_id: str, ttl: int):
-    """自然结束后保留热池一段时间；新一轮启动会使旧定时器失效。"""
-    deadline = time.monotonic() + max(0, ttl)
-    while time.monotonic() < deadline:
-        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
-        with _product_lock:
-            if generation != _crawl_generation:
-                logging.info("[proxy] 新一轮已接管，取消旧空闲关闭 run_id=%s", run_id)
-                return
-    with _product_lock:
-        still_idle = (
-            generation == _crawl_generation
-            and (_product_proc is None or _product_proc.poll() is not None)
-        )
-    if still_idle:
-        _proxy_sleep("idle_timeout")
-        set_proxy_status(STATUS_IDLE, run_id=run_id, pool_ready=False)
+        logging.warning(f"[proxy] 重置状态失败: {e}")
 
 
 def _watch_and_sleep_proxy(
@@ -97,6 +88,9 @@ def _watch_and_sleep_proxy(
     request_id: str,
     run_id: str,
     started_at: float,
+    cmd: list[str] | None = None,
+    env: dict | None = None,
+    recovery_attempt: int = 0,
 ):
     """后台线程：等抓取子进程退出后停止独立代理池。
 
@@ -117,25 +111,157 @@ def _watch_and_sleep_proxy(
         )
         with _product_lock:
             still_current = (generation == _crawl_generation)
-        if still_current:
-            set_proxy_status(
-                STATUS_IDLE,
-                run_id=run_id,
-                pool_ready=True,
-                idle_ttl=PROXY_IDLE_TTL,
-            )
-            logging.info(
-                "[proxy] 抓取自然结束，热池保留 %ds run_id=%s",
-                PROXY_IDLE_TTL,
-                run_id,
-            )
-            threading.Thread(
-                target=_stop_proxy_after_idle,
-                args=(generation, run_id, PROXY_IDLE_TTL),
-                daemon=True,
-            ).start()
-        else:
+        if not still_current:
             logging.info("[proxy] 检测到更新一轮已启动，跳过本轮看门狗的停止操作")
+            return
+
+        if return_code == 3:
+            _recover_proxy_and_resume(
+                generation=generation,
+                request_id=request_id,
+                previous_run_id=run_id,
+                cmd=cmd,
+                env=env,
+                recovery_attempt=recovery_attempt,
+            )
+        elif return_code == 0:
+            # 常驻守护进程/独立 Mihomo 一直运行（不随抓取轮次启停），
+            # 这里只需把抓取生命周期状态复位为 idle。
+            set_proxy_status(STATUS_IDLE, run_id=run_id, pool_ready=True)
+            logging.info("[proxy] 抓取自然结束 run_id=%s", run_id)
+        elif return_code == 4:
+            _proxy_sleep("crawl_retry_pending")
+            set_proxy_status(
+                STATUS_PROXY_FAILED,
+                run_id=run_id,
+                pool_ready=False,
+                reason="部分节点/ASIN请求失败，断点已保留；再次开始将只重试失败项",
+                error_code="CRAWL_RETRY_PENDING",
+                return_code=return_code,
+            )
+        else:
+            _proxy_sleep("crawler_failed")
+            set_proxy_status(
+                STATUS_PROXY_FAILED,
+                run_id=run_id,
+                pool_ready=False,
+                reason=f"抓取进程异常退出（exit={return_code}）",
+                error_code="CRAWLER_EXIT_FAILED",
+                return_code=return_code,
+            )
+
+
+def _recover_proxy_and_resume(
+    *,
+    generation: int,
+    request_id: str,
+    previous_run_id: str,
+    cmd: list[str] | None,
+    env: dict | None,
+    recovery_attempt: int,
+):
+    """运行时池长时间跌破门槛（ForcedProxyPool 自身有界等待仍未恢复）后的
+    最后一道防线：最多重建一次，并由断点自动续跑。
+
+    正常情况下常驻守护进程会持续自愈活池，抓取进程几乎不会走到这里；
+    一旦发生，说明守护进程本身可能已经失效，因此走 force=False 委托路径
+    （会重新确保守护进程存活），而不是与守护进程抢占 Mihomo 的完整冷启动。
+    """
+    global _product_proc
+    next_attempt = recovery_attempt + 1
+    if not cmd or next_attempt > PROXY_RUNTIME_RECOVERY_ATTEMPTS:
+        _proxy_sleep("runtime_pool_recovery_exhausted")
+        set_proxy_status(
+            STATUS_PROXY_FAILED,
+            run_id=previous_run_id,
+            pool_ready=False,
+            reason=f"运行时可用代理低于 {PROXY_MIN_START_NODES}，自动重建次数已用尽；断点已保留",
+            error_code="POOL_RECOVERY_EXHAUSTED",
+            recovery_attempt=recovery_attempt,
+        )
+        return
+
+    if not _proxy_prepare_lock.acquire(blocking=False):
+        set_proxy_status(
+            STATUS_PROXY_FAILED,
+            run_id=previous_run_id,
+            pool_ready=False,
+            reason="运行时代理恢复与其他代理准备冲突；断点已保留",
+            error_code="POOL_RECOVERY_LOCK_BUSY",
+        )
+        return
+    try:
+        with _product_lock:
+            if generation != _crawl_generation:
+                return
+        set_proxy_status(
+            STATUS_PREPARING,
+            run_id=previous_run_id,
+            request_id=request_id,
+            phase="runtime_recovery",
+            recovery_attempt=next_attempt,
+            recovery_limit=PROXY_RUNTIME_RECOVERY_ATTEMPTS,
+        )
+        logging.warning(
+            "[proxy] runtime pool below minimum; rebuilding request_id=%s run_id=%s attempt=%d/%d",
+            request_id, previous_run_id, next_attempt, PROXY_RUNTIME_RECOVERY_ATTEMPTS,
+        )
+        prep = ensure_proxy_ready(force=False)
+        if not prep.ok:
+            set_proxy_status(
+                STATUS_PROXY_FAILED,
+                run_id=prep.run_id,
+                request_id=request_id,
+                pool_ready=False,
+                reason=prep.reason or prep.error_code,
+                error_code=prep.error_code or "POOL_RECOVERY_FAILED",
+                recovery_attempt=next_attempt,
+            )
+            return
+
+        with _product_lock:
+            if generation != _crawl_generation:
+                return
+            try:
+                _product_proc = subprocess.Popen(
+                    cmd, cwd=BASE_DIR, env=env or os.environ.copy(),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
+            except Exception as exc:
+                _product_proc = None
+                _proxy_sleep("crawler_resume_failed")
+                set_proxy_status(
+                    STATUS_PROXY_FAILED,
+                    run_id=prep.run_id,
+                    request_id=request_id,
+                    pool_ready=False,
+                    reason=str(exc),
+                    error_code="CRAWLER_RESUME_FAILED",
+                    recovery_attempt=next_attempt,
+                )
+                return
+            resumed_proc = _product_proc
+
+        resumed_at = time.monotonic()
+        set_proxy_status(
+            STATUS_RUNNING,
+            run_id=prep.run_id,
+            request_id=request_id,
+            pid=resumed_proc.pid,
+            resumed_from_checkpoint=True,
+            recovery_attempt=next_attempt,
+        )
+        logging.info(
+            "[crawl] resumed from checkpoint request_id=%s run_id=%s pid=%d recovery_attempt=%d",
+            request_id, prep.run_id, resumed_proc.pid, next_attempt,
+        )
+        threading.Thread(
+            target=_watch_and_sleep_proxy,
+            args=(resumed_proc, generation, request_id, prep.run_id, resumed_at, cmd, env, next_attempt),
+            daemon=True,
+        ).start()
+    finally:
+        _proxy_prepare_lock.release()
 
 def _positive_int(value, default):
     try:
@@ -265,15 +391,31 @@ async def lifespan(app: FastAPI):
     global _pool
     if DB_BACKEND == "pg":
         _pool = await asyncpg.create_pool(get_pg_dsn(), min_size=2, max_size=10)
-    yield
-    if _pool:
-        await _pool.close()
-    with _product_lock:
-        global _product_proc
-        if _product_proc and _product_proc.poll() is None:
-            _product_proc.terminate()
-            _product_proc = None
-    await asyncio.to_thread(stop_proxy_pool)
+    # 只要 API 在运行，常驻验证守护进程也应在运行（"始终热"策略）：
+    # 拉起不阻塞——不等待它验证出任何节点，只保证进程已存在。
+    spawn = await asyncio.to_thread(ensure_daemon_running)
+    if spawn.get("ok"):
+        logging.info(
+            "[proxy] 守护进程已就位 pid=%s started=%s",
+            spawn.get("pid"), spawn.get("started"),
+        )
+    else:
+        logging.warning("[proxy] 守护进程拉起失败: %s", spawn.get("error"))
+    try:
+        yield
+    finally:
+        # lifespan 内部异常、取消和正常 Ctrl+C 都必须经过同一清理路径。
+        if _pool:
+            await _pool.close()
+        with _product_lock:
+            global _product_proc
+            if _product_proc and _product_proc.poll() is None:
+                _product_proc.terminate()
+                _product_proc = None
+        if os.getenv("PROXY_DAEMON_PERSIST", "0") != "1":
+            stopped = await asyncio.to_thread(stop_daemon)
+            if not stopped.get("ok"):
+                logging.warning("[proxy] API 关闭时代理守护清理失败: %s", stopped)
 
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
 
@@ -471,53 +613,136 @@ async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: 
 async def category_scope_count(body: dict):
     """Return the deduplicated category count the crawler will actually execute."""
     site = str(body.get("site") or "US").upper()
-    roots = list(dict.fromkeys(str(v).strip() for v in (body.get("roots") or []) if str(v).strip()))
+    roots = list(dict.fromkeys(
+        str(v).strip() for v in (body.get("roots") or [])
+        if str(v).strip() and str(v).strip() != "__ALL__"
+    ))
+    all_categories = body.get("all_categories", False)
+    if isinstance(all_categories, str):
+        all_categories = all_categories.strip().lower() not in ("0", "false", "no", "off", "")
+    else:
+        all_categories = bool(all_categories)
     include_descendants = body.get("include_descendants", True)
     if isinstance(include_descendants, str):
         include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
     else:
         include_descendants = bool(include_descendants)
 
+    chart = str(body.get("chart") or "").lower()
+    # 最新到货只抓 NEW 标记（na_valid=1）；榜单仍按所选类目树统计
+    na_only = chart == "la" or bool(body.get("na_only"))
+
+    # 全选：最新到货 = 全部 NEW 类目；其它模式 = depth>0 全部类目
+    if all_categories:
+        if DB_BACKEND == "pg":
+            if na_only:
+                count = await pg_scalar(
+                    "SELECT COUNT(*) FROM categories WHERE site = $1 AND na_valid = 1", site,
+                )
+            else:
+                count = await pg_scalar(
+                    "SELECT COUNT(*) FROM categories WHERE site = $1 AND depth > 0", site,
+                )
+        else:
+            if na_only:
+                count = await _sqlite_scalar(
+                    "SELECT COUNT(*) FROM categories WHERE site = ? AND na_valid = 1", (site,),
+                )
+            else:
+                count = await _sqlite_scalar(
+                    "SELECT COUNT(*) FROM categories WHERE site = ? AND depth > 0", (site,),
+                )
+        return {
+            "count": int(count or 0),
+            "selected_count": 0,
+            "all_categories": True,
+            "na_only": na_only,
+            "include_descendants": include_descendants,
+        }
+
     if not roots:
         return {"count": 0, "selected_count": 0, "include_descendants": include_descendants}
 
     if DB_BACKEND == "pg":
         if include_descendants:
-            count = await pg_scalar(
-                """WITH RECURSIVE sub(node_id) AS (
-                       SELECT node_id FROM categories WHERE site = $1 AND node_id = ANY($2::text[])
-                       UNION
-                       SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
-                       WHERE c.site = $1
-                   ) SELECT COUNT(*) FROM sub""",
-                site, roots,
-            )
+            if na_only:
+                count = await pg_scalar(
+                    """WITH RECURSIVE sub(node_id) AS (
+                           SELECT node_id FROM categories WHERE site = $1 AND node_id = ANY($2::text[])
+                           UNION
+                           SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                           WHERE c.site = $1
+                       )
+                       SELECT COUNT(*) FROM categories c
+                       JOIN sub s ON s.node_id = c.node_id
+                       WHERE c.site = $1 AND c.na_valid = 1""",
+                    site, roots,
+                )
+            else:
+                count = await pg_scalar(
+                    """WITH RECURSIVE sub(node_id) AS (
+                           SELECT node_id FROM categories WHERE site = $1 AND node_id = ANY($2::text[])
+                           UNION
+                           SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                           WHERE c.site = $1
+                       ) SELECT COUNT(*) FROM sub""",
+                    site, roots,
+                )
         else:
-            count = await pg_scalar(
-                "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1 AND node_id = ANY($2::text[])",
-                site, roots,
-            )
+            if na_only:
+                count = await pg_scalar(
+                    "SELECT COUNT(DISTINCT node_id) FROM categories "
+                    "WHERE site = $1 AND node_id = ANY($2::text[]) AND na_valid = 1",
+                    site, roots,
+                )
+            else:
+                count = await pg_scalar(
+                    "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1 AND node_id = ANY($2::text[])",
+                    site, roots,
+                )
     else:
         placeholders = ",".join("?" for _ in roots)
         if include_descendants:
-            count = await _sqlite_scalar(
-                f"""WITH RECURSIVE sub(node_id) AS (
-                        SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
-                        UNION
-                        SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
-                        WHERE c.site = ?
-                    ) SELECT COUNT(*) FROM sub""",
-                (site, *roots, site),
-            )
+            if na_only:
+                count = await _sqlite_scalar(
+                    f"""WITH RECURSIVE sub(node_id) AS (
+                            SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
+                            UNION
+                            SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                            WHERE c.site = ?
+                        )
+                        SELECT COUNT(*) FROM categories c
+                        JOIN sub s ON s.node_id = c.node_id
+                        WHERE c.site = ? AND c.na_valid = 1""",
+                    (site, *roots, site, site),
+                )
+            else:
+                count = await _sqlite_scalar(
+                    f"""WITH RECURSIVE sub(node_id) AS (
+                            SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
+                            UNION
+                            SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                            WHERE c.site = ?
+                        ) SELECT COUNT(*) FROM sub""",
+                    (site, *roots, site),
+                )
         else:
-            count = await _sqlite_scalar(
-                f"SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ? AND node_id IN ({placeholders})",
-                (site, *roots),
-            )
+            if na_only:
+                count = await _sqlite_scalar(
+                    f"SELECT COUNT(DISTINCT node_id) FROM categories "
+                    f"WHERE site = ? AND node_id IN ({placeholders}) AND na_valid = 1",
+                    (site, *roots),
+                )
+            else:
+                count = await _sqlite_scalar(
+                    f"SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ? AND node_id IN ({placeholders})",
+                    (site, *roots),
+                )
 
     return {
         "count": int(count or 0),
         "selected_count": len(roots),
+        "na_only": na_only,
         "include_descendants": include_descendants,
     }
 
@@ -1136,6 +1361,94 @@ async def product_progress():
         "new_arrivals": na,
     }
 
+
+# 爬虫 FileHandler 日志（与 fetch_*.py 写入路径一致）
+_CRAWL_LOG_FILES = {
+    "la": os.path.join(BASE_DIR, "data", "fetch_new_arrivals.log"),
+    "nr": os.path.join(BASE_DIR, "data", "fetch_products.log"),
+    "bs": os.path.join(BASE_DIR, "data", "fetch_products.log"),
+    "ms": os.path.join(BASE_DIR, "data", "fetch_products.log"),
+    "mw": os.path.join(BASE_DIR, "data", "fetch_products.log"),
+    "mg": os.path.join(BASE_DIR, "data", "fetch_products.log"),
+}
+
+
+def _read_log_tail(path: str, *, max_lines: int = 200, since_pos: int = 0) -> dict:
+    """高效读取日志尾部；since_pos>0 时做增量追加读取。"""
+    max_lines = max(20, min(int(max_lines or 200), 2000))
+    since_pos = max(0, int(since_pos or 0))
+    if not path or not os.path.isfile(path):
+        return {
+            "exists": False, "lines": [], "pos": 0, "size": 0,
+            "mtime": None, "truncated": False,
+        }
+    size = os.path.getsize(path)
+    mtime = os.path.getmtime(path)
+    # 文件被截断/轮转：从头重读尾部
+    if since_pos > size:
+        since_pos = 0
+
+    truncated = False
+    with open(path, "rb") as fh:
+        if since_pos > 0:
+            # since_pos 来自上一次返回的文件末尾，视为行边界；直接读新增字节
+            fh.seek(since_pos)
+            new_text = fh.read().decode("utf-8", errors="replace")
+            lines = [ln for ln in new_text.splitlines() if ln.strip()]
+            if len(lines) > max_lines:
+                lines = lines[-max_lines:]
+                truncated = True
+            return {
+                "exists": True, "lines": lines, "pos": size, "size": size,
+                "mtime": mtime, "truncated": truncated, "incremental": True,
+            }
+
+        # 全量尾读：从文件末尾向前扫，最多读约 512KB
+        read_bytes = min(size, 512 * 1024)
+        fh.seek(max(0, size - read_bytes))
+        data = fh.read().decode("utf-8", errors="replace")
+        if size > read_bytes:
+            # 丢掉半行
+            nl = data.find("\n")
+            if nl >= 0:
+                data = data[nl + 1:]
+            truncated = True
+        lines = [ln for ln in data.splitlines() if ln.strip()]
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            truncated = True
+        return {
+            "exists": True, "lines": lines, "pos": size, "size": size,
+            "mtime": mtime, "truncated": truncated, "incremental": False,
+        }
+
+
+@app.get("/api/v2/crawl_logs")
+async def crawl_logs(
+    chart: str = "nr",
+    lines: int = 200,
+    since_pos: int = 0,
+):
+    """读取当前模式对应的爬虫行动日志（FileHandler 文件尾部）。"""
+    key = (chart or "nr").lower()
+    path = _CRAWL_LOG_FILES.get(key) or _CRAWL_LOG_FILES["nr"]
+    payload = await asyncio.to_thread(
+        _read_log_tail, path, max_lines=lines, since_pos=since_pos,
+    )
+    running, lifecycle, run_id = _crawl_lifecycle_state()
+    proxy = get_proxy_status()
+    return {
+        "chart": key,
+        "source": os.path.basename(path),
+        "path": path,
+        "running": running,
+        "lifecycle": lifecycle,
+        "run_id": run_id,
+        "proxy_status": proxy.get("status"),
+        "proxy_phase": (proxy.get("detail") or {}).get("phase"),
+        **payload,
+    }
+
 # ── 爬虫控制 ──
 
 _FILTER_PARAM_FLAGS = [
@@ -1177,7 +1490,13 @@ def _append_filter_flags(cmd: list, body: dict, *, for_la: bool = False):
 
 @app.get("/api/v2/proxy_status")
 async def proxy_status():
-    return get_proxy_status()
+    """合并两个视角：抓取生命周期状态（get_proxy_status）与常驻验证守护进程
+    的实时活池计数（daemon_status）。守护进程持续、增量地验证/增补/淘汰节点，
+    前端据此展示持续变化的进度，而不是一次性的"preparing_proxy"进度条。"""
+    status = get_proxy_status()
+    pid, daemon = await asyncio.to_thread(lambda: (daemon_alive(), daemon_status()))
+    status["daemon"] = {"alive": bool(pid), "pid": pid, **daemon}
+    return status
 
 
 @app.post("/api/v2/start_products")
@@ -1193,22 +1512,47 @@ async def start_products(body: dict):
             logging.warning("[crawl] start rejected request_id=%s reason=invalid_filters detail=%s", request_id, range_err)
             return {"status": "error", "msg": f"筛选条件不合法: {range_err}"}
         chart = body.get("chart", "")
-        if chart == "la" and not body.get("roots"):
+        all_categories = body.get("all_categories", False)
+        if isinstance(all_categories, str):
+            all_categories = all_categories.strip().lower() not in ("0", "false", "no", "off", "")
+        else:
+            all_categories = bool(all_categories)
+        roots = [
+            str(v).strip() for v in (body.get("roots") or [])
+            if str(v).strip() and str(v).strip() != "__ALL__"
+        ]
+        if chart != "la" and all_categories:
+            logging.warning("[crawl] start rejected request_id=%s reason=all_categories_not_supported chart=%s", request_id, chart)
+            return {"status": "error", "msg": "榜单抓取不支持全部分类，请勾选具体类目"}
+        if chart == "la" and not roots and not all_categories:
             logging.warning("[crawl] start rejected request_id=%s reason=no_roots chart=la", request_id)
             return {"status": "error", "msg": "latest arrivals requires roots"}
-        if chart != "la" and not body.get("slugs") and not body.get("roots"):
+        if chart != "la" and not body.get("slugs") and not roots:
             logging.warning("[crawl] start rejected request_id=%s reason=no_roots_or_slugs chart=%s", request_id, chart)
             return {"status": "error", "msg": "no slugs or roots specified"}
 
-    roots = body.get("roots") or []
+    roots = [
+        str(v).strip() for v in (body.get("roots") or [])
+        if str(v).strip() and str(v).strip() != "__ALL__"
+    ]
+    all_categories = body.get("all_categories", False)
+    if isinstance(all_categories, str):
+        all_categories = all_categories.strip().lower() not in ("0", "false", "no", "off", "")
+    else:
+        all_categories = bool(all_categories)
+    # 全选时清空 roots，避免误传 __ALL__ 给爬虫
+    if all_categories:
+        roots = []
+        body = {**body, "roots": [], "all_categories": True}
     slugs = body.get("slugs") or []
     logging.info(
-        "[crawl] start requested request_id=%s chart=%s site=%s roots=%d slugs=%d include_descendants=%s max_pages=%s",
+        "[crawl] start requested request_id=%s chart=%s site=%s roots=%d slugs=%d all_categories=%s include_descendants=%s max_pages=%s",
         request_id,
         chart,
         body.get("site") or "",
         len(roots),
         len(slugs),
+        all_categories,
         body.get("include_descendants", True),
         body.get("max_pages"),
     )
@@ -1295,12 +1639,18 @@ async def start_products(body: dict):
 
             if chart == "la":
                 cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
-                cmd += ["--roots"] + body["roots"]
+                # all_categories / 空 roots：不传 --roots，爬虫抓站点全部类目
+                la_roots = [
+                    str(v).strip() for v in (body.get("roots") or [])
+                    if str(v).strip() and str(v).strip() != "__ALL__"
+                ]
+                if la_roots and not body.get("all_categories"):
+                    cmd += ["--roots"] + la_roots
                 if body.get("site"):
                     cmd += ["--site", body["site"]]
                 page_cap = min(_positive_int(body.get("max_pages"), 2), 999)
                 cmd += ["--max-pages", str(page_cap)]
-                if not include_descendants:
+                if la_roots and not include_descendants:
                     cmd += ["--exact-roots"]
                 _append_filter_flags(cmd, body, for_la=True)
             else:
@@ -1308,7 +1658,7 @@ async def start_products(body: dict):
                 if body.get("slugs"):
                     cmd += ["--slugs"] + body["slugs"]
                 else:
-                    cmd += ["--roots"] + body["roots"]
+                    cmd += ["--roots"] + list(body.get("roots") or [])
                 if body.get("lists"):
                     cmd += ["--lists"] + body["lists"]
                 if body.get("site"):
@@ -1323,8 +1673,12 @@ async def start_products(body: dict):
             env["DB_BACKEND"] = DB_BACKEND
             env["PROXY_REQUIRED"] = "1"
             env["ALLOW_DIRECT_FALLBACK"] = "0"
+            env["AMZ_RUN_ID"] = request_id
             try:
-                _product_proc = subprocess.Popen(cmd, cwd=BASE_DIR, env=env)
+                _product_proc = subprocess.Popen(
+                    cmd, cwd=BASE_DIR, env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
             except Exception as exc:
                 _product_proc = None
                 logging.exception("[proxy] 抓取进程创建失败")
@@ -1350,7 +1704,7 @@ async def start_products(body: dict):
             crawler_started_at = time.monotonic()
             threading.Thread(
                 target=_watch_and_sleep_proxy,
-                args=(_product_proc, generation, request_id, prep.run_id, crawler_started_at),
+                args=(_product_proc, generation, request_id, prep.run_id, crawler_started_at, cmd, env, 0),
                 daemon=True,
             ).start()
             logging.info(
@@ -1383,7 +1737,8 @@ async def start_products(body: dict):
 async def stop_products():
     global _product_proc, _crawl_generation
     set_proxy_status(STATUS_STOPPING)
-    # 等待正在进行的代理准备结束，避免残留 Mihomo（阻塞操作放线程池，不卡事件循环）
+    # 等待正在进行的代理准备（ensure_proxy_ready）结束，避免和它交叉写状态
+    # （阻塞操作放线程池，不卡事件循环）；常驻守护进程/独立 Mihomo 不受影响。
     acquired = await asyncio.to_thread(_proxy_prepare_lock.acquire, True, 120)
     if not acquired:
         set_proxy_status(

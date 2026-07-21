@@ -71,6 +71,29 @@ class TestCategoryScopeCount(unittest.IsolatedAsyncioTestCase):
         result = await api_server.category_scope_count({"site": "US", "roots": []})
         self.assertEqual(result["count"], 0)
 
+    async def test_all_categories_la_counts_na_valid_only(self):
+        result = await api_server.category_scope_count(
+            {"site": "US", "roots": [], "all_categories": True, "chart": "la"}
+        )
+        # fixtures: B,C 为 na_valid=1
+        self.assertTrue(result["all_categories"])
+        self.assertTrue(result["na_only"])
+        self.assertEqual(result["count"], 2)
+
+    async def test_all_categories_non_la_counts_depth_gt_zero(self):
+        result = await api_server.category_scope_count(
+            {"site": "US", "roots": [], "all_categories": True, "chart": "nr"}
+        )
+        # US fixtures: A,B,C,D (depth>0); R is depth=0 and excluded
+        self.assertEqual(result["count"], 4)
+
+    async def test_parent_root_with_descendants_la_counts_new_only(self):
+        """最新到货父节点勾选后只统计 NEW 下级，不含导航节点本身。"""
+        result = await api_server.category_scope_count(
+            {"site": "US", "roots": ["R"], "include_descendants": True, "chart": "la"}
+        )
+        self.assertEqual(result["count"], 2)  # B + C
+
     async def test_latest_arrivals_tree_keeps_only_new_branches(self):
         roots = await api_server._tree_children_sqlite("root", "", 50, 0, "US", 1)
         self.assertEqual([r["node_id"] for r in roots], ["R"])

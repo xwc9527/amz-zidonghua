@@ -67,6 +67,16 @@ MARKETPLACES = {
     "EG": _mp("https://www.amazon.eg", "ar-EG,ar;q=0.9,en;q=0.5", "埃及站", "E£", fba_supported=True),
 }
 
+_MARKETPLACE_CURRENCY_CODES = {
+    "US": "USD", "UK": "GBP", "DE": "EUR", "FR": "EUR", "IT": "EUR",
+    "ES": "EUR", "JP": "JPY", "NL": "EUR", "SE": "SEK", "PL": "PLN",
+    "BE": "EUR", "CA": "CAD", "AU": "AUD", "IN": "INR", "MX": "MXN",
+    "BR": "BRL", "SG": "SGD", "SA": "SAR", "AE": "AED", "TR": "TRY",
+    "EG": "EGP",
+}
+for _site_code, _currency_code in _MARKETPLACE_CURRENCY_CODES.items():
+    MARKETPLACES[_site_code]["currency_code"] = _currency_code
+
 def get_marketplace(site: str = "US") -> dict:
     site = site.upper()
     if site not in MARKETPLACES:
@@ -157,6 +167,16 @@ PROXY_LB_DIR = os.path.join(DATA_DIR, "lb_instance")
 PROXY_PID_FILE = os.path.join(DATA_DIR, "lb_pid.json")
 PROXY_LOCK_FILE = os.path.join(DATA_DIR, "proxy_pool.lock")
 
+# 常驻验证守护进程：独立于 api_server / 抓取生命周期，一直运行、持续验证补充
+PROXY_DAEMON_PID_FILE = os.path.join(DATA_DIR, "proxy_daemon_pid.json")
+PROXY_DAEMON_LOG_FILE = os.path.join(DATA_DIR, "proxy_daemon.log")
+PROXY_DAEMON_STATE_FILE = os.path.join(DATA_DIR, "proxy_daemon_state.json")
+PROXY_DAEMON_PORT_MAP_FILE = os.path.join(DATA_DIR, "proxy_daemon_port_map.json")
+# 抓取侧写入的活动心跳：守护进程据此在空闲时放缓验证节奏
+PROXY_DAEMON_ACTIVITY_FILE = os.path.join(DATA_DIR, "proxy_daemon_activity.json")
+# 抓取进程 → daemon 的可审计反馈队列与聚合质量指标（SQLite WAL）。
+PROXY_EVENT_DB_FILE = os.path.join(DATA_DIR, "proxy_runtime_events.db")
+
 CLASH_VERGE_HOME = _default_clash_home()
 CLASH_PROFILES_META = os.path.join(CLASH_VERGE_HOME, "profiles.yaml") if CLASH_VERGE_HOME else ""
 CLASH_PROFILES_DIR = os.path.join(CLASH_VERGE_HOME, "profiles") if CLASH_VERGE_HOME else ""
@@ -171,11 +191,23 @@ PROXY_CTRL_PORT = _env_int("PROXY_CTRL_PORT", 19897)
 PROXY_PORT_RANGE_END = _env_int("PROXY_PORT_RANGE_END", 18100)
 PROXY_MAX_NODES = _env_int("PROXY_MAX_NODES", 0)  # 0 = 不限
 
-# 抓取启动的硬门槛：最终发布池必须至少有 11 个“独立出口 + Amazon 可用”节点。
-# 三个指标保持同一默认值，避免某一层门槛较低造成误放行。
-PROXY_MIN_VERIFIED_NODES = _env_int("PROXY_MIN_VERIFIED_NODES", 11)
-PROXY_MIN_UNIQUE_IPS = _env_int("PROXY_MIN_UNIQUE_IPS", 11)
-PROXY_MIN_AMAZON_OK = _env_int("PROXY_MIN_AMAZON_OK", 11)
+# 分层水位：8 启动、10 警戒、14 常态目标、16 热池上限。目标以上的
+# 已验证节点进入温池，不丢弃；热池跌落时无需重新验证即可晋升补位。
+PROXY_MIN_START_NODES = max(1, _env_int("PROXY_MIN_START_NODES", 8))
+PROXY_POOL_LOW_WATERMARK = max(
+    PROXY_MIN_START_NODES, _env_int("PROXY_POOL_LOW_WATERMARK", 10)
+)
+PROXY_POOL_TARGET_NODES = max(
+    PROXY_POOL_LOW_WATERMARK, _env_int("PROXY_POOL_TARGET_NODES", 14)
+)
+PROXY_POOL_HOT_MAX_NODES = max(
+    PROXY_POOL_TARGET_NODES, _env_int("PROXY_POOL_HOT_MAX_NODES", 16)
+)
+# 兼容旧冷启动体检调用方：硬门槛是 8；常态扩容目标单独由
+# PROXY_POOL_TARGET_NODES 表达，不再用一个变量混用两种语义。
+PROXY_MIN_VERIFIED_NODES = _env_int("PROXY_MIN_VERIFIED_NODES", PROXY_MIN_START_NODES)
+PROXY_MIN_UNIQUE_IPS = _env_int("PROXY_MIN_UNIQUE_IPS", PROXY_MIN_START_NODES)
+PROXY_MIN_AMAZON_OK = _env_int("PROXY_MIN_AMAZON_OK", PROXY_MIN_START_NODES)
 
 PROXY_HEALTH_CONCURRENCY = _env_int("PROXY_HEALTH_CONCURRENCY", 20)
 PROXY_CONNECT_TIMEOUT = _env_int("PROXY_CONNECT_TIMEOUT", 5)
@@ -183,6 +215,63 @@ PROXY_READ_TIMEOUT = _env_int("PROXY_READ_TIMEOUT", 8)
 PROXY_PROBE_CACHE_TTL = _env_int("PROXY_PROBE_CACHE_TTL", 3600)
 PROXY_POOL_MAX_AGE = _env_int("PROXY_POOL_MAX_AGE", 600)
 PROXY_IDLE_TTL = _env_int("PROXY_IDLE_TTL", 1800)
+
+# 抓取运行期代理调度：正常请求定期轮换，风控/网络故障立即换独立出口。
+PROXY_RUNTIME_MIN_USABLE = _env_int("PROXY_RUNTIME_MIN_USABLE", PROXY_MIN_START_NODES)
+# 短租约：同一 worker/IP 默认连续 3 个请求或最多 5 分钟；错误立即结束租约。
+PROXY_ROTATE_REQUESTS = _env_int("PROXY_ROTATE_REQUESTS", 3)
+PROXY_ROTATE_TTL = _env_int("PROXY_ROTATE_TTL", 300)
+PROXY_MAX_ACTIVE_PER_PREFIX = _env_int("PROXY_MAX_ACTIVE_PER_PREFIX", 2)
+PROXY_CAPTCHA_COOLDOWN = _env_int("PROXY_CAPTCHA_COOLDOWN", 600)
+PROXY_RATE_LIMIT_COOLDOWN = _env_int("PROXY_RATE_LIMIT_COOLDOWN", 600)
+PROXY_ERROR_COOLDOWN = _env_int("PROXY_ERROR_COOLDOWN", 120)
+PROXY_REQUEST_DISTINCT_ATTEMPTS = _env_int("PROXY_REQUEST_DISTINCT_ATTEMPTS", 3)
+PROXY_RUNTIME_RECOVERY_ATTEMPTS = _env_int("PROXY_RUNTIME_RECOVERY_ATTEMPTS", 1)
+
+# ── 常驻验证守护进程（proxy_daemon.py）调度参数 ──────────────────────
+# 调度器主循环节拍：每次醒来检查是否有到期任务可派发
+PROXY_DAEMON_TICK_INTERVAL_SEC = _env_int("PROXY_DAEMON_TICK_INTERVAL_SEC", 3)
+# 热池若没有真实抓取成功反馈，20 分钟做一次贴近目标站的完整复核；
+# 温池/失败候选保证 60 分钟内至少获得一次滚动复查机会。
+PROXY_DAEMON_RECHECK_INTERVAL_SEC = _env_int("PROXY_DAEMON_RECHECK_INTERVAL_SEC", 1200)
+PROXY_DAEMON_WARM_RECHECK_INTERVAL_SEC = _env_int("PROXY_DAEMON_WARM_RECHECK_INTERVAL_SEC", 3600)
+PROXY_DAEMON_FULL_SCAN_INTERVAL_SEC = _env_int("PROXY_DAEMON_FULL_SCAN_INTERVAL_SEC", 3600)
+PROXY_DAEMON_EXPLORATION_INTERVAL_SEC = _env_int("PROXY_DAEMON_EXPLORATION_INTERVAL_SEC", 45)
+# 复核间隔抖动比例（±），打散同批节点同时到期造成的请求脉冲
+PROXY_DAEMON_RECHECK_JITTER_PCT = float(os.environ.get("PROXY_DAEMON_RECHECK_JITTER_PCT", "0.15") or "0.15")
+# 轻量哨兵复核（仅 exit-IP）连续通过 N 次后，才做一次完整 Amazon 校验
+PROXY_DAEMON_LIGHT_RECHECKS_BEFORE_FULL = _env_int("PROXY_DAEMON_LIGHT_RECHECKS_BEFORE_FULL", 1)
+# 验证失败节点的重试退避（指数增长，避免反复打已知坏节点）
+PROXY_DAEMON_RETRY_BACKOFF_BASE_SEC = _env_int("PROXY_DAEMON_RETRY_BACKOFF_BASE_SEC", 60)
+PROXY_DAEMON_RETRY_BACKOFF_MAX_SEC = _env_int("PROXY_DAEMON_RETRY_BACKOFF_MAX_SEC", 1800)
+# 验证并发度（守护进程内部线程池大小）；空闲时降到 IDLE_CONCURRENCY
+PROXY_DAEMON_CONCURRENCY = _env_int("PROXY_DAEMON_CONCURRENCY", 10)
+PROXY_DAEMON_IDLE_CONCURRENCY = _env_int("PROXY_DAEMON_IDLE_CONCURRENCY", 3)
+# 无抓取活动超过该秒数后进入空闲模式（复核间隔 × 倍数、并发降级）
+PROXY_DAEMON_IDLE_AFTER_SEC = _env_int("PROXY_DAEMON_IDLE_AFTER_SEC", 600)
+PROXY_DAEMON_IDLE_RECHECK_MULTIPLIER = _env_int("PROXY_DAEMON_IDLE_RECHECK_MULTIPLIER", 3)
+# 订阅指纹变化检测间隔；需连续确认次数一致才应用（防半写文件抖动）
+PROXY_DAEMON_SUBSCRIPTION_POLL_SEC = _env_int("PROXY_DAEMON_SUBSCRIPTION_POLL_SEC", 300)
+PROXY_DAEMON_SUBSCRIPTION_CONFIRM_POLLS = _env_int("PROXY_DAEMON_SUBSCRIPTION_CONFIRM_POLLS", 2)
+# 发布/状态文件写入去抖间隔，避免状态密集变化时频繁刷盘
+PROXY_DAEMON_PUBLISH_DEBOUNCE_SEC = _env_int("PROXY_DAEMON_PUBLISH_DEBOUNCE_SEC", 2)
+PROXY_DAEMON_FEEDBACK_DEDUPE_SEC = _env_int("PROXY_DAEMON_FEEDBACK_DEDUPE_SEC", 60)
+PROXY_DAEMON_FEEDBACK_BATCH = _env_int("PROXY_DAEMON_FEEDBACK_BATCH", 1000)
+# 蓝绿切换时临时端口基址（与主端口段错开，避免监听冲突）
+PROXY_DAEMON_BLUE_GREEN_BASE_PORT = _env_int("PROXY_DAEMON_BLUE_GREEN_BASE_PORT", 18201)
+
+# ── 抓取侧消费活池的热重载/等待参数 ──────────────────────────────────
+# ForcedProxyPool 后台线程重新读取活池文件的周期
+# 抓取反馈 -> daemon -> 活池 -> worker 的最坏收敛时间控制在 15s 内。
+PROXY_POOL_LIVE_REFRESH_SEC = _env_int("PROXY_POOL_LIVE_REFRESH_SEC", 5)
+# acquire() 发现可用数低于 min_usable 时，最多等待守护进程补充这么久，
+# 超时才真正报错（取代过去“立刻崩溃重启整进程”的粗粒度恢复）
+PROXY_POOL_WAIT_FOR_REPLENISH_SEC = _env_int("PROXY_POOL_WAIT_FOR_REPLENISH_SEC", 300)
+# 可用节点少于目标规模时，请求间隔放大系数（缓解单出口限流）
+PROXY_LOW_POOL_DELAY_SCALE = float(os.environ.get("PROXY_LOW_POOL_DELAY_SCALE", "2.0") or "2.0")
+# 抓取 worker 动态扩容：上限与检查间隔
+PROXY_MAX_CRAWL_WORKERS = _env_int("PROXY_MAX_CRAWL_WORKERS", 20)
+PROXY_WORKER_SCALE_INTERVAL_SEC = _env_int("PROXY_WORKER_SCALE_INTERVAL_SEC", 15)
 
 PROXY_IP_ENDPOINTS = (
     "https://api.ipify.org",

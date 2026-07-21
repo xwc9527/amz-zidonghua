@@ -55,24 +55,24 @@ def init_categories_tree(db_path: str, site: str = "US"):
     conn.execute(
         """CREATE TABLE categories (
             node_id TEXT, name TEXT, depth INTEGER,
-            parent_node_id TEXT, site TEXT,
+            parent_node_id TEXT, site TEXT, na_valid INTEGER DEFAULT 1,
             PRIMARY KEY (node_id, site)
         )"""
     )
     rows = [
-        ("ROOT", "Root", 0, None, site),
-        ("L2A", "L2 Alpha", 2, "ROOT", site),
-        ("L3A1", "L3 Alpha-1", 3, "L2A", site),
-        ("L3A2", "L3 Alpha-2", 3, "L2A", site),
-        ("L4A11", "L4 Alpha-1-1", 4, "L3A1", site),
-        ("L2B", "L2 Beta", 2, "ROOT", site),
-        ("L3B1", "L3 Beta-1", 3, "L2B", site),
+        ("ROOT", "Root", 0, None, site, 1),
+        ("L2A", "L2 Alpha", 2, "ROOT", site, 1),
+        ("L3A1", "L3 Alpha-1", 3, "L2A", site, 1),
+        ("L3A2", "L3 Alpha-2", 3, "L2A", site, 1),
+        ("L4A11", "L4 Alpha-1-1", 4, "L3A1", site, 1),
+        ("L2B", "L2 Beta", 2, "ROOT", site, 1),
+        ("L3B1", "L3 Beta-1", 3, "L2B", site, 1),
         # 跨站：同 node_id 不应混入
-        ("L2A", "DE L2", 2, None, "DE"),
-        ("L3A1", "DE L3", 3, "L2A", "DE"),
+        ("L2A", "DE L2", 2, None, "DE", 1),
+        ("L3A1", "DE L3", 3, "L2A", "DE", 1),
     ]
     conn.executemany(
-        "INSERT INTO categories(node_id, name, depth, parent_node_id, site) VALUES (?,?,?,?,?)",
+        "INSERT INTO categories(node_id, name, depth, parent_node_id, site, na_valid) VALUES (?,?,?,?,?,?)",
         rows,
     )
     conn.commit()

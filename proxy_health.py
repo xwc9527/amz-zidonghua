@@ -224,7 +224,14 @@ def verify_node(
     entry: dict,
     banned_ips: set[str] | None = None,
     amazon_url: str | None = None,
+    *,
+    light: bool = False,
 ) -> NodeHealthResult:
+    """完整验证：exit-IP + ISP + Amazon。
+
+    light=True：仅做 exit-IP 哨兵（用于已验证节点的廉价复核）；
+    出口仍通且未命中禁用列表即视为通过，不打 Amazon。
+    """
     name = entry.get("name", "")
     port = int(entry["port"])
     proxy = entry.get("proxy") or f"http://127.0.0.1:{port}"
@@ -244,6 +251,15 @@ def verify_node(
             name=name, port=port, proxy=proxy, ok=False, exit_ip=ip,
             reason="出口IP与本机/主代理相同或禁止",
             error_code="BANNED_EXIT_IP",
+            exit_check=exit_res.to_dict(),
+        )
+
+    if light:
+        return NodeHealthResult(
+            name=name, port=port, proxy=proxy, ok=True, exit_ip=ip,
+            amazon_ok=True,  # 沿用上次完整校验结论；轻量路径不重新测 Amazon
+            reason="ok_light",
+            error_code="",
             exit_check=exit_res.to_dict(),
         )
 
