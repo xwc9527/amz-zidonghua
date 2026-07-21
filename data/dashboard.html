@@ -46,6 +46,15 @@
     .bc-link:hover { background: #EEF2FF; }
     .bc-sep { color: #D1D5DB; font-size: 12px; }
     .bc-current { color: var(--fg); font-weight: 600; padding: 2px 4px; }
+    .category-view-switch {
+      border: 1px solid transparent; border-radius: 6px; background: transparent;
+      color: inherit; font: inherit; font-weight: 600; padding: 4px 7px; cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s;
+    }
+    .category-view-switch:hover { background: #EEF2FF; border-color: #C7D2FE; color: var(--primary); }
+    .category-view-switch.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+    .depth-item .item-name { text-decoration: none; cursor: pointer; }
+    .depth-item .item-meta { min-width: 62px; text-align: right; font-family: inherit; }
     .scope-toggle { flex-shrink: 0; display: flex; align-items: center; gap: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #F9FAFB; }
     .scope-toggle button { border: none; background: transparent; width: 28px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--gray); cursor: pointer; }
     .scope-toggle button + button { border-left: 1px solid var(--border); }
@@ -206,30 +215,77 @@
     ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
 
-    /* ── 常驻代理池实时状态条 ── */
+    /* ── 常驻代理池：可拖动悬浮按钮 + 弹出状态卡片 ── */
+    .proxy-pool-fab {
+      position: fixed; right: 16px; top: 16px; z-index: 1102;
+      width: 42px; height: 42px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid #DDE1EA; border-radius: 13px;
+      background: rgba(255,255,255,.96); color: var(--primary);
+      box-shadow: 0 5px 18px rgba(31,41,55,.16);
+      cursor: grab; touch-action: none; user-select: none;
+      transition: transform .15s, box-shadow .15s, background .15s, color .15s;
+    }
+    .proxy-pool-fab:hover,
+    .proxy-pool-fab[aria-expanded="true"] {
+      transform: translateY(-1px); background: #EEF2FF;
+      box-shadow: 0 7px 22px rgba(79,70,229,.20);
+    }
+    .proxy-pool-fab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .proxy-pool-fab.dragging { cursor: grabbing; transform: none; transition: none; }
+    .proxy-pool-fab.warn { background: #FFFBEB; color: #D97706; border-color: #F59E0B; }
+    .proxy-pool-fab svg { width: 22px; height: 22px; display: block; pointer-events: none; }
+    .proxy-pool-fab .plb-dot {
+      position: absolute; right: 3px; bottom: 3px; border: 2px solid #fff;
+    }
     .proxy-live-badge {
-      position: fixed; right: 18px; top: 12px; z-index: 1100;
-      display: flex; align-items: center; gap: 6px;
-      background: #fff; border: 1px solid var(--border); border-radius: 999px;
-      padding: 5px 12px 5px 9px; font-size: 11.5px; color: var(--fg);
-      box-shadow: 0 2px 8px rgba(0,0,0,.08); cursor: default;
-      transition: background .15s;
+      position: fixed; left: 0; top: 0; z-index: 1101;
+      width: 320px; max-width: calc(100vw - 24px);
+      background: #fff; border: 1px solid var(--border); border-radius: 10px;
+      padding: 0; font-size: 12px; line-height: 1.55; color: var(--fg);
+      box-shadow: 0 5px 18px rgba(0,0,0,.12); cursor: default;
+      opacity: 0; visibility: hidden; pointer-events: none;
+      transform: translateY(6px) scale(.98); transform-origin: top right;
+      transition: opacity .15s, visibility .15s, transform .15s, background .15s;
     }
-    .proxy-live-badge .plb-dot {
-      width: 8px; height: 8px; border-radius: 50%; background: #D1D5DB; flex-shrink: 0;
+    .proxy-live-badge.open {
+      opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1);
     }
-    .proxy-live-badge .plb-dot.alive {
-      background: var(--success);
-      box-shadow: 0 0 0 0 rgba(16,185,129,.5); animation: logPulse 1.8s infinite;
+    .proxy-card-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 11px 8px 12px; border-bottom: 1px solid #EEF0F4;
     }
-    .proxy-live-badge .plb-dot.dead { background: var(--danger, #EF4444); }
-    .proxy-live-badge .plb-text { white-space: nowrap; }
+    .proxy-card-title {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 12px; font-weight: 700; color: var(--fg);
+    }
+    .proxy-card-close {
+      width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+      background: transparent; color: var(--gray); font-size: 17px; line-height: 1;
+      cursor: pointer;
+    }
+    .proxy-card-close:hover { background: #F3F4F6; color: var(--fg); }
+    .proxy-card-body { padding: 10px 12px 11px; }
+    .proxy-card-hint { margin-top: 5px; font-size: 10.5px; color: #9CA3AF; }
+    .proxy-live-badge .plb-text { display: block; white-space: normal; }
     .proxy-live-badge .plb-text b { color: var(--primary); font-weight: 700; }
     .proxy-live-badge.warn {
       border-color: #F59E0B; background: #FFFBEB; color: #92400E;
     }
+    .proxy-live-badge .plb-dot,
+    .proxy-pool-fab .plb-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #D1D5DB; flex-shrink: 0;
+    }
+    .proxy-live-badge .plb-dot.alive,
+    .proxy-pool-fab .plb-dot.alive {
+      background: var(--success);
+      box-shadow: 0 0 0 0 rgba(16,185,129,.5); animation: logPulse 1.8s infinite;
+    }
+    .proxy-live-badge .plb-dot.dead,
+    .proxy-pool-fab .plb-dot.dead { background: var(--danger, #EF4444); }
     .proxy-live-badge.warn .plb-text b { color: #D97706; }
-    .proxy-live-badge .plb-dot.warn-dot {
+    .proxy-live-badge .plb-dot.warn-dot,
+    .proxy-pool-fab .plb-dot.warn-dot {
       background: #F59E0B;
       box-shadow: 0 0 0 0 rgba(245,158,11,.45); animation: logPulse 1.8s infinite;
     }
@@ -388,7 +444,7 @@
                   <div class="dropdown-item" data-key="la" id="chartItemLA" onclick="selectChart(this,'la','最新到货')">📋 最新到货</div>
                 </div>
               </div>
-              <input type="text" placeholder="搜索类目..." oninput="searchTask(this.value)" style="flex:1; padding:5px 10px; border:1px solid var(--border); border-radius:6px; font-size:12px; outline:none; min-width:80px;">
+              <input type="text" id="taskSearchInput" placeholder="搜索类目..." oninput="searchTask(this.value)" style="flex:1; padding:5px 10px; border:1px solid var(--border); border-radius:6px; font-size:12px; outline:none; min-width:80px;">
               <span style="font-size:11px; font-weight:600; color:#fff; background:var(--primary); min-width:22px; height:22px; line-height:22px; text-align:center; border-radius:11px; cursor:pointer; flex-shrink:0; padding:0 6px;" id="selCount" onclick="showSelectedModal()" title="实际抓取类目数">-</span>
           </div>
           <div class="breadcrumb-bar">
@@ -569,7 +625,7 @@
       <div style="padding:14px 18px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
         <span style="font-weight:600; font-size:14px;">已选类目 (<span id="selModalCount">0</span>)</span>
         <div style="display:flex; gap:8px; align-items:center;">
-          <button class="btn btn-outline" style="padding:3px 10px; font-size:11px;" onclick="selModalSelectAll()">全选当页</button>
+          <button class="btn btn-outline" id="selModalSelectAllBtn" style="padding:3px 10px; font-size:11px;" onclick="selModalSelectAll()">全选当页</button>
           <button class="btn btn-danger" style="padding:3px 10px; font-size:11px;" onclick="selModalClearAll()">清空全部</button>
           <span style="cursor:pointer; font-size:18px; color:var(--gray); line-height:1;" onclick="closeSelectedModal()">✕</span>
         </div>
@@ -578,10 +634,27 @@
     </div>
   </div>
 
-  <!-- 常驻代理池实时状态：守护进程持续验证/增补/淘汰节点，随时可见，不再有"卡在准备中"的困惑 -->
-  <div class="proxy-live-badge" id="proxyLiveBadge" title="常驻验证守护进程实时状态">
-    <span class="plb-dot" id="plbDot"></span>
-    <span class="plb-text" id="plbText">代理池: 检测中…</span>
+  <!-- 常驻代理池实时状态：悬浮按钮可自由拖动，点击弹出详情 -->
+  <button type="button" class="proxy-pool-fab" id="proxyPoolFab" aria-label="代理池状态"
+          aria-expanded="false" aria-controls="proxyLiveBadge" title="代理池状态（可拖动）">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="5" r="2.4"></circle>
+      <circle cx="6" cy="17.5" r="2.4"></circle>
+      <circle cx="18" cy="17.5" r="2.4"></circle>
+      <path d="M10.9 7.2 7.2 15.3M13.1 7.2l3.7 8.1M8.5 17.5h7"></path>
+    </svg>
+    <span class="plb-dot" id="plbTabDot"></span>
+  </button>
+  <div class="proxy-live-badge" id="proxyLiveBadge" role="dialog" aria-label="代理池状态" aria-hidden="true">
+    <div class="proxy-card-head">
+      <div class="proxy-card-title"><span class="plb-dot" id="plbDot"></span><span>代理池状态</span></div>
+      <button type="button" class="proxy-card-close" onclick="setProxyPoolPanel(false)" aria-label="关闭代理池状态">×</button>
+    </div>
+    <div class="proxy-card-body">
+      <span class="plb-text" id="plbText" aria-live="polite">检测中…</span>
+      <div class="proxy-card-hint">拖动悬浮按钮可调整位置</div>
+    </div>
   </div>
 
   <!-- 行动日志：侧边悬浮按钮 + 可展开面板（默认隐藏） -->
@@ -738,6 +811,7 @@
     // 切换后旧选择必须清空，否则会把上一个站点/榜单选中的节点带进新任务。
     function _clearSelectionOnContextSwitch() {
       if (_selectedNodes.size > 0) _selectedNodes.clear();
+      _selectedDepth = null;
       updateSelectionCount();
       const modal = document.getElementById('selModal');
       if (modal && modal.style.display !== 'none') renderSelectedModal();
@@ -936,17 +1010,38 @@
     let taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
     let taskSearchKeyword = '';
     const _selectedNodes = new Map();
+    let _selectedDepth = null;
+    let _categoryDepthOptions = [];
+    let _categoryViewMode = 'tree';
     // 合成根选中标记：表示抓取当前站点全部类目（不传 --roots）
     const ALL_CATEGORIES_KEY = '__ALL__';
     // descendants = 所选 + 全部下级（默认，兼容现有行为）；selected = 仅抓所选类目本身
     let _categoryScope = 'descendants';
-    function setCategoryScope(scope) {
-      _categoryScope = (scope === 'selected') ? 'selected' : 'descendants';
+    let _treeCategoryScope = 'descendants';
+    let _depthCategoryScope = 'selected';
+    function _syncCategoryScopeButtons() {
       const selBtn = document.getElementById('scopeSelectedBtn');
       const descBtn = document.getElementById('scopeDescendantsBtn');
       if (selBtn) selBtn.classList.toggle('active', _categoryScope === 'selected');
       if (descBtn) descBtn.classList.toggle('active', _categoryScope === 'descendants');
+    }
+    function setCategoryScope(scope) {
+      _categoryScope = (scope === 'selected') ? 'selected' : 'descendants';
+      if (_categoryViewMode === 'depth') _depthCategoryScope = _categoryScope;
+      else _treeCategoryScope = _categoryScope;
+      _syncCategoryScopeButtons();
       updateSelectionCount();
+    }
+    function toggleCategoryView() {
+      _categoryViewMode = _categoryViewMode === 'tree' ? 'depth' : 'tree';
+      _categoryScope = _categoryViewMode === 'depth' ? _depthCategoryScope : _treeCategoryScope;
+      _syncCategoryScopeButtons();
+      taskCurrentPath = [{ node_id: 'root', name: '🏠 全部分类' }];
+      taskSearchKeyword = '';
+      const search = document.getElementById('taskSearchInput');
+      if (search) search.value = '';
+      updateSelectionCount();
+      loadTaskDrillDown();
     }
     function _isAllCategoriesSelected() {
       return _selectedNodes.has(ALL_CATEGORIES_KEY);
@@ -964,10 +1059,11 @@
     let _selectionCountRequest = 0;
     async function updateSelectionCount() {
       const badge = document.getElementById('selCount');
-      const allSelected = _isAllCategoriesSelected();
-      const roots = [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
+      const depthMode = _categoryViewMode === 'depth';
+      const allSelected = !depthMode && _isAllCategoriesSelected();
+      const roots = depthMode ? [] : [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
       const requestId = ++_selectionCountRequest;
-      if (!allSelected && !roots.length) {
+      if ((depthMode && _selectedDepth == null) || (!depthMode && !allSelected && !roots.length)) {
         badge.innerText = '-';
         badge.title = '实际抓取类目数';
         return;
@@ -984,21 +1080,28 @@
             chart: _currentChart,
             site: _currentSite.toUpperCase(),
             include_descendants: _categoryScope !== 'selected',
+            scope_mode: depthMode ? 'depth' : 'tree',
+            depth: depthMode ? _selectedDepth : null,
           }),
         });
         if (response.status === 404) {
           if (requestId !== _selectionCountRequest) return;
-          badge.innerText = allSelected ? '全部' : String(roots.length);
+          badge.innerText = allSelected ? '全部' : (depthMode ? 'L' + _selectedDepth : String(roots.length));
           badge.title = allSelected
             ? '服务待重启，已选全部分类'
-            : ('服务待重启，暂显示已选入口 ' + roots.length + ' 个');
+            : (depthMode
+              ? ('服务待重启，已选全部 L' + _selectedDepth + ' 类目')
+              : ('服务待重启，暂显示已选入口 ' + roots.length + ' 个'));
           return;
         }
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const result = await response.json();
         if (requestId !== _selectionCountRequest) return;
         badge.innerText = String(result.count || 0);
-        badge.title = allSelected
+        badge.title = depthMode
+          ? ('实际抓取 ' + (result.count || 0) + ' 个类目（全部 L' + _selectedDepth +
+            (_categoryScope === 'selected' ? '，仅本层' : '，含下级') + '）')
+          : allSelected
           ? (_currentChart === 'la'
             ? ('实际抓取全部 NEW 类目 ' + (result.count || 0) + ' 个')
             : ('实际抓取全部 ' + (result.count || 0) + ' 个类目'))
@@ -1014,6 +1117,59 @@
     let _treeLoading = false;
     let _treeHasMore = true;
     const TREE_PAGE = 50;
+
+    function _categoryViewButton(active) {
+      return '<button type="button" class="category-view-switch' + (active ? ' active' : '') +
+        '" onclick="toggleCategoryView()" title="' +
+        (active ? '切换回类目树' : '切换到按层级聚合') + '">🏠 全部分类</button>';
+    }
+    function selectCategoryDepth(depth) {
+      const value = Number(depth);
+      _selectedDepth = _selectedDepth === value ? null : value;
+      updateSelectionCount();
+      loadTaskDrillDown();
+    }
+    function _renderDepthItem(item) {
+      const depth = Number(item.depth);
+      const selected = _selectedDepth === depth;
+      const label = depth === 0 ? 'L0 · 根类目' : 'L' + depth;
+      const naTag = _currentChart === 'la'
+        ? '<span style="font-size:10px; color:#16a34a; font-weight:700; flex-shrink:0;">NEW ' + (item.na_count || 0) + '</span>'
+        : '';
+      return '<div class="drill-item depth-item ' + (selected ? 'selected' : '') +
+        '" onclick="selectCategoryDepth(' + depth + ')">' +
+        '<input type="radio" name="categoryDepth" ' + (selected ? 'checked' : '') +
+        ' onclick="event.stopPropagation(); selectCategoryDepth(' + depth + ')">' +
+        '<span class="item-name-wrap"><span class="item-name">' + label + '</span></span>' +
+        naTag +
+        '<span class="item-meta">' + (item.count || 0) + ' 个</span>' +
+      '</div>';
+    }
+    async function loadCategoryDepthView() {
+      if (_treeObserver) _treeObserver.disconnect();
+      document.getElementById('bcPath').innerHTML = _categoryViewButton(true);
+      const list = document.getElementById('drillList');
+      list.innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">⏳ 加载中...</div>';
+      currentTaskChildren = [];
+      try {
+        const response = await fetchRetry(
+          API + '/api/v2/category_depths?site=' + _currentSite.toUpperCase() + '&t=' + Date.now()
+        );
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const items = await response.json();
+        _categoryDepthOptions = Array.isArray(items) ? items : [];
+        const keyword = taskSearchKeyword.toLowerCase();
+        const visible = _categoryDepthOptions.filter(item => {
+          if (!keyword) return true;
+          const label = Number(item.depth) === 0 ? 'l0 根类目' : 'l' + item.depth;
+          return label.includes(keyword);
+        });
+        list.innerHTML = visible.length ? visible.map(_renderDepthItem).join('') :
+          '<div style="padding:40px 20px; text-align:center; color:var(--gray); font-size:13px;">没有匹配的层级</div>';
+      } catch (err) {
+        list.innerHTML = '<div style="padding:40px 20px; text-align:center; color:var(--danger); font-size:13px;">加载失败: ' + err + '</div>';
+      }
+    }
 
     function _renderDrillItem(child, idx) {
       const hasChild = child.child_count > 0;
@@ -1069,6 +1225,10 @@
     }
 
     async function loadTaskDrillDown() {
+      if (_categoryViewMode === 'depth') {
+        await loadCategoryDepthView();
+        return;
+      }
       const current = taskCurrentPath[taskCurrentPath.length - 1];
       const allSelected = _isAllCategoriesSelected();
       const allowRootSelect = _currentChart === 'la';
@@ -1076,14 +1236,13 @@
         taskCurrentPath.map((node, idx) => {
         const isLast = idx === taskCurrentPath.length - 1;
         const isSyntheticRoot = node.node_id === 'root';
-        if (isSyntheticRoot && allowRootSelect) {
-          const label = isLast
-            ? ('<span>' + node.name + '</span>')
-            : ('<span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span>');
+        if (isSyntheticRoot) {
+          const rootCheckbox = allowRootSelect
+            ? ('<input type="checkbox" ' + (allSelected ? 'checked' : '') +
+              ' onclick="event.stopPropagation(); toggleSelectAllCategories()" title="勾选后抓取全部类目">')
+            : '';
           return '<div class="bc-item' + (isLast ? ' bc-current' : '') + '" style="display:flex; align-items:center; gap:6px;">' +
-            '<input type="checkbox" ' + (allSelected ? 'checked' : '') +
-            ' onclick="event.stopPropagation(); toggleSelectAllCategories()" title="勾选后抓取全部类目">' +
-            label + '</div>';
+            rootCheckbox + _categoryViewButton(false) + (isLast ? '' : '<span class="bc-sep">/</span>') + '</div>';
         }
         if (isLast) return '<div class="bc-item bc-current">' + node.name + '</div>';
         return '<div class="bc-item"><span class="bc-link" onclick="navTaskTo(' + idx + ')">' + node.name + '</span><span class="bc-sep">/</span></div>';
@@ -1176,6 +1335,8 @@
     // ── 已选类目弹窗 ──
     function showSelectedModal() {
       document.getElementById('selModal').style.display = 'flex';
+      const selectAllBtn = document.getElementById('selModalSelectAllBtn');
+      if (selectAllBtn) selectAllBtn.style.display = _categoryViewMode === 'depth' ? 'none' : '';
       renderSelectedModal();
     }
     function closeSelectedModal() {
@@ -1183,6 +1344,20 @@
     }
     function renderSelectedModal() {
       const list = document.getElementById('selModalList');
+      if (_categoryViewMode === 'depth') {
+        document.getElementById('selModalCount').textContent = _selectedDepth == null ? '0' : '1';
+        if (_selectedDepth == null) {
+          list.innerHTML = '<div style="padding:30px; text-align:center; color:var(--gray); font-size:13px;">暂无已选类目</div>';
+          return;
+        }
+        const label = _selectedDepth === 0 ? 'L0 · 根类目' : 'L' + _selectedDepth;
+        list.innerHTML = '<div style="display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--border); font-size:13px;">' +
+          '<input type="checkbox" checked onclick="selectCategoryDepth(' + _selectedDepth + '); renderSelectedModal();">' +
+          '<span style="flex:1;">' + label + '</span>' +
+          '<span style="font-size:11px; color:var(--gray);">全部同层类目</span>' +
+        '</div>';
+        return;
+      }
       document.getElementById('selModalCount').textContent = _isAllCategoriesSelected() ? '全部' : _selectedNodes.size;
       if (_selectedNodes.size === 0) {
         list.innerHTML = '<div style="padding:30px; text-align:center; color:var(--gray); font-size:13px;">暂无已选类目</div>';
@@ -1202,6 +1377,7 @@
       list.innerHTML = html;
     }
     function selModalSelectAll() {
+      if (_categoryViewMode === 'depth') return;
       // 最新到货 + 根层：一键全选 = 抓全部类目；其它情况勾选当前可见项
       if (_currentChart === 'la' && taskCurrentPath.length === 1 && taskCurrentPath[0].node_id === 'root') {
         _selectedNodes.clear();
@@ -1217,7 +1393,8 @@
       loadTaskDrillDown();
     }
     function selModalClearAll() {
-      _selectedNodes.clear();
+      if (_categoryViewMode === 'depth') _selectedDepth = null;
+      else _selectedNodes.clear();
       updateSelectionCount();
       renderSelectedModal();
       loadTaskDrillDown();
@@ -1256,16 +1433,149 @@
       }
     }
 
+    let _proxyPanelOpen = false;
+    let _proxyFabDrag = null;
+    let _proxyFabSuppressClick = false;
+    const PROXY_FAB_POSITION_KEY = 'amz.proxyFabPosition.v1';
+
+    function _clampProxyFab(value, min, max) {
+      return Math.min(Math.max(value, min), Math.max(min, max));
+    }
+    function setProxyFabPosition(left, top, persist = false) {
+      const fab = document.getElementById('proxyPoolFab');
+      if (!fab) return;
+      const margin = 8;
+      const x = _clampProxyFab(Number(left) || 0, margin, window.innerWidth - fab.offsetWidth - margin);
+      const y = _clampProxyFab(Number(top) || 0, margin, window.innerHeight - fab.offsetHeight - margin);
+      fab.style.left = `${x}px`;
+      fab.style.top = `${y}px`;
+      fab.style.right = 'auto';
+      if (persist) {
+        try { localStorage.setItem(PROXY_FAB_POSITION_KEY, JSON.stringify({ left: x, top: y })); } catch (e) {}
+      }
+    }
+    function positionProxyPoolPanel() {
+      const panel = document.getElementById('proxyLiveBadge');
+      const fab = document.getElementById('proxyPoolFab');
+      if (!panel || !fab) return;
+      const gap = 10;
+      const margin = 12;
+      const fabRect = fab.getBoundingClientRect();
+      const panelWidth = panel.offsetWidth;
+      const panelHeight = panel.offsetHeight;
+      let left = fabRect.right + gap;
+      if (left + panelWidth > window.innerWidth - margin) left = fabRect.left - panelWidth - gap;
+      left = _clampProxyFab(left, margin, window.innerWidth - panelWidth - margin);
+      let top = _clampProxyFab(fabRect.top, margin, window.innerHeight - panelHeight - margin);
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    }
+    function setProxyPoolPanel(open) {
+      _proxyPanelOpen = !!open;
+      const panel = document.getElementById('proxyLiveBadge');
+      const fab = document.getElementById('proxyPoolFab');
+      if (_proxyPanelOpen) positionProxyPoolPanel();
+      if (panel) {
+        panel.classList.toggle('open', _proxyPanelOpen);
+        panel.setAttribute('aria-hidden', String(!_proxyPanelOpen));
+      }
+      if (fab) fab.setAttribute('aria-expanded', String(_proxyPanelOpen));
+    }
+    function toggleProxyPoolPanel() {
+      setProxyPoolPanel(!_proxyPanelOpen);
+    }
+    function initProxyPoolFab() {
+      const fab = document.getElementById('proxyPoolFab');
+      if (!fab) return;
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(PROXY_FAB_POSITION_KEY) || 'null'); } catch (e) {}
+      if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+        setProxyFabPosition(saved.left, saved.top, false);
+      } else {
+        setProxyFabPosition(window.innerWidth - fab.offsetWidth - 16, 16, false);
+      }
+
+      fab.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        const rect = fab.getBoundingClientRect();
+        _proxyFabDrag = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          startLeft: rect.left,
+          startTop: rect.top,
+          moved: false,
+        };
+        fab.setPointerCapture?.(event.pointerId);
+      });
+      document.addEventListener('pointermove', (event) => {
+        if (!_proxyFabDrag || _proxyFabDrag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - _proxyFabDrag.startX;
+        const dy = event.clientY - _proxyFabDrag.startY;
+        if (!_proxyFabDrag.moved && Math.hypot(dx, dy) < 5) return;
+        _proxyFabDrag.moved = true;
+        fab.classList.add('dragging');
+        setProxyFabPosition(_proxyFabDrag.startLeft + dx, _proxyFabDrag.startTop + dy, false);
+        if (_proxyPanelOpen) positionProxyPoolPanel();
+        event.preventDefault();
+      });
+      const finishDrag = (event) => {
+        if (!_proxyFabDrag || _proxyFabDrag.pointerId !== event.pointerId) return;
+        const moved = _proxyFabDrag.moved;
+        _proxyFabDrag = null;
+        fab.classList.remove('dragging');
+        try { fab.releasePointerCapture?.(event.pointerId); } catch (e) {}
+        if (moved) {
+          const rect = fab.getBoundingClientRect();
+          setProxyFabPosition(rect.left, rect.top, true);
+          _proxyFabSuppressClick = true;
+          setTimeout(() => { _proxyFabSuppressClick = false; }, 0);
+        }
+      };
+      document.addEventListener('pointerup', finishDrag);
+      document.addEventListener('pointercancel', finishDrag);
+      fab.addEventListener('click', (event) => {
+        if (_proxyFabSuppressClick) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        toggleProxyPoolPanel();
+      });
+      window.addEventListener('resize', () => {
+        const rect = fab.getBoundingClientRect();
+        setProxyFabPosition(rect.left, rect.top, false);
+        if (_proxyPanelOpen) positionProxyPoolPanel();
+      });
+    }
+    document.addEventListener('click', (event) => {
+      if (!_proxyPanelOpen) return;
+      const panel = document.getElementById('proxyLiveBadge');
+      const fab = document.getElementById('proxyPoolFab');
+      if (!panel?.contains(event.target) && !fab?.contains(event.target)) setProxyPoolPanel(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && _proxyPanelOpen) {
+        setProxyPoolPanel(false);
+        document.getElementById('proxyPoolFab')?.focus();
+      }
+    });
+
     function updateProxyLiveBadge(proxyState) {
       const badge = document.getElementById('proxyLiveBadge');
+      const fab = document.getElementById('proxyPoolFab');
       const dot = document.getElementById('plbDot');
+      const tabDot = document.getElementById('plbTabDot');
       const text = document.getElementById('plbText');
       if (!dot || !text) return;
       const daemon = (proxyState && proxyState.daemon) || {};
       if (!daemon.alive) {
         if (badge) badge.classList.remove('warn');
+        if (fab) fab.classList.remove('warn');
         dot.className = 'plb-dot dead';
+        if (tabDot) tabDot.className = 'plb-dot dead';
         text.innerHTML = '代理池: 守护进程未运行';
+        if (fab) fab.title = '代理池守护进程未运行（可拖动）';
         return;
       }
       const verified = daemon.verified ?? 0;
@@ -1279,7 +1589,9 @@
       const poolLow = daemon.pool_low === true || hot < lowWatermark;
       const idle = !!daemon.idle_mode;
       if (badge) badge.classList.toggle('warn', poolLow);
+      if (fab) fab.classList.toggle('warn', poolLow);
       dot.className = poolLow ? 'plb-dot warn-dot' : 'plb-dot alive';
+      if (tabDot) tabDot.className = poolLow ? 'plb-dot warn-dot' : 'plb-dot alive';
       let extra = '';
       if (checking) extra += ` · 验证中 ${checking}`;
       if (failed) extra += ` · 待重试 ${failed}`;
@@ -1288,6 +1600,7 @@
       if (!poolLow && hot < target) extra += ` · 补池中(目标${target})`;
       if (poolLow) extra += ` · 低于警戒线${lowWatermark}，已自动降载`;
       text.innerHTML = `代理池: <b>${hot}</b> 热 / ${candidates} 候选${extra}`;
+      if (fab) fab.title = `${text.textContent}（可拖动）`;
     }
 
     async function refreshProductStats() {
@@ -1558,9 +1871,12 @@
           updateRunBtn();
         } catch(e) { alert('停止失败: ' + e); }
       } else {
-        const selectAllCategories = _isAllCategoriesSelected();
-        const allSelected = [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
-        if (!selectAllCategories && !allSelected.length) { alert('请在左侧勾选至少一个类目'); return; }
+        const depthMode = _categoryViewMode === 'depth';
+        const selectAllCategories = !depthMode && _isAllCategoriesSelected();
+        const allSelected = depthMode ? [] : [..._selectedNodes.keys()].filter(k => k && k !== ALL_CATEGORIES_KEY);
+        if ((depthMode && _selectedDepth == null) || (!depthMode && !selectAllCategories && !allSelected.length)) {
+          alert('请在左侧勾选至少一个类目'); return;
+        }
 
         const chartMap = {nr:'new-releases', bs:'bestsellers', ms:'movers-and-shakers', mw:'most-wished-for', mg:'most-gifted'};
         const enabledLists = _currentChart === 'la' ? [] : [chartMap[_currentChart]];
@@ -1574,6 +1890,8 @@
           site: _currentSite.toUpperCase(),
           chart: _currentChart,
           include_descendants: _categoryScope !== 'selected',
+          scope_mode: depthMode ? 'depth' : 'tree',
+          depth: depthMode ? _selectedDepth : null,
           ...filters,
         };
 
@@ -1973,6 +2291,7 @@
     })();
 
     // ── 初始化 ──
+    initProxyPoolFab();
     _initLogResize();
     loadStats();
     updateChartAvailability();

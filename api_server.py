@@ -609,6 +609,66 @@ async def tree_children(parent: str = "", q: str = "", limit: int = 50, offset: 
         return await _tree_children_sqlite(parent, q, limit, offset, site, na_only)
 
 
+def _parse_category_depth(value):
+    """Parse a non-negative integer depth without accepting bool/float coercion."""
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    depth = int(text)
+    return depth if 0 <= depth <= 100 else None
+
+
+async def _category_depth_values(site: str, start_depth: int, include_descendants: bool) -> list[int]:
+    """Return existing depths for the selected site; L0/root and leaf levels are retained."""
+    site = site.upper()
+    op = ">=" if include_descendants else "="
+    if DB_BACKEND == "pg":
+        rows = await pg_query(
+            f"SELECT DISTINCT depth FROM categories WHERE site = $1 AND depth {op} $2 ORDER BY depth",
+            site, start_depth,
+        )
+    else:
+        rows = await _sqlite_query(
+            f"SELECT DISTINCT depth FROM categories WHERE site = ? AND depth {op} ? ORDER BY depth",
+            (site, start_depth),
+        )
+    return [int(row["depth"]) for row in rows if row.get("depth") is not None]
+
+
+@app.get("/api/v2/category_depths")
+async def category_depths(site: str = "US"):
+    """List every stored category level, including roots (L0) and terminal levels."""
+    site = site.upper()
+    if DB_BACKEND == "pg":
+        rows = await pg_query(
+            """SELECT depth, COUNT(DISTINCT node_id) AS category_count,
+                      COUNT(DISTINCT node_id) FILTER (WHERE na_valid = 1) AS na_count
+               FROM categories
+               WHERE site = $1 AND depth >= 0 AND node_id IS NOT NULL AND node_id != ''
+               GROUP BY depth ORDER BY depth""",
+            site,
+        )
+    else:
+        rows = await _sqlite_query(
+            """SELECT depth, COUNT(DISTINCT node_id) AS category_count,
+                      COUNT(DISTINCT CASE WHEN na_valid = 1 THEN node_id END) AS na_count
+               FROM categories
+               WHERE site = ? AND depth >= 0 AND node_id IS NOT NULL AND node_id != ''
+               GROUP BY depth ORDER BY depth""",
+            (site,),
+        )
+    return [
+        {
+            "depth": int(row["depth"]),
+            "count": int(row["category_count"] or 0),
+            "na_count": int(row["na_count"] or 0),
+        }
+        for row in rows
+    ]
+
+
 @app.post("/api/v2/category_scope_count")
 async def category_scope_count(body: dict):
     """Return the deduplicated category count the crawler will actually execute."""
@@ -632,25 +692,66 @@ async def category_scope_count(body: dict):
     # 最新到货只抓 NEW 标记（na_valid=1）；榜单仍按所选类目树统计
     na_only = chart == "la" or bool(body.get("na_only"))
 
+    scope_mode = str(body.get("scope_mode") or "tree").strip().lower()
+    if scope_mode == "depth":
+        depth = _parse_category_depth(body.get("depth"))
+        if depth is None:
+            return {
+                "count": 0, "selected_count": 0, "scope_mode": "depth",
+                "error": "depth must be a non-negative integer",
+            }
+        op = ">=" if include_descendants else "="
+        valid_clause = " AND na_valid = 1" if na_only else ""
+        if DB_BACKEND == "pg":
+            count = await pg_scalar(
+                f"SELECT COUNT(DISTINCT node_id) FROM categories "
+                f"WHERE site = $1 AND depth {op} $2 AND node_id IS NOT NULL AND node_id != ''{valid_clause}",
+                site, depth,
+            )
+            selected_count = await pg_scalar(
+                "SELECT COUNT(DISTINCT node_id) FROM categories "
+                "WHERE site = $1 AND depth = $2 AND node_id IS NOT NULL AND node_id != ''",
+                site, depth,
+            )
+        else:
+            count = await _sqlite_scalar(
+                f"SELECT COUNT(DISTINCT node_id) FROM categories "
+                f"WHERE site = ? AND depth {op} ? AND node_id IS NOT NULL AND node_id != ''{valid_clause}",
+                (site, depth),
+            )
+            selected_count = await _sqlite_scalar(
+                "SELECT COUNT(DISTINCT node_id) FROM categories "
+                "WHERE site = ? AND depth = ? AND node_id IS NOT NULL AND node_id != ''",
+                (site, depth),
+            )
+        return {
+            "count": int(count or 0),
+            "selected_count": int(selected_count or 0),
+            "scope_mode": "depth",
+            "depth": depth,
+            "na_only": na_only,
+            "include_descendants": include_descendants,
+        }
+
     # 全选：最新到货 = 全部 NEW 类目；其它模式 = depth>0 全部类目
     if all_categories:
         if DB_BACKEND == "pg":
             if na_only:
                 count = await pg_scalar(
-                    "SELECT COUNT(*) FROM categories WHERE site = $1 AND na_valid = 1", site,
+                    "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1 AND na_valid = 1", site,
                 )
             else:
                 count = await pg_scalar(
-                    "SELECT COUNT(*) FROM categories WHERE site = $1 AND depth > 0", site,
+                    "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1 AND depth > 0", site,
                 )
         else:
             if na_only:
                 count = await _sqlite_scalar(
-                    "SELECT COUNT(*) FROM categories WHERE site = ? AND na_valid = 1", (site,),
+                    "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ? AND na_valid = 1", (site,),
                 )
             else:
                 count = await _sqlite_scalar(
-                    "SELECT COUNT(*) FROM categories WHERE site = ? AND depth > 0", (site,),
+                    "SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ? AND depth > 0", (site,),
                 )
         return {
             "count": int(count or 0),
@@ -673,7 +774,7 @@ async def category_scope_count(body: dict):
                            SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
                            WHERE c.site = $1
                        )
-                       SELECT COUNT(*) FROM categories c
+                       SELECT COUNT(DISTINCT c.node_id) FROM categories c
                        JOIN sub s ON s.node_id = c.node_id
                        WHERE c.site = $1 AND c.na_valid = 1""",
                     site, roots,
@@ -708,10 +809,11 @@ async def category_scope_count(body: dict):
                     f"""WITH RECURSIVE sub(node_id) AS (
                             SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
                             UNION
-                            SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                            SELECT c.node_id FROM categories c INDEXED BY idx_categories_parent_site
+                            JOIN sub s ON c.parent_node_id = s.node_id
                             WHERE c.site = ?
                         )
-                        SELECT COUNT(*) FROM categories c
+                        SELECT COUNT(DISTINCT c.node_id) FROM categories c
                         JOIN sub s ON s.node_id = c.node_id
                         WHERE c.site = ? AND c.na_valid = 1""",
                     (site, *roots, site, site),
@@ -721,7 +823,8 @@ async def category_scope_count(body: dict):
                     f"""WITH RECURSIVE sub(node_id) AS (
                             SELECT node_id FROM categories WHERE site = ? AND node_id IN ({placeholders})
                             UNION
-                            SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id
+                            SELECT c.node_id FROM categories c INDEXED BY idx_categories_parent_site
+                            JOIN sub s ON c.parent_node_id = s.node_id
                             WHERE c.site = ?
                         ) SELECT COUNT(*) FROM sub""",
                     (site, *roots, site),
@@ -749,7 +852,7 @@ async def category_scope_count(body: dict):
 async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
     if na_only:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
-                 (SELECT COUNT(*) FROM categories d
+                 (SELECT COUNT(DISTINCT d.node_id) FROM categories d
                   WHERE d.site = c.site AND d.na_valid = 1
                     AND d.path <@ c.path AND d.id != c.id) AS child_count
                  FROM categories c
@@ -772,14 +875,14 @@ async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
         args.extend([limit, offset])
         return await pg_query(sql, *args)
     if parent == "root":
-        total = await pg_scalar("SELECT COUNT(*) FROM categories WHERE site = $1", site)
+        total = await pg_scalar("SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = $1", site)
         root_rows = await pg_query("SELECT node_id, name FROM categories WHERE depth = 0 AND site = $1", site)
         if root_rows:
             return [{"name": r["name"], "node_id": r["node_id"], "depth": 0, "child_count": total} for r in root_rows]
         return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
     elif (await pg_scalar("SELECT COUNT(*) FROM categories WHERE node_id=$1 AND depth=0 AND site=$2", parent, site)) > 0:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
-                 (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
+                 (SELECT COUNT(DISTINCT c2.node_id) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
                  FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
         args = [parent, site]
         if q:
@@ -793,7 +896,7 @@ async def _tree_children_pg(parent, q, limit, offset, site="US", na_only=0):
         return await pg_query(sql, *args)
     else:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
-                 (SELECT COUNT(*) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
+                 (SELECT COUNT(DISTINCT c2.node_id) FROM categories c2 WHERE c2.path <@ c.path AND c2.id != c.id) as child_count
                  FROM categories c WHERE c.parent_node_id = $1 AND c.site = $2"""
         args = [parent, site]
         if q:
@@ -812,9 +915,10 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
         sql = """WITH RECURSIVE ancestry(new_node_id, ancestor_id) AS (
                      SELECT node_id, parent_node_id
                      FROM categories WHERE site = ? AND na_valid = 1
-                     UNION ALL
+                     UNION
                      SELECT a.new_node_id, c.parent_node_id
-                     FROM ancestry a JOIN categories c ON c.node_id = a.ancestor_id
+                     FROM ancestry a JOIN categories c INDEXED BY idx_categories_node_site
+                       ON c.node_id = a.ancestor_id
                      WHERE c.site = ? AND a.ancestor_id IS NOT NULL
                  ),
                  relevant(node_id) AS (
@@ -850,8 +954,9 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
             return await _sqlite_scalar(
                 """WITH RECURSIVE sub AS (
                        SELECT node_id FROM categories WHERE parent_node_id = ? AND site = ?
-                       UNION ALL
-                       SELECT c.node_id FROM categories c JOIN sub s ON c.parent_node_id = s.node_id WHERE c.site = ?
+                       UNION
+                       SELECT c.node_id FROM categories c INDEXED BY idx_categories_parent_site
+                       JOIN sub s ON c.parent_node_id = s.node_id WHERE c.site = ?
                    ) SELECT COUNT(*) FROM sub""",
                 (root_node_id, site, site))
         # 先查 depth=0 根节点（新版爬虫自动创建的）
@@ -876,14 +981,16 @@ async def _tree_children_sqlite(parent, q, limit, offset, site="US", na_only=0):
                 display_name = slug.replace("-", " ").title()
                 result.append({"name": display_name, "node_id": slug, "depth": 0, "child_count": cc})
             return result
-        total = await _sqlite_scalar("SELECT COUNT(*) FROM categories WHERE site = ?", (site,))
+        total = await _sqlite_scalar("SELECT COUNT(DISTINCT node_id) FROM categories WHERE site = ?", (site,))
         return [{"name": "All Categories", "node_id": "_root_", "depth": 0, "child_count": total}]
     else:
         sql = """SELECT c.name, c.node_id, c.depth, c.slug, c.na_valid,
                  (WITH RECURSIVE sub AS (
-                     SELECT node_id FROM categories WHERE parent_node_id = c.node_id
-                     UNION ALL
-                     SELECT cat.node_id FROM categories cat JOIN sub s ON cat.parent_node_id = s.node_id
+                     SELECT node_id FROM categories WHERE parent_node_id = c.node_id AND site = c.site
+                     UNION
+                     SELECT cat.node_id FROM categories cat INDEXED BY idx_categories_parent_site
+                     JOIN sub s ON cat.parent_node_id = s.node_id
+                     WHERE cat.site = c.site
                  ) SELECT COUNT(*) FROM sub) as child_count
                  FROM categories c WHERE c.parent_node_id = ? AND c.site = ?"""
         params = [parent, site]
@@ -1503,6 +1610,15 @@ async def proxy_status():
 async def start_products(body: dict):
     global _product_proc, _crawl_generation
     request_id = f"START-{time.strftime('%Y%m%d-%H%M%S')}-{threading.get_ident()}"
+    chart = str(body.get("chart") or "").lower()
+    scope_mode = str(body.get("scope_mode") or "tree").strip().lower()
+    depth_scope = scope_mode == "depth"
+    scope_depth = _parse_category_depth(body.get("depth")) if depth_scope else None
+    include_descendants = body.get("include_descendants", True)
+    if isinstance(include_descendants, str):
+        include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
+    else:
+        include_descendants = bool(include_descendants)
     with _product_lock:
         if _product_proc is not None and _product_proc.poll() is None:
             logging.info("[crawl] duplicate start rejected request_id=%s reason=already_running", request_id)
@@ -1511,7 +1627,9 @@ async def start_products(body: dict):
         if range_err:
             logging.warning("[crawl] start rejected request_id=%s reason=invalid_filters detail=%s", request_id, range_err)
             return {"status": "error", "msg": f"筛选条件不合法: {range_err}"}
-        chart = body.get("chart", "")
+        if depth_scope and scope_depth is None:
+            logging.warning("[crawl] start rejected request_id=%s reason=invalid_depth", request_id)
+            return {"status": "error", "msg": "层级必须是大于等于 0 的整数"}
         all_categories = body.get("all_categories", False)
         if isinstance(all_categories, str):
             all_categories = all_categories.strip().lower() not in ("0", "false", "no", "off", "")
@@ -1524,12 +1642,38 @@ async def start_products(body: dict):
         if chart != "la" and all_categories:
             logging.warning("[crawl] start rejected request_id=%s reason=all_categories_not_supported chart=%s", request_id, chart)
             return {"status": "error", "msg": "榜单抓取不支持全部分类，请勾选具体类目"}
-        if chart == "la" and not roots and not all_categories:
+        if chart == "la" and not roots and not all_categories and not depth_scope:
             logging.warning("[crawl] start rejected request_id=%s reason=no_roots chart=la", request_id)
             return {"status": "error", "msg": "latest arrivals requires roots"}
-        if chart != "la" and not body.get("slugs") and not roots:
+        if chart != "la" and not body.get("slugs") and not roots and not depth_scope:
             logging.warning("[crawl] start rejected request_id=%s reason=no_roots_or_slugs chart=%s", request_id, chart)
             return {"status": "error", "msg": "no slugs or roots specified"}
+
+    depth_values = []
+    if depth_scope:
+        site = str(body.get("site") or "US").upper()
+        depth_values = await _category_depth_values(site, scope_depth, include_descendants)
+        scope_preview = await category_scope_count({
+            **body,
+            "site": site,
+            "scope_mode": "depth",
+            "depth": scope_depth,
+            "include_descendants": include_descendants,
+        })
+        if not depth_values or int(scope_preview.get("count") or 0) <= 0:
+            logging.warning(
+                "[crawl] start rejected request_id=%s reason=empty_depth_scope site=%s depth=%s chart=%s",
+                request_id, site, scope_depth, chart,
+            )
+            return {"status": "error", "msg": "该层级在当前站点和榜单模式下没有可抓取类目"}
+        body = {
+            **body,
+            "roots": [],
+            "all_categories": False,
+            "scope_mode": "depth",
+            "depth": scope_depth,
+            "include_descendants": include_descendants,
+        }
 
     roots = [
         str(v).strip() for v in (body.get("roots") or [])
@@ -1546,10 +1690,12 @@ async def start_products(body: dict):
         body = {**body, "roots": [], "all_categories": True}
     slugs = body.get("slugs") or []
     logging.info(
-        "[crawl] start requested request_id=%s chart=%s site=%s roots=%d slugs=%d all_categories=%s include_descendants=%s max_pages=%s",
+        "[crawl] start requested request_id=%s chart=%s site=%s scope_mode=%s depth=%s roots=%d slugs=%d all_categories=%s include_descendants=%s max_pages=%s",
         request_id,
         chart,
         body.get("site") or "",
+        scope_mode,
+        scope_depth if depth_scope else "",
         len(roots),
         len(slugs),
         all_categories,
@@ -1631,12 +1777,6 @@ async def start_products(body: dict):
                 return {"status": "already_running", "run_id": prep.run_id}
 
             set_proxy_status(STATUS_STARTING_CRAWLER, run_id=prep.run_id, request_id=request_id)
-            include_descendants = body.get("include_descendants", True)
-            if isinstance(include_descendants, str):
-                include_descendants = include_descendants.strip().lower() not in ("0", "false", "no", "off")
-            else:
-                include_descendants = bool(include_descendants)
-
             if chart == "la":
                 cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_new_arrivals.py")]
                 # all_categories / 空 roots：不传 --roots，爬虫抓站点全部类目
@@ -1644,18 +1784,22 @@ async def start_products(body: dict):
                     str(v).strip() for v in (body.get("roots") or [])
                     if str(v).strip() and str(v).strip() != "__ALL__"
                 ]
-                if la_roots and not body.get("all_categories"):
+                if depth_scope:
+                    cmd += ["--depth"] + [str(value) for value in depth_values]
+                elif la_roots and not body.get("all_categories"):
                     cmd += ["--roots"] + la_roots
                 if body.get("site"):
                     cmd += ["--site", body["site"]]
                 page_cap = min(_positive_int(body.get("max_pages"), 2), 999)
                 cmd += ["--max-pages", str(page_cap)]
-                if la_roots and not include_descendants:
+                if la_roots and not include_descendants and not depth_scope:
                     cmd += ["--exact-roots"]
                 _append_filter_flags(cmd, body, for_la=True)
             else:
                 cmd = [sys.executable, "-u", os.path.join(BASE_DIR, "fetch_products.py")]
-                if body.get("slugs"):
+                if depth_scope:
+                    cmd += ["--depth"] + [str(value) for value in depth_values]
+                elif body.get("slugs"):
                     cmd += ["--slugs"] + body["slugs"]
                 else:
                     cmd += ["--roots"] + list(body.get("roots") or [])
@@ -1665,7 +1809,7 @@ async def start_products(body: dict):
                     cmd += ["--site", body["site"]]
                 page_cap = min(_positive_int(body.get("max_pages"), 2), 2)
                 cmd += ["--list-limit", "0", "--max-pages", str(page_cap)]
-                if not include_descendants:
+                if not include_descendants and not depth_scope:
                     cmd += ["--exact-roots"]
                 _append_filter_flags(cmd, body, for_la=False)
 

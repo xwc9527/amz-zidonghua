@@ -170,31 +170,24 @@ def _db_batch_insert(nodes: list[dict]) -> int:
         except sqlite3.OperationalError:
             pass
         added = 0
-        for n in nodes:
-            depth = n.get("depth", 0)
-            if depth == 0:
-                # Root nodes: upsert name so re-runs can correct slug fallbacks
+        try:
+            for n in nodes:
+                depth = n.get("depth", 0)
+                parent_node_id = n.get("parent_node_id") or ""
                 cur = conn.execute(
                     "INSERT INTO categories "
                     "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
                     "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?) "
-                    "ON CONFLICT(node_id, site) DO UPDATE SET name=excluded.name",
+                    "ON CONFLICT(site, node_id, parent_node_id) DO UPDATE SET "
+                    "name=excluded.name, url=excluded.url",
                     (n["name"], normalize_url(n["url"]), n.get("node_id"),
-                     depth, n.get("source", "subtree"),
-                     n.get("parent_node_id"), n.get("slug", ""), _SITE)
+                     depth, n.get("source", "subtree"), parent_node_id,
+                     n.get("slug", ""), _SITE)
                 )
-            else:
-                cur = conn.execute(
-                    "INSERT OR IGNORE INTO categories "
-                    "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
-                    "VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?)",
-                    (n["name"], normalize_url(n["url"]), n.get("node_id"),
-                     depth, n.get("source", "subtree"),
-                     n.get("parent_node_id"), n.get("slug", ""), _SITE)
-                )
-            added += cur.rowcount
-        conn.commit()
-        conn.close()
+                added += cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
     return added
 
 
@@ -204,8 +197,8 @@ def _db_mark_bc_checked(node_ids: list[str]):
     with _db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.executemany(
-            "UPDATE categories SET breadcrumb_checked=1 WHERE node_id=?",
-            [(nid,) for nid in node_ids]
+            "UPDATE categories SET breadcrumb_checked=1 WHERE site=? AND node_id=?",
+            [(_SITE, nid) for nid in node_ids]
         )
         conn.commit()
         conn.close()
@@ -221,6 +214,11 @@ def normalize_url(url: str) -> str:
     if not url.endswith("/"):
         url += "/"
     return url
+
+
+def _slug_url_patterns(slug: str) -> list[str]:
+    """Return SQL LIKE patterns for every chart without duplicating ``/gp``."""
+    return [f"%{prefix}{slug}/%" for prefix in CHART_PREFIXES]
 
 
 def extract_node_id(url: str) -> str | None:
@@ -368,16 +366,17 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         conn.execute("ALTER TABLE categories ADD COLUMN site TEXT DEFAULT 'US'")
     except sqlite3.OperationalError:
         pass
-    slug_patterns = [f"%/gp/{p.strip('/')}/{slug}/%" for p in CHART_PREFIXES]
+    slug_patterns = _slug_url_patterns(slug)
     like_clauses = " OR ".join(["url LIKE ?"] * len(slug_patterns))
     existing = conn.execute(
-        f"SELECT url, node_id, name, depth FROM categories "
-        f"WHERE node_id IS NOT NULL AND site = ? AND ({like_clauses})",
-        [_SITE] + slug_patterns
+        f"SELECT url, node_id, name, depth, parent_node_id FROM categories "
+        f"WHERE node_id IS NOT NULL AND site = ? AND (slug = ? OR {like_clauses})",
+        [_SITE, slug] + slug_patterns
     ).fetchall()
     conn.close()
-    visited_urls = set()
+    visited_urls = {normalize_url(r[0]) for r in existing if r[0]}
     visited_ids  = {r[1] for r in existing if r[1]}
+    visited_edges = {(r[1], r[4] or "") for r in existing if r[1]}
 
     root_url = normalize_url(f"{_DOMAIN}/gp/new-releases/{slug}/")
     task_q = Queue()
@@ -419,18 +418,9 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         "depth": 0,
         "source": "subtree",
         "slug": slug,
-        "parent_node_id": None,
+        "parent_node_id": "",
     }
     _db_batch_insert([root_node])
-    # INSERT OR IGNORE 不会刷新已有根节点名；显式写回可读名
-    with _db_lock:
-        conn_rn = sqlite3.connect(DB_FILE, timeout=10)
-        conn_rn.execute(
-            "UPDATE categories SET name=? WHERE site=? AND depth=0 AND (node_id=? OR slug=?)",
-            (root_name, _SITE, slug, slug),
-        )
-        conn_rn.commit()
-        conn_rn.close()
 
     if existing:
         existing_ids = {r[1] for r in existing if r[1]}
@@ -438,13 +428,13 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         conn2 = sqlite3.connect(DB_FILE, timeout=10)
         for r in conn2.execute(
             f"SELECT DISTINCT parent_node_id FROM categories "
-            f"WHERE parent_node_id IS NOT NULL AND site = ? AND ({like_clauses})",
-            [_SITE] + slug_patterns
+            f"WHERE parent_node_id != '' AND site = ? AND (slug = ? OR {like_clauses})",
+            [_SITE, slug] + slug_patterns
         ).fetchall():
             child_parent_ids.add(r[0])
         conn2.close()
         enqueued = 0
-        for url, node_id, name, depth in existing:
+        for url, node_id, name, depth, _parent_node_id in existing:
             is_parent = node_id in child_parent_ids
             if not is_parent:
                 task_q.put({"url": url, "name": name, "node_id": node_id, "depth": depth, "parent_node_id": None})
@@ -551,18 +541,21 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
                     for c in children:
                         c_url = normalize_url(c["url"])
                         c_nid = c.get("node_id")
-                        if c_url in visited_urls:
+                        edge_key = (c_nid or c_url, parent_id)
+                        if edge_key in visited_edges:
                             continue
-                        if c_nid and c_nid in visited_ids:
-                            continue
+                        visited_edges.add(edge_key)
                         visited_urls.add(c_url)
-                        if c_nid:
-                            visited_ids.add(c_nid)
                         c["depth"] = depth + 1
                         c["parent_node_id"] = parent_id
                         c["source"] = "subtree"
                         pending_nodes.append(c)
-                        task_q.put(c)
+                        # Persist every real parent edge, but expand a node only
+                        # once per slug crawl to avoid duplicate HTTP work.
+                        if not c_nid or c_nid not in visited_ids:
+                            if c_nid:
+                                visited_ids.add(c_nid)
+                            task_q.put(c)
                         new_count += 1
                         total_found[0] += 1
 

@@ -8,13 +8,13 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE IF NOT EXISTS categories (
     id              SERIAL PRIMARY KEY,
     name            TEXT NOT NULL,
-    url             TEXT UNIQUE NOT NULL,
+    url             TEXT NOT NULL,
     node_id         TEXT,
     depth           INTEGER DEFAULT 0,
     source          TEXT DEFAULT 'sidebar',
     explored        INTEGER DEFAULT 0,
     created_at      TIMESTAMPTZ DEFAULT now(),
-    parent_node_id  TEXT,
+    parent_node_id  TEXT NOT NULL DEFAULT '',
     true_depth      INTEGER,
     nr_valid        INTEGER,
     bs_valid        INTEGER,
@@ -24,15 +24,22 @@ CREATE TABLE IF NOT EXISTS categories (
     slug            TEXT DEFAULT '',
     child_count     INTEGER DEFAULT 0,
     site            TEXT DEFAULT 'US',
+    na_valid        INTEGER,
     path            ltree
 );
 
+ALTER TABLE categories ADD COLUMN IF NOT EXISTS na_valid INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_cat_url        ON categories(url);
 CREATE INDEX IF NOT EXISTS idx_cat_node_id    ON categories(node_id);
+CREATE INDEX IF NOT EXISTS idx_categories_node_site ON categories(node_id, site, parent_node_id);
 CREATE INDEX IF NOT EXISTS idx_cat_depth      ON categories(depth);
 CREATE INDEX IF NOT EXISTS idx_cat_explored   ON categories(explored);
 CREATE INDEX IF NOT EXISTS idx_cat_parent_nid ON categories(parent_node_id);
+CREATE INDEX IF NOT EXISTS idx_categories_parent_site ON categories(parent_node_id, site);
 CREATE INDEX IF NOT EXISTS idx_cat_site       ON categories(site);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_node_parent
+    ON categories(site, node_id, parent_node_id);
 CREATE INDEX IF NOT EXISTS idx_cat_path       ON categories USING gist(path);
 CREATE INDEX IF NOT EXISTS idx_cat_name_trgm  ON categories USING gin(name gin_trgm_ops);
 

@@ -18,7 +18,13 @@ class TestCategoryScopeCount(unittest.IsolatedAsyncioTestCase):
             """CREATE TABLE categories (
                    node_id TEXT, name TEXT, depth INTEGER,
                    parent_node_id TEXT, site TEXT, slug TEXT, na_valid INTEGER
-               )"""
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX idx_categories_node_site ON categories(node_id, site, parent_node_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_categories_parent_site ON categories(parent_node_id, site)"
         )
         conn.executemany(
             "INSERT INTO categories VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -93,6 +99,56 @@ class TestCategoryScopeCount(unittest.IsolatedAsyncioTestCase):
             {"site": "US", "roots": ["R"], "include_descendants": True, "chart": "la"}
         )
         self.assertEqual(result["count"], 2)  # B + C
+
+    async def test_depth_catalog_retains_root_and_terminal_levels(self):
+        result = await api_server.category_depths("US")
+        self.assertEqual([item["depth"] for item in result], [0, 1, 2, 3])
+        by_depth = {item["depth"]: item for item in result}
+        self.assertEqual(by_depth[0]["count"], 1)  # root R retained
+        self.assertEqual(by_depth[1]["count"], 2)
+        self.assertEqual(by_depth[3]["count"], 1)  # terminal C retained
+        self.assertEqual(by_depth[0]["na_count"], 0)
+        self.assertEqual(by_depth[3]["na_count"], 1)
+
+    async def test_depth_catalog_counts_unique_node_ids(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO categories VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("B", "New B duplicate URL", 2, "A", "US", "b-copy", 1),
+        )
+        conn.commit()
+        conn.close()
+        result = await api_server.category_depths("US")
+        by_depth = {item["depth"]: item for item in result}
+        self.assertEqual(by_depth[2]["count"], 1)
+        self.assertEqual(by_depth[2]["na_count"], 1)
+
+    async def test_depth_scope_exact_and_descendants_match_mode(self):
+        exact = await api_server.category_scope_count({
+            "site": "US", "scope_mode": "depth", "depth": 1,
+            "include_descendants": False, "chart": "nr",
+        })
+        self.assertEqual(exact["selected_count"], 2)  # A + D
+        self.assertEqual(exact["count"], 2)
+
+        descendants_la = await api_server.category_scope_count({
+            "site": "US", "scope_mode": "depth", "depth": 0,
+            "include_descendants": True, "chart": "la",
+        })
+        self.assertEqual(descendants_la["selected_count"], 1)  # root R
+        self.assertEqual(descendants_la["count"], 2)  # NEW B + C
+
+        exact_root_la = await api_server.category_scope_count({
+            "site": "US", "scope_mode": "depth", "depth": 0,
+            "include_descendants": False, "chart": "la",
+        })
+        self.assertEqual(exact_root_la["count"], 0)
+
+    async def test_depth_values_keep_all_existing_levels(self):
+        exact = await api_server._category_depth_values("US", 0, False)
+        descendants = await api_server._category_depth_values("US", 1, True)
+        self.assertEqual(exact, [0])
+        self.assertEqual(descendants, [1, 2, 3])
 
     async def test_latest_arrivals_tree_keeps_only_new_branches(self):
         roots = await api_server._tree_children_sqlite("root", "", 50, 0, "US", 1)

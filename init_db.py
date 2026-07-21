@@ -15,13 +15,13 @@ cur.executescript("""
 CREATE TABLE IF NOT EXISTS categories (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
-    url        TEXT UNIQUE NOT NULL,
+    url        TEXT NOT NULL,
     node_id    TEXT,
     depth      INTEGER DEFAULT 0,
     source     TEXT DEFAULT 'sidebar',
     explored   INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    parent_node_id     TEXT,
+    parent_node_id     TEXT NOT NULL DEFAULT '',
     true_depth         INTEGER,
     nr_valid           INTEGER,
     bs_valid           INTEGER,
@@ -29,25 +29,34 @@ CREATE TABLE IF NOT EXISTS categories (
     mw_valid           INTEGER,
     breadcrumb_checked INTEGER DEFAULT 0,
     slug               TEXT DEFAULT '',
-    child_count        INTEGER DEFAULT 0
+    child_count        INTEGER DEFAULT 0,
+    site               TEXT DEFAULT 'US',
+    na_valid           INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_url        ON categories(url);
 CREATE INDEX IF NOT EXISTS idx_node_id    ON categories(node_id);
+CREATE INDEX IF NOT EXISTS idx_categories_node_site ON categories(node_id, site, parent_node_id);
 CREATE INDEX IF NOT EXISTS idx_depth      ON categories(depth);
 CREATE INDEX IF NOT EXISTS idx_explored   ON categories(explored);
 CREATE INDEX IF NOT EXISTS idx_parent_nid ON categories(parent_node_id);
+CREATE INDEX IF NOT EXISTS idx_categories_parent_site ON categories(parent_node_id, site);
+CREATE INDEX IF NOT EXISTS idx_categories_site ON categories(site);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_node_parent
+    ON categories(site, node_id, parent_node_id);
 
 CREATE TRIGGER IF NOT EXISTS trg_child_inc AFTER INSERT ON categories
-WHEN NEW.parent_node_id IS NOT NULL AND NEW.parent_node_id != ''
+WHEN NEW.parent_node_id != ''
 BEGIN
-    UPDATE categories SET child_count = child_count + 1 WHERE node_id = NEW.parent_node_id;
+    UPDATE categories SET child_count = child_count + 1
+    WHERE site = NEW.site AND node_id = NEW.parent_node_id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_child_dec AFTER DELETE ON categories
-WHEN OLD.parent_node_id IS NOT NULL AND OLD.parent_node_id != ''
+WHEN OLD.parent_node_id != ''
 BEGIN
-    UPDATE categories SET child_count = child_count - 1 WHERE node_id = OLD.parent_node_id;
+    UPDATE categories SET child_count = child_count - 1
+    WHERE site = OLD.site AND node_id = OLD.parent_node_id;
 END;
 
 CREATE TABLE IF NOT EXISTS run_status (
@@ -70,8 +79,9 @@ if "child_count" not in cols:
 # 一次性填充 child_count
 cur.execute("""
     UPDATE categories SET child_count = (
-        SELECT COUNT(*) FROM categories c2
-        WHERE c2.parent_node_id = categories.node_id
+        SELECT COUNT(DISTINCT c2.node_id) FROM categories c2
+        WHERE c2.site = categories.site
+          AND c2.parent_node_id = categories.node_id
     ) WHERE node_id IS NOT NULL
 """)
 

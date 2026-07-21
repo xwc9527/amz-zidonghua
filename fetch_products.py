@@ -305,7 +305,7 @@ def get_descendant_nodes(root_ids: list, lists: list, site: str = None,
             [site, *root_ids],
         ).fetchall()
         conn.close()
-        result = [dict(r) for r in rows]
+        result = _dedupe_category_nodes([dict(r) for r in rows])
         _log.info(f"[fetch_products] [{site}] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
         return result
 
@@ -331,7 +331,7 @@ def get_descendant_nodes(root_ids: list, lists: list, site: str = None,
     """
     rows = conn.execute(sql, [site, *like_params, *root_ids]).fetchall()
     conn.close()
-    result = [dict(r) for r in rows]
+    result = _dedupe_category_nodes([dict(r) for r in rows])
     _log.info(f"[fetch_products] [{site}] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先: L{result[0]['depth'] if result else '?'}→L{result[-1]['depth'] if result else '?'}）")
     return result
 
@@ -339,12 +339,12 @@ def get_descendant_nodes(root_ids: list, lists: list, site: str = None,
 def _get_descendant_nodes_pg(root_ids, include_descendants: bool = True):
     ph = ",".join(["%s"] * len(root_ids))
     if not include_descendants:
-        result = _pg_fetchall(
+        result = _dedupe_category_nodes(_pg_fetchall(
             f"""SELECT node_id, url, name, depth FROM categories
                 WHERE node_id IS NOT NULL AND site = %s AND node_id IN ({ph})
                 ORDER BY depth DESC, name""",
             [_SITE, *root_ids],
-        )
+        ))
         _log.info(f"[fetch_products] 仅抓所选 {len(root_ids)} 个节点 → {len(result)} 个目标")
         return result
 
@@ -369,9 +369,55 @@ def _get_descendant_nodes_pg(root_ids, include_descendants: bool = True):
         WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(clauses)})
         ORDER BY depth DESC, name
     """
-    result = _pg_fetchall(sql, params)
+    result = _dedupe_category_nodes(_pg_fetchall(sql, params))
     _log.info(f"[fetch_products] 选中 {len(root_ids)} 个根节点 → {len(result)} 个后代节点（深度优先）")
     return result
+
+
+def get_nodes_by_depth(depths: list[int], site: str = None) -> list:
+    """Load every category at the requested exact levels, including L0 and leaf nodes."""
+    clean_depths = sorted({int(depth) for depth in (depths or []) if 0 <= int(depth) <= 100})
+    if not clean_depths:
+        return []
+    site = (site or _SITE).upper()
+    if DB_BACKEND == "pg":
+        ph = ",".join(["%s"] * len(clean_depths))
+        result = _pg_fetchall(
+            f"""SELECT node_id, MIN(url) AS url, MIN(name) AS name, MAX(depth) AS depth FROM categories
+                WHERE node_id IS NOT NULL AND node_id != '' AND site = %s
+                  AND depth IN ({ph})
+                GROUP BY node_id
+                ORDER BY depth DESC, name""",
+            [site, *clean_depths],
+        )
+    else:
+        conn = db_conn()
+        ph = ",".join("?" * len(clean_depths))
+        rows = conn.execute(
+            f"""SELECT node_id, MIN(url) AS url, MIN(name) AS name, MAX(depth) AS depth FROM categories
+                WHERE node_id IS NOT NULL AND node_id != '' AND site = ?
+                  AND depth IN ({ph})
+                GROUP BY node_id
+                ORDER BY depth DESC, name""",
+            [site, *clean_depths],
+        ).fetchall()
+        conn.close()
+        result = [dict(row) for row in rows]
+    _log.info(f"[fetch_products] [{site}] 按层级抓取 {clean_depths} → {len(result)} 个目标")
+    return result
+
+
+def _dedupe_category_nodes(nodes: list[dict]) -> list[dict]:
+    """Keep tree edges in storage while executing each browse node only once."""
+    seen = set()
+    unique = []
+    for node in nodes:
+        node_id = node.get("node_id")
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        unique.append(node)
+    return unique
 
 
 _SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
@@ -416,7 +462,7 @@ def get_nodes_by_slugs(slugs: list, lists: list, site: str = None) -> list:
     """
     rows = conn.execute(sql, [site, *params]).fetchall()
     conn.close()
-    result = [dict(r) for r in rows]
+    result = _dedupe_category_nodes([dict(r) for r in rows])
     _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
@@ -440,7 +486,7 @@ def _get_nodes_by_slugs_pg(slugs):
         WHERE node_id IS NOT NULL AND site = %s AND ({" OR ".join(like_clauses)})
         ORDER BY depth DESC, name
     """
-    result = _pg_fetchall(sql, params)
+    result = _dedupe_category_nodes(_pg_fetchall(sql, params))
     _log.info(f"[fetch_products] 选中 {len(slugs)} 个 L1 slug → {len(result)} 个后代节点（深度优先）")
     return result
 
@@ -1050,10 +1096,13 @@ def run_batch(root_ids: list, lists: list, review_max: int,
               detail_filters: dict = None,
               list_limit: int = 0,
               include_descendants: bool = True,
-              resume: bool = True):
+              resume: bool = True,
+              depths: list[int] = None):
     """主入口：单线程顺序抓取。从最深层类目开始，逐层向上。"""
     global _checkpoint
-    if slugs:
+    if depths:
+        nodes = get_nodes_by_depth(depths, site=_SITE)
+    elif slugs:
         # --slugs 语义本身就是 L1 下全部后代；exact 模式对 slug 入口不适用，仍展开
         nodes = get_nodes_by_slugs(slugs, lists, site=_SITE)
     else:
@@ -1093,6 +1142,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         "site": _SITE,
         "db_backend": DB_BACKEND,
         "roots": sorted(root_ids or []),
+        "depths": sorted(depths or []),
         "slugs": sorted(slugs or []),
         "lists": sorted(lists or []),
         "exact_roots": not include_descendants,
@@ -1270,6 +1320,8 @@ if __name__ == "__main__":
                        help="根节点 node_id 列表")
     group.add_argument("--slugs", nargs="+",
                        help="L1 类目 slug 列表 (如 automotive baby-products)")
+    group.add_argument("--depth", nargs="+", type=int,
+                       help="抓取指定精确层级（可传多个层级，包含 L0 和末级类目）")
     parser.add_argument("--site", default="US", help="站点代码: US, DE, JP, UK, FR")
     parser.add_argument("--review-max", type=int, default=0)
     parser.add_argument("--review-min", type=int, default=0)
@@ -1358,4 +1410,5 @@ if __name__ == "__main__":
         list_limit=args.list_limit,
         include_descendants=not args.exact_roots,
         resume=not args.no_resume,
+        depths=args.depth,
     )

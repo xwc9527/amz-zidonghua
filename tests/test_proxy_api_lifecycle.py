@@ -222,6 +222,46 @@ class TestProxyApiLifecycle(unittest.IsolatedAsyncioTestCase):
         stop_mock.assert_called_once()
         self.assertFalse(prepare_lock.locked())
 
+    async def test_depth_scope_starts_with_compact_depth_cli(self):
+        prep = SimpleNamespace(
+            ok=True,
+            run_id="PROXY-DEPTH",
+            candidate_nodes=12,
+            verified_nodes=10,
+            unique_ips=10,
+            reason="ok",
+            error_code="",
+            fail_reasons={},
+        )
+        proc = SimpleNamespace(poll=lambda: None, pid=456)
+        prepare_lock = threading.Lock()
+        with mock.patch.object(api_server, "_proxy_prepare_lock", prepare_lock), \
+             mock.patch.object(api_server, "_product_proc", None), \
+             mock.patch.object(api_server, "_validate_start_filters", return_value=None), \
+             mock.patch.object(api_server, "_category_depth_values", return_value=[2]), \
+             mock.patch.object(api_server, "category_scope_count", return_value={"count": 7}), \
+             mock.patch.object(api_server, "ensure_proxy_ready", return_value=prep), \
+             mock.patch.object(api_server.subprocess, "Popen", return_value=proc) as popen_mock, \
+             mock.patch.object(api_server, "_watch_and_sleep_proxy", return_value=None), \
+             mock.patch.object(api_server, "set_proxy_status"):
+            result = await api_server.start_products({
+                "chart": "nr",
+                "lists": ["new-releases"],
+                "site": "US",
+                "scope_mode": "depth",
+                "depth": 2,
+                "include_descendants": False,
+                "max_pages": 1,
+            })
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(result["lifecycle"], api_server.STATUS_RUNNING)
+        cmd = popen_mock.call_args.args[0]
+        self.assertIn("--depth", cmd)
+        self.assertEqual(cmd[cmd.index("--depth") + 1], "2")
+        self.assertNotIn("--roots", cmd)
+        self.assertNotIn("--exact-roots", cmd)
+        self.assertFalse(prepare_lock.locked())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -16,6 +16,7 @@ from pg_config import get_pg_dsn
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "categories.db")
 SCHEMA_PATH = os.path.join(BASE_DIR, "pg_schema.sql")
+PG_CATEGORY_DEDUP_PATH = os.path.join(BASE_DIR, "pg_category_dedup_migration.sql")
 
 
 def sanitize_ltree_label(s):
@@ -81,6 +82,14 @@ def migrate():
     conn.autocommit = True
     cur = conn.cursor()
 
+    # Existing PostgreSQL databases must be normalized before the new unique
+    # edge index in pg_schema.sql is installed.
+    cur.execute("SELECT to_regclass('public.categories')")
+    if cur.fetchone()[0] is not None:
+        print("执行 PostgreSQL 类目去重迁移 ...")
+        with open(PG_CATEGORY_DEDUP_PATH, 'r', encoding='utf-8') as f:
+            cur.execute(f.read())
+
     # 建库（如果 DSN 指向的库不存在需要先创建）
     # 执行 schema
     print("执行 schema ...")
@@ -102,7 +111,7 @@ def migrate():
 
     cols = ['name', 'url', 'node_id', 'depth', 'source', 'explored', 'created_at',
             'parent_node_id', 'true_depth', 'nr_valid', 'bs_valid', 'ms_valid', 'mw_valid',
-            'breadcrumb_checked', 'slug', 'child_count', 'site', 'path']
+            'breadcrumb_checked', 'slug', 'child_count', 'site', 'na_valid', 'path']
 
     batch = []
     for c in cats:
@@ -114,7 +123,7 @@ def migrate():
             c.get('parent_node_id'), c.get('true_depth'), c.get('nr_valid'),
             c.get('bs_valid'), c.get('ms_valid'), c.get('mw_valid'),
             c.get('breadcrumb_checked', 0), c.get('slug', ''),
-            c.get('child_count', 0), c.get('site') or 'US', lpath
+            c.get('child_count', 0), c.get('site') or 'US', c.get('na_valid'), lpath
         ]
         batch.append(vals)
 
