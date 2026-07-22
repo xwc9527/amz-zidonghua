@@ -174,7 +174,8 @@ def _prepare_test_db(test_db: Path):
     conn.execute(
         """CREATE TABLE IF NOT EXISTS categories (
             node_id TEXT, name TEXT, depth INTEGER,
-            parent_node_id TEXT, site TEXT, PRIMARY KEY(node_id, site)
+            parent_node_id TEXT, site TEXT, na_valid INTEGER,
+            PRIMARY KEY(node_id, site)
         )"""
     )
     # 若正式库存在则拷贝 categories（只读）
@@ -183,12 +184,15 @@ def _prepare_test_db(test_db: Path):
         n = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
         if n == 0:
             prod = sqlite3.connect(PROD_DB)
+            # fetch_new_arrivals._load_nodes 依赖 na_valid 列筛选节点，
+            # 测试库若不带上这一列会在真实抓取时直接 OperationalError 崩溃。
             rows = prod.execute(
-                "SELECT node_id, name, depth, parent_node_id, site FROM categories"
+                "SELECT node_id, name, depth, parent_node_id, site, "
+                "COALESCE(na_valid, 0) FROM categories"
             ).fetchall()
             prod.close()
             conn.executemany(
-                "INSERT OR IGNORE INTO categories VALUES (?,?,?,?,?)", rows
+                "INSERT OR IGNORE INTO categories VALUES (?,?,?,?,?,?)", rows
             )
     # new_arrivals 由脚本自建
     conn.commit()
