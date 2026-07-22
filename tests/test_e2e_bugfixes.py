@@ -37,8 +37,39 @@ class TestFlushRemoved(unittest.TestCase):
 
 class TestDbPathRespectsEnv(unittest.TestCase):
     def test_db_path_uses_config_db_file(self):
-        from config import DB_FILE
-        self.assertEqual(os.path.abspath(fp.DB_PATH), os.path.abspath(DB_FILE))
+        """子进程验证 AMZ_DB_FILE/DB_FILE 覆盖真实生效，禁止同对象自比较。"""
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as tmp:
+            isolated = Path(tmp) / "isolated_categories.db"
+            isolated.write_bytes(b"")
+            env = os.environ.copy()
+            env["AMZ_DB_FILE"] = str(isolated)
+            env["DB_FILE"] = str(isolated)
+            env["TESTING"] = "1"
+            env.pop("AMZ_DATA_DIR", None)
+            code = (
+                "import os, fetch_products as fp\n"
+                "expected = os.path.abspath(os.environ['AMZ_DB_FILE'])\n"
+                "actual = os.path.abspath(fp.DB_PATH)\n"
+                "assert actual == expected, (actual, expected)\n"
+                "print('DB_PATH_OK', actual)\n"
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=str(ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout={proc.stdout!r} stderr={proc.stderr!r}",
+            )
+            self.assertIn("DB_PATH_OK", proc.stdout)
 
 
 class TestDescendantExpansion(unittest.TestCase):
@@ -123,6 +154,126 @@ class _SeqClient:
         outcome = self.detail_outcomes[self.detail_i]
         self.detail_i += 1
         return outcome
+
+
+class TestLinkValidity(unittest.TestCase):
+    def test_pg_validity_update_is_scoped_by_site(self):
+        cursor = mock.Mock()
+        connection = mock.Mock()
+        connection.cursor.return_value = cursor
+        with mock.patch.object(fp, "DB_BACKEND", "pg"), \
+             mock.patch.object(fp, "_get_pg", return_value=connection):
+            fp.save_link_validity("shared", "new-releases", 1, site="UK")
+        cursor.execute.assert_called_once_with(
+            "UPDATE categories SET nr_valid=%s WHERE node_id=%s AND site=%s",
+            (1, "shared", "UK"),
+        )
+
+    def test_sqlite_validity_is_scoped_by_site_and_legacy_cache_is_not_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "validity.db")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE categories("
+                "node_id TEXT, site TEXT, nr_valid INTEGER, "
+                "PRIMARY KEY(node_id, site))"
+            )
+            conn.execute(
+                "CREATE TABLE link_cache("
+                "node_id TEXT PRIMARY KEY, nr_valid INTEGER, checked_at TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO categories VALUES (?,?,NULL)",
+                [("shared", "US"), ("shared", "UK")],
+            )
+            conn.commit()
+            conn.close()
+
+            def connect():
+                return sqlite3.connect(db)
+
+            with mock.patch.object(fp, "DB_BACKEND", "sqlite"), \
+                 mock.patch.object(fp, "db_conn", side_effect=connect):
+                fp.save_link_validity("shared", "new-releases", 1, site="US")
+
+            conn = sqlite3.connect(db)
+            rows = conn.execute(
+                "SELECT site,nr_valid FROM categories ORDER BY site"
+            ).fetchall()
+            cache_count = conn.execute("SELECT COUNT(*) FROM link_cache").fetchone()[0]
+            conn.close()
+            self.assertEqual(rows, [("UK", None), ("US", 1)])
+            self.assertEqual(cache_count, 0)
+
+    def test_http_200_empty_page_is_invalid(self):
+        node = {
+            "node_id": "empty",
+            "url": "https://www.amazon.com/gp/new-releases/books/empty/",
+            "name": "Empty",
+            "depth": 2,
+        }
+        client = _SeqClient("<html><body>No products</body></html>", [])
+        with mock.patch.object(fp, "save_link_validity") as save_validity:
+            status, error, found, _ = fp.process_node(
+                node,
+                ["new-releases"],
+                review_max=0,
+                min_list_size=0,
+                client=client,
+                max_pages=1,
+                delay=0.0,
+            )
+        self.assertEqual((status, error, found), ("done", "", 0))
+        save_validity.assert_called_once_with(
+            "empty", "new-releases", 0, site=fp._SITE,
+        )
+
+    def test_page2_does_not_override_page1_validity_and_keeps_canonical_query(self):
+        product_html = (
+            '<div id="gridItemRoot">'
+            '<a href="/dp/B0000000A1"><span>A</span></a></div>'
+        )
+
+        class Client:
+            def __init__(self):
+                self.urls = []
+
+            def get(self, url, *, phase, item_id, referer=""):
+                self.urls.append(url)
+                html = product_html if len(self.urls) == 1 else "<html>empty</html>"
+                return FetchOutcome(ok=True, html=html, status_code=200, attempts=1)
+
+        node = {
+            "node_id": "canonical",
+            "url": "https://www.amazon.com/gp/bestsellers/books/",
+            "name": "Books",
+            "depth": 1,
+            "canonical_list_url": (
+                "https://www.amazon.com/gp/bestsellers/books/"
+                "?ref_=zg_bs_tab_bsms"
+            ),
+            "canonical_list_type": "bestsellers",
+        }
+        client = Client()
+        with mock.patch.object(fp, "save_link_validity") as save_validity, \
+             mock.patch.object(fp, "save_products", return_value=1), \
+             mock.patch.object(fp, "enrich_with_details", return_value=0):
+            fp.process_node(
+                node,
+                ["bestsellers"],
+                review_max=0,
+                min_list_size=0,
+                client=client,
+                max_pages=2,
+                delay=0.0,
+            )
+        save_validity.assert_called_once_with(
+            "canonical", "bestsellers", 1, site=fp._SITE,
+        )
+        self.assertEqual(
+            client.urls[1],
+            node["canonical_list_url"] + "&pg=2",
+        )
 
 
 class TestPartialDetailFailure(unittest.TestCase):
@@ -225,7 +376,7 @@ class TestPartialDetailFailure(unittest.TestCase):
         product = {
             "asin": "B0000000A1",
             "node_id": "n2",
-            "list_type": "movers-and-shakers",
+            "list_type": "bestsellers",
             "price": 10.0,
         }
         detail = {"price": 10.0, "rating": 3.0}
@@ -237,7 +388,7 @@ class TestPartialDetailFailure(unittest.TestCase):
             kept = fp._finalize_detail(product, detail, {"rating_min": 4.0})
         self.assertFalse(kept)
         delete_mock.assert_called_once_with(
-            "B0000000A1", node_id="n2", list_type="movers-and-shakers",
+            "B0000000A1", node_id="n2", list_type="bestsellers",
         )
         update_mock.assert_not_called()
 

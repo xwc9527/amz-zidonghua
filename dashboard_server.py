@@ -54,6 +54,11 @@ def _ensure_tables():
     """启动时自动创建缺失的表/列，避免运行时崩溃。"""
     conn = sqlite3.connect(DB_FILE, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        from favorite_products import ensure_sqlite_schema
+        ensure_sqlite_schema(DB_FILE)
+    except Exception as e:
+        print(f"[启动] favorite_products schema 跳过: {e}", flush=True)
     # product_sightings 表
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS product_sightings (

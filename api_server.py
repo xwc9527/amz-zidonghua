@@ -16,7 +16,12 @@ DB_BACKEND = os.getenv("DB_BACKEND", "pg")
 
 # PG config（SQLite 模式可不设置 PG_DSN）
 from pg_config import PG_DSN, get_pg_dsn
-from config import DB_FILE, PROXY_MIN_START_NODES, PROXY_RUNTIME_RECOVERY_ATTEMPTS
+from config import (
+    DB_FILE, PROXY_MIN_START_NODES, PROXY_RUNTIME_RECOVERY_ATTEMPTS,
+    assert_testing_paths_safe, is_testing, use_run_cache,
+)
+import product_run_cache as run_cache
+import favorite_products as fav_store
 
 # 代理池：API 运行期间守护进程持续验证/增补/淘汰节点；点击开始时只需
 # 活池达到最低启动门槛。API 正常关闭时默认连带清理，避免后台孤儿进程；
@@ -226,6 +231,20 @@ def _recover_proxy_and_resume(
         resume_env = dict(env or os.environ.copy())
         if previous_run_id:
             resume_env["AMZ_RUN_ID"] = previous_run_id
+        if use_run_cache() and previous_run_id:
+            try:
+                run_cache.open_existing_generation(previous_run_id)
+            except Exception as exc:
+                set_proxy_status(
+                    STATUS_PROXY_FAILED,
+                    run_id=previous_run_id,
+                    request_id=request_id,
+                    pool_ready=False,
+                    reason=str(exc),
+                    error_code="CACHE_RESUME_MISMATCH",
+                    recovery_attempt=next_attempt,
+                )
+                return
 
         with _product_lock:
             if generation != _crawl_generation:
@@ -404,18 +423,38 @@ def _validate_start_filters(body: dict) -> str | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pool
+    assert_testing_paths_safe()
+    if use_run_cache():
+        await asyncio.to_thread(run_cache.ensure_schema)
     if DB_BACKEND == "pg":
         _pool = await asyncpg.create_pool(get_pg_dsn(), min_size=2, max_size=10)
+        try:
+            async with _pool.acquire() as conn:
+                for stmt in fav_store.PG_SCHEMA_SQL.strip().split(";"):
+                    s = stmt.strip()
+                    if s:
+                        await conn.execute(s)
+        except Exception:
+            logging.exception("[favorites] ensure pg schema failed — 拒绝启动")
+            if _pool:
+                await _pool.close()
+                _pool = None
+            raise
+    else:
+        await asyncio.to_thread(fav_store.ensure_sqlite_schema)
     # 只要 API 在运行，常驻验证守护进程也应在运行（"始终热"策略）：
     # 拉起不阻塞——不等待它验证出任何节点，只保证进程已存在。
-    spawn = await asyncio.to_thread(ensure_daemon_running)
-    if spawn.get("ok"):
-        logging.info(
-            "[proxy] 守护进程已就位 pid=%s started=%s",
-            spawn.get("pid"), spawn.get("started"),
-        )
+    if is_testing():
+        logging.info("[proxy] TESTING=1：跳过代理守护进程启动")
     else:
-        logging.warning("[proxy] 守护进程拉起失败: %s", spawn.get("error"))
+        spawn = await asyncio.to_thread(ensure_daemon_running)
+        if spawn.get("ok"):
+            logging.info(
+                "[proxy] 守护进程已就位 pid=%s started=%s",
+                spawn.get("pid"), spawn.get("started"),
+            )
+        else:
+            logging.warning("[proxy] 守护进程拉起失败: %s", spawn.get("error"))
     try:
         yield
     finally:
@@ -427,7 +466,7 @@ async def lifespan(app: FastAPI):
             if _product_proc and _product_proc.poll() is None:
                 _product_proc.terminate()
                 _product_proc = None
-        if os.getenv("PROXY_DAEMON_PERSIST", "0") != "1":
+        if not is_testing() and os.getenv("PROXY_DAEMON_PERSIST", "0") != "1":
             stopped = await asyncio.to_thread(stop_daemon)
             if not stopped.get("ok"):
                 logging.warning("[proxy] API 关闭时代理守护清理失败: %s", stopped)
@@ -1164,9 +1203,36 @@ async def products(
     range_err = _validate_start_filters(filters)
     if range_err:
         return JSONResponse({"status": "error", "msg": f"筛选条件不合法: {range_err}"}, status_code=400)
+    if use_run_cache():
+        rows = await asyncio.to_thread(run_cache.query_products, filters, chart="products")
+        return await _attach_favorite_flags(rows, filters.get("site"))
     if DB_BACKEND == "pg":
-        return await _products_pg(**filters)
-    return await _products_sqlite(**filters)
+        return await _attach_favorite_flags(await _products_pg(**filters), filters.get("site"))
+    return await _attach_favorite_flags(await _products_sqlite(**filters), filters.get("site"))
+
+
+async def _attach_favorite_flags(rows: list, site: str | None = None):
+    """附加收藏标记；收藏读取失败不得伪装成全部未收藏。"""
+    if not rows:
+        return rows
+    try:
+        keys = await asyncio.to_thread(fav_store.favorite_key_set, DB_BACKEND, site)
+    except Exception as e:
+        logging.exception("favorite_key_set failed")
+        return JSONResponse(
+            {
+                "status": "error",
+                "error_code": "FAVORITE_READ_FAILED",
+                "msg": f"收藏状态读取失败: {e}",
+            },
+            status_code=503,
+        )
+    for r in rows:
+        s = (r.get("site") or site or "").upper()
+        a = (r.get("asin") or "").upper()
+        r["is_favorite"] = (s, a) in keys
+        r["run_id"] = r.get("run_id") or run_cache.get_active_run_id()
+    return rows
 
 
 def _build_product_where(filters, style="sqlite"):
@@ -1457,9 +1523,14 @@ async def new_arrivals_api(
     range_err = _validate_start_filters(filters)
     if range_err:
         return JSONResponse({"status": "error", "msg": f"筛选条件不合法: {range_err}"}, status_code=400)
+    if use_run_cache():
+        # LA 结果通常一次写全；不过滤 detail_scraped=1，避免空列表
+        la_filters = {**filters, "detail_only": False}
+        rows = await asyncio.to_thread(run_cache.query_products, la_filters, chart="la")
+        return await _attach_favorite_flags(rows, filters.get("site"))
     if DB_BACKEND == "pg":
-        return await _new_arrivals_pg(filters)
-    return await _new_arrivals_sqlite(filters)
+        return await _attach_favorite_flags(await _new_arrivals_pg(filters), filters.get("site"))
+    return await _attach_favorite_flags(await _new_arrivals_sqlite(filters), filters.get("site"))
 
 @app.get("/api/v2/product_stats")
 async def product_stats(
@@ -1473,6 +1544,23 @@ async def product_stats(
     total, by_list, multi, na_total = 0, [], 0, 0
     detail_ok, detail_failed = 0, 0
     try:
+        if use_run_cache():
+            cache_stats = await asyncio.to_thread(
+                run_cache.stats, site, stats_run_id or run_cache.get_active_run_id()
+            )
+            return {
+                "total_asins": cache_stats.get("total_asins") or 0,
+                "new_arrivals": cache_stats.get("new_arrivals") or 0,
+                "by_list": cache_stats.get("by_list") or [],
+                "multi_list": cache_stats.get("multi_list") or 0,
+                "detail_ok": cache_stats.get("detail_ok") or 0,
+                "detail_failed": cache_stats.get("detail_failed") or 0,
+                "site": site,
+                "running": running,
+                "lifecycle": lifecycle,
+                "run_id": cache_stats.get("run_id") or stats_run_id or lifecycle_run_id or "",
+                "result_mode": "run_cache",
+            }
         if DB_BACKEND == "pg":
             if site:
                 total = await pg_scalar(
@@ -1609,7 +1697,12 @@ async def product_progress():
     running, lifecycle, run_id = _crawl_lifecycle_state()
     ps, na = 0, 0
     try:
-        if DB_BACKEND == "pg":
+        if use_run_cache():
+            cache_stats = await asyncio.to_thread(run_cache.stats, None, run_id or None)
+            ps = cache_stats.get("total_asins") or 0
+            na = cache_stats.get("new_arrivals") or 0
+            run_id = cache_stats.get("run_id") or run_id
+        elif DB_BACKEND == "pg":
             try:
                 ps = await pg_scalar("SELECT COUNT(DISTINCT asin) FROM product_sightings")
             except Exception:
@@ -1644,7 +1737,6 @@ _CRAWL_LOG_FILES = {
     "la": os.path.join(BASE_DIR, "data", "fetch_new_arrivals.log"),
     "nr": os.path.join(BASE_DIR, "data", "fetch_products.log"),
     "bs": os.path.join(BASE_DIR, "data", "fetch_products.log"),
-    "ms": os.path.join(BASE_DIR, "data", "fetch_products.log"),
     "mw": os.path.join(BASE_DIR, "data", "fetch_products.log"),
     "mg": os.path.join(BASE_DIR, "data", "fetch_products.log"),
 }
@@ -1874,8 +1966,39 @@ async def start_products(body: dict):
         body.get("max_pages"),
     )
 
+    # 持有跨进程迁移锁直到生命周期进入 running/failed，避免“探测后释放”
+    # 与清表复核之间出现 TOCTOU 窗口。
+    migration_guard = None
+    try:
+        from migrate_clear_crawl_results import MigrationLock
+        migration_guard = MigrationLock()
+        if not await asyncio.to_thread(migration_guard.acquire, 0.0):
+            logging.warning("[crawl] start rejected request_id=%s reason=migration_in_progress", request_id)
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "error_code": "MIGRATION_IN_PROGRESS",
+                    "msg": "正式库清表进行中，请稍后再启动抓取",
+                },
+                status_code=409,
+            )
+    except Exception as e:
+        if migration_guard is not None:
+            migration_guard.release()
+        logging.exception("[crawl] migration lock acquire failed request_id=%s", request_id)
+        return JSONResponse(
+            {
+                "status": "error",
+                "error_code": "MIGRATION_LOCK_PROBE_FAILED",
+                "msg": f"无法确认清表锁状态: {e}",
+            },
+            status_code=503,
+        )
+
     # 代理准备：单飞锁，失败直接 proxy_failed，禁止带病启动
     if not _proxy_prepare_lock.acquire(blocking=False):
+        if migration_guard is not None:
+            migration_guard.release()
         logging.info("[crawl] duplicate start rejected request_id=%s reason=proxy_preparing", request_id)
         return {
             "status": STATUS_PREPARING,
@@ -1990,6 +2113,13 @@ async def start_products(body: dict):
             env["ALLOW_DIRECT_FALLBACK"] = "0"
             # 与 proxy 状态 / product_stats 共用 prep.run_id，避免 request_id 与 run_id 不一致
             env["AMZ_RUN_ID"] = prep.run_id
+            from config import PRODUCT_RESULT_MODE, PRODUCT_RUN_CACHE_FILE
+            env["PRODUCT_RESULT_MODE"] = PRODUCT_RESULT_MODE
+            env["AMZ_RUN_CACHE_FILE"] = PRODUCT_RUN_CACHE_FILE
+            cache_chart = "la" if chart == "la" else "products"
+            if use_run_cache():
+                # 先建 pending 代次；仅子进程创建成功后再 activate 并清旧缓存
+                await asyncio.to_thread(run_cache.create_generation, prep.run_id, cache_chart)
             try:
                 _product_proc = subprocess.Popen(
                     cmd, cwd=BASE_DIR, env=env,
@@ -1998,15 +2128,18 @@ async def start_products(body: dict):
             except Exception as exc:
                 _product_proc = None
                 logging.exception("[proxy] 抓取进程创建失败")
-                # stop_proxy_pool 内部含 taskkill + 轮询等待，不能同步阻塞事件循环
-                cleanup = await asyncio.to_thread(stop_proxy_pool)
+                # 清理 pending 代次 + 代理；子步骤失败也不丢掉稳定错误码
+                abort = await _abort_crawler_start(None, prep.run_id)
+                reason = str(exc)
+                if abort.get("cleanup_errors"):
+                    reason = f"{reason}; cleanup={';'.join(abort['cleanup_errors'])}"
                 set_proxy_status(
                     STATUS_PROXY_FAILED,
                     run_id=prep.run_id,
                     request_id=request_id,
-                    reason=str(exc),
+                    reason=reason,
                     error_code="CRAWLER_START_FAILED",
-                    cleanup=cleanup,
+                    cleanup=abort.get("proxy_cleanup"),
                 )
                 return {
                     "status": STATUS_PROXY_FAILED,
@@ -2014,9 +2147,42 @@ async def start_products(body: dict):
                     "candidate_nodes": prep.candidate_nodes,
                     "verified_nodes": prep.verified_nodes,
                     "unique_ips": prep.unique_ips,
-                    "reason": str(exc),
+                    "reason": reason,
                     "error_code": "CRAWLER_START_FAILED",
+                    "cleanup_errors": abort.get("cleanup_errors") or [],
                 }
+            if use_run_cache():
+                try:
+                    await asyncio.to_thread(
+                        run_cache.activate_generation, prep.run_id, cache_chart, purge_others=True
+                    )
+                except Exception as exc:
+                    logging.exception("[cache] activate_generation failed run_id=%s", prep.run_id)
+                    proc = _product_proc
+                    _product_proc = None
+                    abort = await _abort_crawler_start(proc, prep.run_id)
+                    reason = str(exc)
+                    if abort.get("cleanup_errors"):
+                        reason = f"{reason}; cleanup={';'.join(abort['cleanup_errors'])}"
+                    set_proxy_status(
+                        STATUS_PROXY_FAILED,
+                        run_id=prep.run_id,
+                        request_id=request_id,
+                        reason=reason,
+                        error_code="CACHE_ACTIVATION_FAILED",
+                        cleanup=abort.get("proxy_cleanup"),
+                    )
+                    return {
+                        "status": STATUS_PROXY_FAILED,
+                        "run_id": prep.run_id,
+                        "candidate_nodes": prep.candidate_nodes,
+                        "verified_nodes": prep.verified_nodes,
+                        "unique_ips": prep.unique_ips,
+                        "reason": reason,
+                        "error_code": "CACHE_ACTIVATION_FAILED",
+                        "result_mode": PRODUCT_RESULT_MODE,
+                        "cleanup_errors": abort.get("cleanup_errors") or [],
+                    }
             crawler_started_at = time.monotonic()
             threading.Thread(
                 target=_watch_and_sleep_proxy,
@@ -2045,9 +2211,12 @@ async def start_products(body: dict):
                 "candidate_nodes": prep.candidate_nodes,
                 "verified_nodes": prep.verified_nodes,
                 "unique_ips": prep.unique_ips,
+                "result_mode": PRODUCT_RESULT_MODE,
             }
     finally:
         _proxy_prepare_lock.release()
+        if migration_guard is not None:
+            migration_guard.release()
 
 @app.post("/api/v2/stop_products")
 async def stop_products():
@@ -2094,11 +2263,29 @@ async def stop_products():
 
 @app.post("/api/v2/export_excel")
 async def export_excel(body: dict = None):
-    """按当前看板模式导出：chart=la → new_arrivals，否则 → product_sightings。"""
+    """导出：source=cache|favorites|legacy；默认 run_cache 模式导出当前缓存。"""
     body = body or {}
     chart = (body.get("chart") or "").strip()
     site = body.get("site")
+    source = (body.get("source") or "").strip().lower()
     try:
+        if source == "favorites":
+            rows = await asyncio.to_thread(
+                fav_store.list_all_favorites, DB_BACKEND,
+                site=(site or "").upper() or None, q=None,
+            )
+            path = await asyncio.to_thread(_export_rows_xlsx, rows, "data/favorites.xlsx")
+            return {"status": "ok", "file": path, "source": "favorites"}
+        if use_run_cache() and source in ("", "cache"):
+            cache_chart = "la" if chart == "la" else "products"
+            rows = await asyncio.to_thread(
+                run_cache.query_products,
+                {"site": (site or "").upper() or None, "limit": 5000, "offset": 0, "detail_only": False},
+                chart=cache_chart,
+            )
+            out = "data/new_arrivals.xlsx" if cache_chart == "la" else "data/products.xlsx"
+            path = await asyncio.to_thread(_export_rows_xlsx, rows, out)
+            return {"status": "ok", "file": path, "source": "run_cache"}
         if chart == "la":
             import fetch_new_arrivals
             path = fetch_new_arrivals.export_excel(
@@ -2110,9 +2297,180 @@ async def export_excel(body: dict = None):
         fetch_products.export_excel()
         return {"status": "ok", "file": "data/products.xlsx", "source": "product_sightings"}
     except Exception as e:
-        return {"status": "error", "msg": str(e)}
+        logging.exception("export_excel failed")
+        return JSONResponse(
+            {"status": "error", "error_code": "EXPORT_FAILED", "msg": str(e)},
+            status_code=500,
+        )
+
+
+async def _abort_crawler_start(proc, run_id: str) -> dict:
+    """激活失败后的尽力清理；任何子步骤异常都不阻止返回 CACHE_ACTIVATION_FAILED。"""
+    errors: list[str] = []
+    proxy_cleanup = None
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception as exc:
+                    errors.append(f"terminate: {exc}")
+                try:
+                    await asyncio.to_thread(proc.wait, 15)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception as exc:
+                        errors.append(f"kill: {exc}")
+                    try:
+                        await asyncio.to_thread(proc.wait, 5)
+                    except Exception as exc:
+                        errors.append(f"wait_after_kill: {exc}")
+        except Exception as exc:
+            errors.append(f"proc_cleanup: {exc}")
+    try:
+        await asyncio.to_thread(run_cache.cancel_generation, run_id)
+    except Exception as exc:
+        errors.append(f"cancel_generation: {exc}")
+    try:
+        proxy_cleanup = await asyncio.to_thread(stop_proxy_pool)
+    except Exception as exc:
+        errors.append(f"proxy_cleanup: {exc}")
+    return {"cleanup_errors": errors, "proxy_cleanup": proxy_cleanup}
+
+
+def _export_rows_xlsx(rows: list, rel_path: str) -> str:
+    """先写临时文件，查询/写盘全部成功后再 os.replace 原子替换。"""
+    from openpyxl import Workbook
+    test_export_dir = os.getenv("AMZ_TEST_EXPORT_DIR", "").strip()
+    if is_testing() and test_export_dir:
+        path = os.path.join(test_export_dir, os.path.basename(rel_path))
+    else:
+        path = os.path.join(BASE_DIR, rel_path.replace("/", os.sep))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = path + f".tmp.{os.getpid()}.{time.time_ns()}"
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "export"
+        if not rows:
+            ws.append(["empty"])
+        else:
+            keys = [k for k in rows[0].keys() if k != "snapshot_json"]
+            ws.append(keys)
+            for r in rows:
+                ws.append([r.get(k) for k in keys])
+        wb.save(tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.isfile(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    return rel_path.replace("\\", "/")
 
 # ── 选品清单 ──
+
+@app.get("/api/v2/favorites/count")
+async def favorites_count(site: str = Query(None)):
+    site = (site or "").strip().upper() or None
+    try:
+        n = await asyncio.to_thread(fav_store.count_favorites, DB_BACKEND, site)
+    except Exception as e:
+        logging.exception("favorites_count failed")
+        return JSONResponse(
+            {"status": "error", "error_code": "FAVORITE_READ_FAILED", "msg": str(e)},
+            status_code=503,
+        )
+    return {"count": n, "site": site}
+
+
+@app.get("/api/v2/favorites")
+async def favorites_list(
+    site: str = Query(None),
+    q: str = Query(None),
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+):
+    site = (site or "").strip().upper() or None
+    try:
+        rows = await asyncio.to_thread(
+            fav_store.list_favorites, DB_BACKEND, site=site, q=q, limit=limit, offset=offset,
+        )
+    except Exception as e:
+        logging.exception("favorites_list failed")
+        return JSONResponse(
+            {"status": "error", "error_code": "FAVORITE_READ_FAILED", "msg": str(e)},
+            status_code=503,
+        )
+    for r in rows:
+        r["is_favorite"] = True
+    return rows
+
+
+def _favorite_from_cache_locked(cache_id: int, run_id: str) -> dict:
+    """在缓存写锁内完成 active 校验、回读与正式库写入，杜绝换代竞态。"""
+    with run_cache.locked_active_cache_item(cache_id, run_id) as row:
+        return fav_store.upsert_favorite_from_cache(DB_BACKEND, row)
+
+
+@app.post("/api/v2/favorites")
+async def favorites_add(body: dict):
+    """仅接受 run_id + cache_id；服务端从运行缓存回读快照后写入正式收藏表。"""
+    if not use_run_cache():
+        return JSONResponse(
+            {"status": "error", "error_code": "RUN_CACHE_DISABLED", "msg": "当前未启用运行缓存模式"},
+            status_code=400,
+        )
+    try:
+        cache_id = int(body.get("cache_id"))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"status": "error", "error_code": "INVALID_CACHE_ID", "msg": "cache_id 必填"},
+            status_code=400,
+        )
+    run_id = (body.get("run_id") or "").strip()
+    if not run_id:
+        return JSONResponse(
+            {
+                "status": "error",
+                "error_code": "STALE_CACHE_ITEM",
+                "msg": "run_id 必填",
+                "active_run_id": run_cache.get_active_run_id(),
+            },
+            status_code=409,
+        )
+    try:
+        saved = await asyncio.to_thread(_favorite_from_cache_locked, cache_id, run_id)
+    except run_cache.StaleCacheError as e:
+        return JSONResponse(
+            {
+                "status": "error",
+                "error_code": e.error_code,
+                "msg": str(e),
+                "active_run_id": e.active_run_id,
+            },
+            status_code=409,
+        )
+    except Exception as e:
+        logging.exception("favorites_add failed")
+        return JSONResponse(
+            {"status": "error", "error_code": "FAVORITE_WRITE_FAILED", "msg": str(e)},
+            status_code=500,
+        )
+    saved["is_favorite"] = True
+    return {"status": "ok", "favorite": saved}
+
+
+@app.delete("/api/v2/favorites/{site}/{asin}")
+async def favorites_remove(site: str, asin: str):
+    site = site.strip().upper()
+    asin = asin.strip().upper()
+    deleted = await asyncio.to_thread(fav_store.delete_favorite, DB_BACKEND, site, asin)
+    return {"status": "ok", "deleted": bool(deleted), "site": site, "asin": asin}
+
 
 @app.get("/api/v2/watchlist")
 async def get_watchlist():

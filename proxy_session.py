@@ -394,7 +394,7 @@ class ForcedProxyPool:
             elif code in (
                 "CONNECT_TIMEOUT", "READ_TIMEOUT", "PROXY_CONNECT_ERROR",
                 "TLS_ERROR", "CONNECTION_RESET", "REQUEST_ERROR", "EMPTY_RESPONSE",
-                "OTHER_HTTP_STATUS",
+                "OTHER_HTTP_STATUS", "EXIT_IP_UNVERIFIED",
             ):
                 state["network_errors"] += 1
                 state["consecutive_errors"] += 1

@@ -44,7 +44,9 @@ from config import (
     HEADERS, DATA_DIR, DB_FILE, get_marketplace,
     PROXY_MAX_CRAWL_WORKERS,
     PROXY_MIN_START_NODES,
+    assert_testing_paths_safe, use_run_cache,
 )
+import product_run_cache as run_cache
 from crawl_autoscale import run_autoscaled_queue
 from proxy_daemon import touch_crawl_activity
 from proxy_session import (
@@ -419,6 +421,21 @@ def _save_products_pg(products: list) -> int:
 def _save_products(products: list) -> int:
     if not products:
         return 0
+    if use_run_cache():
+        rows = []
+        for p in products:
+            item = dict(p)
+            item.setdefault("site", item.get("site") or "US")
+            item.setdefault("list_type", "latest-arrivals")
+            item["detail_scraped"] = 1
+            item["detail_status"] = "ok"
+            rows.append(item)
+        return run_cache.upsert_products(
+            rows,
+            run_id=_RUN_ID,
+            chart="la",
+            default_site=(rows[0].get("site") or "US"),
+        )
     if DB_BACKEND == "pg":
         return _save_products_pg(products)
     return _save_products_sqlite(products)
@@ -1113,6 +1130,7 @@ def main():
     global _mp, _SITE, _DOMAIN, _LANG, _DECIMAL_SEP, _RATING_PAT
     global _LIST_FILTERS, _DETAIL_FILTERS, checkpoint
 
+    assert_testing_paths_safe()
     parser = argparse.ArgumentParser(description="Amazon 最新到货商品抓取")
     parser.add_argument("--site", default="DE", help="站点代码: US, DE, JP, UK, FR")
     parser.add_argument("--roots", nargs="+", help="根节点 node_id（默认全部类目）")

@@ -4,6 +4,9 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/backups/
+# 运行缓存（抓取结果代次，不进 Git）
+data/product_run_cache.db
+data/product_run_cache.db-*
 
 # 状态文件
 data/status.json

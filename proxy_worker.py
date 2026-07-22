@@ -72,9 +72,13 @@ class FetchOutcome:
     final_reason: str = ""
     status_code: int | None = None
     attempts: int = 0
+    # 兼容字段：仅在 verify_exit=True 时填入经代理实测的 verified exit IP。
+    # 未开启验证时可能仍含池元数据，审计方不得将其当作实测出口证据。
     exit_ips: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    # 可审计代理证据：节点身份 + 经该代理的出口探测结果（非池声明冒充）。
+    proxy_evidence: list[dict] = field(default_factory=list)
 
 
 _CAPTCHA_MARKERS = (
@@ -157,6 +161,8 @@ class WorkerProxyClient:
         is_captcha: PageCheckFn | None = None,
         is_currency_mismatch: PageCheckFn | None = None,
         timeout: float = 18,
+        verify_exit: bool = False,
+        exit_probe_ttl_sec: float = 600,
     ):
         self.pool = pool
         self.worker_id = worker_id
@@ -166,6 +172,9 @@ class WorkerProxyClient:
         self.is_captcha = is_captcha or is_captcha_page
         self.is_currency_mismatch = is_currency_mismatch
         self.timeout = timeout
+        self.verify_exit = bool(verify_exit)
+        self.exit_probe_ttl_sec = max(30.0, float(exit_probe_ttl_sec or 600))
+        self._exit_probe_cache: dict[str, dict] = {}
         self.entry = None
         self.session = None
         self.acquired_at = 0.0
@@ -175,6 +184,59 @@ class WorkerProxyClient:
         except Exception:
             usable = PROXY_POOL_TARGET_NODES
         self.rotate_after = pool_aware_rotate_after(usable)
+
+    @staticmethod
+    def _node_identity(entry: dict) -> dict:
+        return {
+            "node_key": str(entry.get("node_key") or ""),
+            "proxy_name": str(entry.get("name") or ""),
+            "port": entry.get("port"),
+            "proxy": str(entry.get("proxy") or ""),
+        }
+
+    def _probe_exit_through_proxy(self, entry: dict) -> dict | None:
+        """经同一代理节点实测出口 IP；禁止直连探测。"""
+        proxy_url = str(entry.get("proxy") or "").strip()
+        if not proxy_url:
+            return None
+        cache_key = str(entry.get("node_key") or proxy_url)
+        now = time.time()
+        cached = self._exit_probe_cache.get(cache_key)
+        if (
+            cached
+            and cached.get("probe_ok")
+            and cached.get("verified_exit_ip")
+            and (now - float(cached.get("probe_ts") or 0)) <= self.exit_probe_ttl_sec
+        ):
+            # 返回副本并标注缓存命中，仍绑定当前节点身份。
+            evidence = dict(cached)
+            evidence.update(self._node_identity(entry))
+            evidence["probe_cache_hit"] = True
+            evidence["amazon_via_proxy"] = True
+            return evidence
+        from proxy_health import fetch_exit_ip
+
+        # 显式要求 proxy_url，绝不调用 fetch_exit_ip(None)。
+        result = fetch_exit_ip(proxy_url)
+        if not result.ok or not result.ip:
+            return None
+        evidence = {
+            **self._node_identity(entry),
+            "verified_exit_ip": result.ip,
+            "probe_ok": True,
+            "probe_at": datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            "probe_ts": now,
+            "probe_source": "proxy_health.fetch_exit_ip",
+            "probe_endpoint": result.endpoint or "",
+            "probe_elapsed_ms": int(result.elapsed_ms or 0),
+            "probe_cache_hit": False,
+            "amazon_via_proxy": True,
+            "pool_declared_exit_ip": str(entry.get("exit_ip") or ""),
+        }
+        self._exit_probe_cache[cache_key] = dict(evidence)
+        return evidence
 
     def _audit(self, **event) -> None:
         if self.auditor:
@@ -222,6 +284,7 @@ class WorkerProxyClient:
     def get(self, url: str, *, phase: str, item_id: str, referer: str = "") -> FetchOutcome:
         started = time.monotonic()
         used_ips: set[str] = set()
+        used_evidence: list[dict] = []
         reasons: list[str] = []
         last_status = None
         for attempt in range(1, PROXY_REQUEST_DISTINCT_ATTEMPTS + 1):
@@ -242,9 +305,36 @@ class WorkerProxyClient:
                 continue
 
             entry = self.entry or {}
-            exit_ip = entry.get("exit_ip") or "unknown"
-            if exit_ip != "unknown":
+            evidence = None
+            if self.verify_exit:
+                evidence = self._probe_exit_through_proxy(entry)
+                if not evidence:
+                    code = "EXIT_IP_UNVERIFIED"
+                    reasons.append(code)
+                    self._audit(
+                        phase=phase, item_id=item_id, worker=self.worker_id, attempt=attempt,
+                        result="FAILED", reason=code, detail="exit probe via proxy failed",
+                        status_code=None,
+                        exit_ip=str(entry.get("exit_ip") or ""),
+                        proxy_name=entry.get("name", ""), port=entry.get("port"),
+                        elapsed_ms=int((time.monotonic() - started) * 1000), rotated=True,
+                    )
+                    log.warning(
+                        "[request] phase=%s item=%s worker=%d attempt=%d/%d reason=%s "
+                        "proxy=%s action=rotate",
+                        phase, item_id, self.worker_id, attempt,
+                        PROXY_REQUEST_DISTINCT_ATTEMPTS, code, entry.get("proxy"),
+                    )
+                    self._release(code)
+                    continue
+                exit_ip = evidence["verified_exit_ip"]
                 used_ips.add(exit_ip)
+                used_evidence.append(dict(evidence))
+            else:
+                # 生产默认路径：保留池声明 IP 供兼容，但不得被 E2E 当作实测证据。
+                exit_ip = entry.get("exit_ip") or "unknown"
+                if exit_ip != "unknown":
+                    used_ips.add(exit_ip)
             if referer:
                 self.session.headers["Referer"] = referer
             self.pool.wait_if_target_paused()
@@ -273,16 +363,25 @@ class WorkerProxyClient:
                         self.entry,
                         latency_ms=int((time.monotonic() - attempt_started) * 1000),
                     )
+                    if evidence is not None:
+                        evidence = dict(evidence)
+                        evidence["amazon_request_ok"] = True
+                        evidence["amazon_status_code"] = last_status
+                        # 成功请求刷新账本侧证据副本
+                        if used_evidence:
+                            used_evidence[-1] = evidence
                     self._audit(
                         phase=phase, item_id=item_id, worker=self.worker_id, attempt=attempt,
                         result="SUCCESS", reason="", status_code=last_status,
                         exit_ip=exit_ip, proxy_name=entry.get("name", ""), port=entry.get("port"),
                         elapsed_ms=int((time.monotonic() - attempt_started) * 1000), rotated=False,
+                        verified_exit=bool(self.verify_exit),
                     )
                     return FetchOutcome(
                         ok=True, html=body, status_code=last_status, attempts=attempt,
                         exit_ips=list(used_ips), reasons=reasons,
                         elapsed_ms=int((time.monotonic() - started) * 1000),
+                        proxy_evidence=list(used_evidence),
                     )
             except Exception as exc:
                 code = classify_request_exception(exc)
@@ -294,6 +393,7 @@ class WorkerProxyClient:
                 result="FAILED", reason=code, detail=detail, status_code=last_status,
                 exit_ip=exit_ip, proxy_name=entry.get("name", ""), port=entry.get("port"),
                 elapsed_ms=int((time.monotonic() - attempt_started) * 1000), rotated=True,
+                verified_exit=bool(self.verify_exit),
             )
             log.warning(
                 "[request] phase=%s item=%s worker=%d attempt=%d/%d reason=%s status=%s "
@@ -304,17 +404,24 @@ class WorkerProxyClient:
             self._release(code)
 
         final_reason = reasons[-1] if reasons else "REQUEST_ERROR"
-        fatal_code = "POOL_BELOW_MINIMUM" if "POOL_BELOW_MINIMUM" in reasons else "RETRY_EXHAUSTED"
+        if "POOL_BELOW_MINIMUM" in reasons:
+            fatal_code = "POOL_BELOW_MINIMUM"
+        elif "EXIT_IP_UNVERIFIED" in reasons and not used_evidence:
+            fatal_code = "EXIT_IP_UNVERIFIED"
+        else:
+            fatal_code = "RETRY_EXHAUSTED"
         self._audit(
             phase=phase, item_id=item_id, worker=self.worker_id, attempt=len(reasons),
             result="EXHAUSTED", reason=final_reason, reasons=reasons,
             status_code=last_status, exit_ips=sorted(used_ips),
             elapsed_ms=int((time.monotonic() - started) * 1000), rotated=False,
+            verified_exit=bool(self.verify_exit),
         )
         return FetchOutcome(
             ok=False, error_code=fatal_code, final_reason=final_reason,
             status_code=last_status, attempts=len(reasons), exit_ips=list(used_ips),
             reasons=reasons, elapsed_ms=int((time.monotonic() - started) * 1000),
+            proxy_evidence=list(used_evidence),
         )
 
     def close(self):

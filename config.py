@@ -4,8 +4,12 @@ import os
 
 # ── 路径 ──────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(BASE_DIR, "data")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DATA_DIR   = os.path.abspath(
+    os.environ.get("AMZ_DATA_DIR") or os.path.join(BASE_DIR, "data")
+)
+OUTPUT_DIR = os.path.abspath(
+    os.environ.get("AMZ_OUTPUT_DIR") or os.path.join(BASE_DIR, "output")
+)
 
 # ── 请求头（固定UA，不依赖fake_useragent） ────────────────────────
 HEADERS = {
@@ -166,6 +170,11 @@ PROXY_PROBE_CACHE_FILE = os.path.join(DATA_DIR, "probe_results.json")
 PROXY_LB_DIR = os.path.join(DATA_DIR, "lb_instance")
 PROXY_PID_FILE = os.path.join(DATA_DIR, "lb_pid.json")
 PROXY_LOCK_FILE = os.path.join(DATA_DIR, "proxy_pool.lock")
+# 正式清表与 API 启动互斥，防止备份/删除窗口写入正式抓取表
+CRAWL_MIGRATION_LOCK_FILE = (
+    os.environ.get("AMZ_CRAWL_MIGRATION_LOCK_FILE")
+    or os.path.join(DATA_DIR, "crawl_migration.lock")
+)
 
 # 常驻验证守护进程：独立于 api_server / 抓取生命周期，一直运行、持续验证补充
 PROXY_DAEMON_PID_FILE = os.path.join(DATA_DIR, "proxy_daemon_pid.json")
@@ -308,7 +317,7 @@ PRODUCT_PRICE_MIN     = 0.0   # 价格下限（0 = 不限）
 PRODUCT_PRICE_MAX     = 0.0   # 价格上限（0 = 不限）
 
 # 抓取哪些榜单
-PRODUCT_LISTS = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for", "most-gifted"]
+PRODUCT_LISTS = ["new-releases", "bestsellers", "most-wished-for", "most-gifted"]
 
 # 并发
 PRODUCT_WORKERS = 10
@@ -316,3 +325,62 @@ PRODUCT_WORKERS = 10
 # 输出
 PRODUCTS_DB_TABLE = "product_sightings"
 PRODUCTS_EXCEL    = os.path.join(DATA_DIR, "products.xlsx")
+
+# ── 结果持久化模式 ─────────────────────────────────────────────────
+# run_cache（默认）：抓取结果写入独立运行缓存，仅收藏写入正式库
+# legacy：回滚开关，恢复写入 product_sightings / new_arrivals
+_PRODUCT_RESULT_MODE_RAW = (
+    os.environ.get("PRODUCT_RESULT_MODE") or "run_cache"
+).strip().lower()
+if _PRODUCT_RESULT_MODE_RAW not in ("run_cache", "legacy"):
+    raise ValueError(
+        f"PRODUCT_RESULT_MODE 无效: {_PRODUCT_RESULT_MODE_RAW!r}，可选: run_cache, legacy"
+    )
+PRODUCT_RESULT_MODE = _PRODUCT_RESULT_MODE_RAW
+
+PRODUCT_RUN_CACHE_FILE = (
+    os.environ.get("AMZ_RUN_CACHE_FILE")
+    or os.environ.get("PRODUCT_RUN_CACHE_FILE")
+    or os.path.join(DATA_DIR, "product_run_cache.db")
+)
+
+_FORMAL_CATEGORIES_DB = os.path.normcase(
+    os.path.abspath(os.path.join(DATA_DIR, "categories.db"))
+)
+_FORMAL_RUN_CACHE_DB = os.path.normcase(
+    os.path.abspath(os.path.join(DATA_DIR, "product_run_cache.db"))
+)
+
+
+def use_run_cache() -> bool:
+    return PRODUCT_RESULT_MODE == "run_cache"
+
+
+def is_testing() -> bool:
+    flag = (os.environ.get("TESTING") or "").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
+
+def assert_testing_paths_safe(
+    *,
+    db_path: str | None = None,
+    cache_path: str | None = None,
+) -> None:
+    """TESTING=1 时拒绝指向正式数据目录的路径，防止测试误写生产库。
+
+    必须校验实际目标路径（参数优先），不能只看全局 DB_FILE。
+    """
+    if not is_testing():
+        return
+    actual_db = os.path.normcase(os.path.abspath(db_path or DB_FILE))
+    actual_cache = os.path.normcase(
+        os.path.abspath(cache_path or PRODUCT_RUN_CACHE_FILE)
+    )
+    if actual_db == _FORMAL_CATEGORIES_DB:
+        raise RuntimeError(
+            "TESTING=1 拒绝使用正式 categories.db；请设置 AMZ_DB_FILE/DB_FILE 到临时路径"
+        )
+    if actual_cache == _FORMAL_RUN_CACHE_DB:
+        raise RuntimeError(
+            "TESTING=1 拒绝使用正式 product_run_cache.db；请设置 AMZ_RUN_CACHE_FILE 到临时路径"
+        )

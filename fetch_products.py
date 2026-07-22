@@ -15,13 +15,21 @@ from detail_parser import (
     extract_image_url,
 )
 from crawl_checkpoint import ProductsCheckpoint, canonical_signature
-from config import DB_FILE, PROXY_MIN_START_NODES, get_marketplace
+from config import (
+    DATA_DIR, DB_FILE, PROXY_MIN_START_NODES, get_marketplace,
+    assert_testing_paths_safe, use_run_cache,
+)
 from proxy_daemon import touch_crawl_activity
+import product_run_cache as run_cache
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ── 日志 ──────────────────────────────────────────────────────────
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fetch_products.log")
+os.makedirs(DATA_DIR, exist_ok=True)
+LOG_PATH = os.path.abspath(
+    os.environ.get("AMZ_FETCH_PRODUCTS_LOG")
+    or os.path.join(DATA_DIR, "fetch_products.log")
+)
 _log = logging.getLogger("fetch_products")
 _log.setLevel(logging.DEBUG)
 _fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
@@ -48,7 +56,10 @@ _DECIMAL_SEP  = _mp["decimal_sep"]
 _RATING_PAT   = _mp["rating_pattern"]
 _RESULTS_PAT  = _mp["results_pattern"]
 _RUN_ID = os.getenv("AMZ_RUN_ID") or datetime.now().strftime("PS-%Y%m%d-%H%M%S")
-_AUDIT_PATH = os.path.join(BASE, "data", "fetch_products_attempts.jsonl")
+_AUDIT_PATH = os.path.abspath(
+    os.environ.get("AMZ_FETCH_PRODUCTS_AUDIT_LOG")
+    or os.path.join(DATA_DIR, "fetch_products_attempts.jsonl")
+)
 
 # PG support
 _pg_conn = None
@@ -67,7 +78,7 @@ DEFAULT_MIN_LIST_SIZE = 100
 DEFAULT_PRICE_MIN     = 0.0
 DEFAULT_PRICE_MAX     = 0.0
 DEFAULT_DELAY         = 2.0   # 请求间隔（秒）
-DEFAULT_LISTS         = ["new-releases", "bestsellers", "movers-and-shakers", "most-wished-for", "most-gifted"]
+DEFAULT_LISTS         = ["new-releases", "bestsellers", "most-wished-for", "most-gifted"]
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -118,7 +129,6 @@ def _pool_delay(delay: float, pool=None) -> float:
 LIST_LABELS = {
     "new-releases":       "新品榜",
     "bestsellers":        "畅销榜",
-    "movers-and-shakers": "飙升榜",
     "most-wished-for":    "心愿单",
     "most-gifted":        "礼品榜",
 }
@@ -127,7 +137,6 @@ LIST_LABELS = {
 LIST_COL_MAP = {
     "new-releases":       "nr_valid",
     "bestsellers":        "bs_valid",
-    "movers-and-shakers": "ms_valid",
     "most-wished-for":    "mw_valid",
 }
 
@@ -187,7 +196,14 @@ def _warmup(session: requests.Session):
 
 
 class WorkerProxyClient(SharedWorkerProxyClient):
-    def __init__(self, pool: ProxyPool, worker_id: int = 0, *, warmup: bool = False):
+    def __init__(
+        self,
+        pool: ProxyPool,
+        worker_id: int = 0,
+        *,
+        warmup: bool = False,
+        verify_exit: bool = False,
+    ):
         super().__init__(
             pool,
             worker_id,
@@ -196,6 +212,7 @@ class WorkerProxyClient(SharedWorkerProxyClient):
             auditor=AttemptAuditor(_AUDIT_PATH, _RUN_ID),
             is_captcha=is_captcha_page,
             is_currency_mismatch=_has_marketplace_currency_mismatch,
+            verify_exit=verify_exit,
         )
 
 
@@ -512,26 +529,45 @@ def extract_slug(url: str) -> str:
         return ""
 
 
-def save_link_validity(node_id: str, list_type: str, is_valid: int):
-    """将单个榜单的有效性写入 categories。"""
+def save_link_validity(node_id: str, list_type: str, is_valid: int,
+                       site: str = None):
+    """按站点将单个榜单的有效性写入 categories。
+
+    旧版 SQLite ``link_cache`` 没有 site 列；继续兼容该 schema（不报错），
+    但不再写入这个全局 node_id 缓存，以免同 node_id 的其它站点被污染。
+    """
     col = LIST_COL_MAP.get(list_type)
     if not col:
         return
+    site = (site or _SITE).upper()
     with _db_lock:
         if DB_BACKEND == "pg":
             conn = _get_pg()
-            conn.cursor().execute(f"UPDATE categories SET {col}=%s WHERE node_id=%s", (is_valid, node_id))
+            conn.cursor().execute(
+                f"UPDATE categories SET {col}=%s WHERE node_id=%s AND site=%s",
+                (is_valid, node_id, site),
+            )
         else:
             conn = db_conn()
             try:
-                conn.execute(f"UPDATE categories SET {col}=? WHERE node_id=?", (is_valid, node_id))
+                conn.execute(
+                    f"UPDATE categories SET {col}=? WHERE node_id=? AND site=?",
+                    (is_valid, node_id, site),
+                )
                 try:
-                    conn.execute(
-                        f"INSERT INTO link_cache (node_id, {col}, checked_at) "
-                        f"VALUES (?, ?, datetime('now')) "
-                        f"ON CONFLICT(node_id) DO UPDATE SET {col}=excluded.{col}, checked_at=datetime('now')",
-                        (node_id, is_valid)
-                    )
+                    cache_cols = {
+                        row[1] for row in conn.execute(
+                            "PRAGMA table_info(link_cache)"
+                        ).fetchall()
+                    }
+                    if "site" in cache_cols:
+                        conn.execute(
+                            f"INSERT INTO link_cache (node_id, site, {col}, checked_at) "
+                            f"VALUES (?, ?, ?, datetime('now')) "
+                            f"ON CONFLICT(node_id, site) DO UPDATE SET "
+                            f"{col}=excluded.{col}, checked_at=datetime('now')",
+                            (node_id, site, is_valid),
+                        )
                 except Exception:
                     pass
                 conn.commit()
@@ -540,9 +576,15 @@ def save_link_validity(node_id: str, list_type: str, is_valid: int):
 
 
 def save_products(products: list):
-    """批量写入 product_sightings 表。"""
+    """批量写入运行缓存（默认）或 product_sightings（legacy）。"""
     if not products:
         return 0
+    if use_run_cache():
+        for p in products:
+            p.setdefault("site", _SITE)
+        return run_cache.upsert_products(
+            products, run_id=_RUN_ID, chart="products", default_site=_SITE,
+        )
     if DB_BACKEND == "pg":
         return _save_products_pg(products)
     sql = """
@@ -884,7 +926,12 @@ _log.info("[fetch_products] 模块加载完成")
 
 
 def _load_cached_detail(asin: str) -> dict | None:
-    """加载同站点任意已成功详情，供跨榜单/断点复用（仍需重跑当前筛选）。"""
+    """加载同轮同站点已成功详情（run_cache）；legacy 仍按站点复用。"""
+    if use_run_cache():
+        cached = run_cache.load_cached_detail(asin, run_id=_RUN_ID, site=_SITE)
+        if not cached:
+            return None
+        return {k: cached.get(k) for k in _CACHED_DETAIL_KEYS}
     cols = ", ".join(_CACHED_DETAIL_KEYS)
     with _db_lock:
         if DB_BACKEND == "pg":
@@ -1008,6 +1055,11 @@ def enrich_with_details(products: list, client: WorkerProxyClient,
 
 def _delete_sighting(asin: str, node_id: str = None, list_type: str = None):
     """删除当前归属行；未传 node/list 时保持 asin+site（兼容旧调用）。"""
+    if use_run_cache():
+        run_cache.delete_item(
+            asin, run_id=_RUN_ID, site=_SITE, node_id=node_id, list_type=list_type,
+        )
+        return
     with _db_lock:
         if DB_BACKEND == "pg":
             if node_id is not None and list_type is not None:
@@ -1042,6 +1094,11 @@ def _delete_sighting(asin: str, node_id: str = None, list_type: str = None):
 
 def _mark_detail_failed(asin: str, node_id: str = None, list_type: str = None):
     """详情抓取失败：当前归属行 detail_scraped=2，并写入本次 run_id。"""
+    if use_run_cache():
+        run_cache.mark_detail_failed(
+            asin, run_id=_RUN_ID, site=_SITE, node_id=node_id, list_type=list_type,
+        )
+        return
     with _db_lock:
         if DB_BACKEND == "pg":
             if node_id is not None and list_type is not None:
@@ -1081,6 +1138,12 @@ def _update_sighting_detail(asin: str, detail: dict,
     """更新详情：优先写当前归属行；否则回退 asin+site。"""
     detail = dict(detail)
     detail.setdefault("run_id", _RUN_ID)
+    if use_run_cache():
+        run_cache.update_detail(
+            asin, detail, run_id=_RUN_ID, site=_SITE,
+            node_id=node_id, list_type=list_type,
+        )
+        return
     with _db_lock:
         if DB_BACKEND == "pg":
             sets = ", ".join(f"{k}=%s" for k in detail)
@@ -1145,7 +1208,22 @@ def process_node(node: dict, lists: list, review_max: int,
     node_error = ""
 
     for list_type in lists:
-        url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
+        exact_url = node.get("canonical_list_url") or node.get("list_url")
+        exact_type = node.get("canonical_list_type") or node.get("list_type")
+        exact_matches_list = bool(
+            exact_url
+            and (
+                exact_type == list_type
+                or (
+                    not exact_type
+                    and f"/gp/{list_type}/" in str(exact_url)
+                )
+            )
+        )
+        if exact_matches_list:
+            url_base = str(exact_url)
+        else:
+            url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
         outcome = client.get(
             url_base, phase="LIST", item_id=f"{node_id}:{list_type}",
             referer=f"{_DOMAIN}/",
@@ -1158,12 +1236,20 @@ def process_node(node: dict, lists: list, review_max: int,
             node_error = outcome.final_reason or outcome.error_code
             continue
 
-        save_link_validity(node_id, list_type, 1 if outcome.status_code == 200 else 0)
+        html = outcome.html or ""
+        product_items = _count_product_items(html)
+        page1_valid = int(
+            outcome.status_code == 200
+            and not is_captcha_page(html)
+            and product_items > 0
+        )
+        save_link_validity(node_id, list_type, page1_valid, site=_SITE)
         if outcome.status_code != 200:
+            continue
+        if is_captcha_page(html):
             continue
 
         time.sleep(_pool_delay(delay, getattr(client, "pool", None)))
-        html = outcome.html or ""
 
         total = extract_list_total(html)
         if min_list_size > 0 and total < min_list_size:
@@ -1178,13 +1264,14 @@ def process_node(node: dict, lists: list, review_max: int,
             review_min, rating_min, rating_max,
             list_limit, position_start
         )
-        position_start += _count_product_items(html)
+        position_start += product_items
 
         for pg in range(2, max_pages + 1):
             if list_limit > 0 and position_start > list_limit:
                 break
             page_outcome = client.get(
-                url_base + f"?pg={pg}", phase="LIST",
+                url_base + ("&" if "?" in url_base else "?") + f"pg={pg}",
+                phase="LIST",
                 item_id=f"{node_id}:{list_type}:p{pg}", referer=url_base,
             )
             node_attempts += page_outcome.attempts
@@ -1458,6 +1545,7 @@ def export_excel():
 # ── CLI 入口 ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    assert_testing_paths_safe()
     parser = argparse.ArgumentParser(description="Amazon 榜单商品抓取")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--roots", nargs="+",

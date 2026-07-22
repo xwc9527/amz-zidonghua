@@ -122,6 +122,7 @@ def _bucket(outcome: str) -> str:
     if code in {
         "CONNECT_TIMEOUT", "READ_TIMEOUT", "PROXY_CONNECT_ERROR", "TLS_ERROR",
         "CONNECTION_RESET", "REQUEST_ERROR", "EMPTY_RESPONSE", "OTHER_HTTP_STATUS",
+        "EXIT_IP_UNVERIFIED",
     }:
         return "network_errors"
     return "other_errors"
