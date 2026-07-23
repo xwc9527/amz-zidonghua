@@ -1,12 +1,15 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from crawl_checkpoint import NewArrivalsCheckpoint, ProductsCheckpoint, canonical_signature
 from proxy_session import ForcedProxyPool, ProxyRequiredError
-from proxy_worker import http_error_code, raise_if_pool_below_minimum, FetchOutcome
+from proxy_worker import (
+    http_error_code, raise_if_pool_below_minimum, FetchOutcome, WorkerProxyClient,
+)
 
 
 def _entries(count=12):
@@ -138,6 +141,46 @@ class TestRuntimeProxyPool(unittest.TestCase):
             self.assertTrue(events[0]["rotated"])
             self.assertEqual(events[1]["result"], "SUCCESS")
             self.assertTrue(all(event["run_id"] for event in events))
+
+    def test_caller_can_exclude_fast_path_exit_from_slow_retry(self):
+        entries = _entries(3)
+        pool = ForcedProxyPool(entries=entries, required=True, min_usable=1)
+        made_ips = []
+
+        def make_session(_worker_id, entry):
+            made_ips.append(entry["exit_ip"])
+            return _Session(_Response(200, "<html>ok</html>"))
+
+        client = WorkerProxyClient(
+            pool, worker_id=9, make_session=make_session,
+            warmup=False, verify_exit=False,
+        )
+        outcome = client.get(
+            "https://example.invalid/item", phase="subtree_chart", item_id="x",
+            exclude_exit_ips={entries[0]["exit_ip"]},
+        )
+        client.close()
+        self.assertTrue(outcome.ok)
+        self.assertNotEqual(made_ips[0], entries[0]["exit_ip"])
+
+    def test_page_validator_rotates_parser_miss_to_distinct_exit(self):
+        pool = ForcedProxyPool(entries=_entries(3), required=True, min_usable=1)
+        sessions = [
+            _Session(_Response(200, "wrong-layout")),
+            _Session(_Response(200, "expected-layout")),
+        ]
+        client = WorkerProxyClient(
+            pool, worker_id=10, make_session=lambda *_args: sessions.pop(0),
+            warmup=False, verify_exit=False,
+            is_valid_page=lambda body: body == "expected-layout",
+        )
+        outcome = client.get(
+            "https://example.invalid/chart", phase="subtree_chart", item_id="x",
+        )
+        client.close()
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.reasons, ["PARSER_MISS"])
+        self.assertEqual(len(outcome.exit_ips), 2)
 
     def test_successful_requests_rotate_across_pool(self):
         import fetch_new_arrivals as crawler

@@ -159,6 +159,19 @@ class DaemonArchitectureTests(unittest.TestCase):
         self.assertFalse(any(self.daemon._states[f"n{i}"].feedback_recheck for i in range(3)))
         self.assertGreater(self.daemon._target_pause_until["US"], now)
 
+    def test_captcha_storm_never_pauses_entire_target(self):
+        states = [_node(f"n{i}", i) for i in range(3)]
+        self._install(states)
+        now = time.time()
+        storm = [
+            ProxyEvent(i + 1, now, f"n{i}", "p", f"1.1.1.{i}", "DE", "CAPTCHA", 0, "")
+            for i in range(3)
+        ]
+        with patch.object(proxy_daemon, "drain_proxy_events", return_value=storm):
+            self.daemon._consume_feedback()
+        self.assertNotIn("DE", self.daemon._target_pause_until)
+        self.assertTrue(all(self.daemon._states[f"n{i}"].feedback_recheck for i in range(3)))
+
     def test_new_candidate_failure_marks_status_dirty(self):
         st = _node("new-fail", 1, state=STATE_NEW)
         self._install([st])

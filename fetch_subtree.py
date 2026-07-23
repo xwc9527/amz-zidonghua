@@ -9,8 +9,10 @@ fetch_subtree.py — 按需抓取类目子树（多 worker 并发 + 端口池）
 """
 import html as htmlmod
 import json, os, re, sys, time, random, sqlite3, threading, argparse
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from subtree_pipeline_experiment import BoundedParsePipeline
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -96,6 +98,17 @@ BFS_BATCH_SIZE = 100
 BC_BATCH_SIZE  = 20
 CHECKPOINT_FILE = os.path.join(DATA_DIR, "crawl_checkpoint.json")
 
+# 单个 chart URL 最大补抓次数（每次补抓必须由不同 worker/IP 消费）
+MAX_URL_RETRY = 3
+# 有界补抓队列容量：防止失败 URL 无限堆积撑爆内存
+RETRY_QUEUE_MAX = 20000
+# Proven independent configuration: two node streams per proxy feed a bounded
+# eight-process parser without changing the fixed-proxy producer/consumer model.
+NODE_STREAMS_PER_PROXY = 2
+PARSE_PROCESS_WORKERS = 8
+PARSE_MAX_PENDING_PAGES = 256
+RESULT_COORDINATOR_WORKERS = 32
+
 CHART_PREFIXES = [
     "/gp/new-releases/",
     "/gp/bestsellers/",
@@ -103,6 +116,9 @@ CHART_PREFIXES = [
     "/gp/most-wished-for/",
     "/gp/most-gifted/",
 ]
+
+# 每个 worker 预建的 Session lane 数 = 榜单入口数，节点内 5 路并发时每路独立 Session
+NUM_LANES = len(CHART_PREFIXES)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -126,11 +142,18 @@ class ProxyPool:
         self._all = []
         if PROXY_ENABLED and os.path.exists(PROXY_POOL_FILE):
             with open(PROXY_POOL_FILE, encoding="utf-8") as f:
-                entries = json.load(f)
+                payload = json.load(f)
+            # Legacy snapshots were a bare list. The current daemon publishes
+            # metadata plus the usable proxy list under ``entries``.
+            entries = payload.get("entries", []) if isinstance(payload, dict) else payload
+            if not isinstance(entries, list):
+                raise ValueError(f"invalid proxy pool format: {PROXY_POOL_FILE}")
             for p in entries:
+                if not isinstance(p, dict) or not p.get("proxy"):
+                    continue
                 self._q.put(p)
                 self._all.append(p)
-            print(f"[pool] 加载 {len(entries)} 个代理端口")
+            print(f"[pool] 加载 {len(self._all)} 个代理端口")
         else:
             print("[pool] 代理未启用或池文件不存在，使用直连")
 
@@ -304,31 +327,68 @@ def parse_sidebar_children(html: str, page_url: str, **_kwargs) -> list[dict]:
     return results
 
 
-def _safe_get(session: requests.Session, url: str, retries: int = 3) -> str | None:
+def _safe_get(
+    session: requests.Session, url: str, retries: int = 1
+) -> tuple[str | None, str]:
+    """返回 (html, reason)。成功时 reason 为 ""；失败时给出失败原因，供上层决定补抓。
+
+    关键：最后一次尝试失败后**不再休眠**（避免明知要放弃仍空等），
+    直接返回失败原因，交由上层把该 URL 投入补抓队列换 IP 重试。
+    """
+    reason = "UNKNOWN"
     for attempt in range(retries):
+        is_last = attempt == retries - 1
         try:
             r = session.get(url, timeout=15, verify=PROXY_VERIFY)
             if r.status_code == 200:
                 if "zg-browse" not in r.text and "Type the characters" in r.text:
+                    reason = "CAPTCHA"
+                    if is_last:
+                        break
                     print(f"    [CAPTCHA] 等待 30s 后重试", flush=True)
                     time.sleep(30 + random.uniform(0, 15))
                     continue
-                return r.text
+                return r.text, ""
             if r.status_code == 429:
+                reason = "RATE_LIMITED"
+                if is_last:
+                    break
                 wait = 60 + random.uniform(0, 30)
                 print(f"    [429] 限速 {wait:.0f}s", flush=True)
                 time.sleep(wait)
+            elif r.status_code == 403:
+                reason = "FORBIDDEN"
+                if is_last:
+                    break
+                time.sleep(5 + random.uniform(0, 3))
             elif r.status_code == 503:
+                reason = "HTTP_503"
+                if is_last:
+                    break
                 time.sleep(20 + random.uniform(0, 10))
             else:
+                # 4xx/其它：非 IP 级瞬时问题，重试同一 URL 无意义，直接返回。
                 print(f"    [HTTP {r.status_code}] {url}", flush=True)
-                return None
+                return None, f"HTTP_{r.status_code}"
         except requests.RequestException as e:
+            reason = "NETWORK"
+            if is_last:
+                print(f"    [异常] attempt {attempt+1}: {e} → 放弃(不再休眠)", flush=True)
+                break
             wait = 5 * (2 ** attempt) + random.uniform(0, 3)
             print(f"    [异常] attempt {attempt+1}: {e} → {wait:.0f}s", flush=True)
             time.sleep(wait)
-    print(f"    [放弃] {url}", flush=True)
-    return None
+    return None, reason
+
+
+def _is_retryable_chart_failure(reason: str) -> bool:
+    """Only failures that may change with another exit IP enter the retry queue."""
+    return reason in {"RATE_LIMITED", "FORBIDDEN", "CAPTCHA", "NETWORK", "HTTP_503"}
+
+
+def _is_confirmed_absent(reason: str) -> bool:
+    """Amazon uses these responses for chart entries that do not exist."""
+    return reason in {"HTTP_404", "HTTP_410"}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -358,7 +418,7 @@ def _clear_checkpoint():
 
 def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     """多 worker 并发 BFS 抓取一个 L1 大类子树，每 100 条写入 DB。"""
-    num_workers = len(proxy_entries) if proxy_entries else 1
+    num_workers = len(proxy_entries) * NODE_STREAMS_PER_PROXY if proxy_entries else 1
 
     # 从 DB 加载当前 slug 子树的已有节点（支持续跑 + 补全）
     conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -386,7 +446,7 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     try:
         session0 = requests.Session()
         session0.headers.update({**HEADERS, "User-Agent": USER_AGENTS[0], "Accept-Language": _LANG})
-        root_html = _safe_get(session0, root_url)
+        root_html, _ = _safe_get(session0, root_url)
         if root_html:
             soup = BeautifulSoup(root_html, "html.parser")
             # 榜单页左侧导航树中“选中”的节点即当前根类目名（locale 无关，无榜单前缀）
@@ -449,13 +509,16 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     pending_nodes = []       # 待写入 DB 的缓冲区
     total_added = [0]
     total_found = [0]
-    errors = []
-    in_flight = [0]          # 正在处理的任务数
+    errors = []              # 补抓耗尽的 URL：{url, parent_id, reason, attempts}
+    worker_failures = []     # unexpected worker exceptions; never report a complete crawl
+    in_flight = [0]          # 正在处理的任务数（节点任务 + 补抓任务）
+    # 有界补抓队列：失败的单个 chart URL 进入这里，由任意空闲 worker 换 IP 重试
+    retry_q: Queue = Queue(maxsize=RETRY_QUEUE_MAX)
     bfs_stats = {"nodes_processed": 0, "requests_made": 0, "requests_ok": 0,
                  "requests_fail": 0, "start_time": time.time()}
     proxy_stats = {}
     for i in range(num_workers):
-        px = proxy_entries[i] if proxy_entries else None
+        px = proxy_entries[i // NODE_STREAMS_PER_PROXY] if proxy_entries else None
         port = px["proxy"].split(":")[-1] if px else "direct"
         proxy_stats[i] = {"port": port, "ok": 0, "fail": 0, "429": 0, "captcha": 0}
 
@@ -468,138 +531,310 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
         total_added[0] += added
         print(f"  [{slug}] 批量写入 DB: {added} 条 (累计 {total_added[0]})", flush=True)
 
-    def bfs_worker(proxy_entry, worker_id):
-        session = requests.Session()
-        ua = USER_AGENTS[worker_id % len(USER_AGENTS)]
-        session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": _LANG})
-        if proxy_entry:
-            session.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
+    def _record_request(worker_id, ok):
+        bfs_stats["requests_made"] += 1
+        if ok:
+            bfs_stats["requests_ok"] += 1
+            proxy_stats[worker_id]["ok"] += 1
+        else:
+            bfs_stats["requests_fail"] += 1
+            proxy_stats[worker_id]["fail"] += 1
 
-        while True:
-            try:
-                node = task_q.get(timeout=5)
-            except Empty:
-                with lock:
-                    if in_flight[0] == 0:
-                        return
-                continue
-
+    def _enqueue_retry(chart_url, parent_id, depth, name, reason, attempt, failed_proxy_key):
+        """把失败的单个 chart URL 投入有界补抓队列。队列满时不阻塞：记为耗尽。"""
+        task = {
+            "kind": "chart",
+            "chart_url": chart_url,
+            "parent_id": parent_id,
+            "depth": depth,
+            "name": name,
+            "reason": reason,
+            "attempt": attempt,
+            "failed_proxy_key": failed_proxy_key,
+        }
+        try:
+            retry_q.put_nowait(task)
+            return True
+        except Full:
             with lock:
-                in_flight[0] += 1
+                errors.append({"url": chart_url, "parent_id": parent_id,
+                               "reason": "RETRY_QUEUE_FULL", "attempts": attempt})
+            print(f"  [补抓队列满，丢弃] {chart_url} reason={reason}", flush=True)
+            return False
 
-            try:
-                url = node["url"]
-                depth = node["depth"]
-                if depth >= max_depth:
+    def _merge_children(children, parent_id, depth):
+        """把解析出的子类目并入图（去重）；新节点入 task_q 继续 BFS。返回新增数。"""
+        new_count = 0
+        with lock:
+            for c in children:
+                c_url = normalize_url(c["url"])
+                c_nid = c.get("node_id")
+                edge_key = (c_nid or c_url, parent_id)
+                if edge_key in visited_edges:
                     continue
+                visited_edges.add(edge_key)
+                visited_urls.add(c_url)
+                c["depth"] = depth + 1
+                c["parent_node_id"] = parent_id
+                c["source"] = "subtree"
+                pending_nodes.append(c)
+                # Persist every real parent edge, but expand a node only
+                # once per slug crawl to avoid duplicate HTTP work.
+                if not c_nid or c_nid not in visited_ids:
+                    if c_nid:
+                        visited_ids.add(c_nid)
+                    task_q.put({"kind": "node", **c})
+                new_count += 1
+                total_found[0] += 1
+            if len(pending_nodes) >= BFS_BATCH_SIZE:
+                _flush()
+        return new_count
 
-                all_children = []
-                seen_child_ids = set()
-                node_nid = node.get("node_id")
-                node_slug = extract_slug(url) or slug
-                node_req_count = 0
+    def _next_task(worker_id, proxy_key):
+        """统一取任务：优先补抓，再取节点。在锁内原子判断终止，避免竞态误判完成。
 
-                if node_nid:
-                    chart_urls = [normalize_url(f"{_DOMAIN}{p}{node_slug}/{node_nid}/") for p in CHART_PREFIXES]
-                else:
-                    chart_urls = [url]
+        返回 (kind, payload) / "WAIT"（有任务在途，稍后再试）/ None（全部完成）。
+        补抓队列与节点队列都清空、且没有任何在途任务时才判定站点完成——
+        满足“失败 URL 补抓完成或明确耗尽后才算完成”。
+        """
+        with lock:
+            # A retry must be consumed by another worker/IP. Rotate tasks that
+            # originated from this worker instead of immediately retrying them
+            # on the same failed exit. With a single worker there is no alternate
+            # IP, so bounded same-worker retry is the only possible fallback.
+            retry_count = retry_q.qsize()
+            for _ in range(retry_count):
+                try:
+                    task = retry_q.get_nowait()
+                except Empty:
+                    break
+                if len(proxy_entries) <= 1 or task.get("failed_proxy_key") != proxy_key:
+                    in_flight[0] += 1
+                    return ("chart", task)
+                retry_q.put_nowait(task)
+            try:
+                node = task_q.get_nowait()
+                in_flight[0] += 1
+                return ("node", node)
+            except Empty:
+                pass
+            if in_flight[0] == 0:
+                return None
+            return "WAIT"
 
-                def _fetch_one(u):
-                    return u, _safe_get(session, u)
+    def _record_node_complete(node, depth, node_req_count, new_count, worker_id):
+        with lock:
+            bfs_stats["nodes_processed"] += 1
+            np = bfs_stats["nodes_processed"]
+            elapsed = time.time() - bfs_stats["start_time"]
+            if np % 100 == 0:
+                rpm = np / elapsed * 60 if elapsed > 0 else 0
+                req_rpm = bfs_stats["requests_made"] / elapsed * 60 if elapsed > 0 else 0
+                ts = time.strftime("%H:%M:%S")
+                print(f"  [{ts}] 📊 已处理 {np} 节点 | {rpm:.1f} 节点/分 | {req_rpm:.0f} 请求/分 | "
+                      f"请求 {bfs_stats['requests_ok']}✓ {bfs_stats['requests_fail']}✗ | "
+                      f"新节点 {total_found[0]} | 队列 {task_q.qsize()} | 补抓 {retry_q.qsize()}", flush=True)
+                ip_parts = [f"W{wid}({ps['port']}): {ps['ok']}✓{ps['fail']}✗"
+                            for wid, ps in sorted(proxy_stats.items())]
+                print(f"  [{ts}] 🌐 IP池  " + "  ".join(ip_parts), flush=True)
+        if new_count > 0 or depth <= 1:
+            ts = time.strftime("%H:%M:%S")
+            print(f"  [{ts}] [W{worker_id}] L{depth} {node.get('name','')}  子+{new_count}  请求×{node_req_count}  队列:{task_q.qsize()}  总:{total_found[0]}", flush=True)
 
-                with ThreadPoolExecutor(max_workers=len(chart_urls)) as pool_ex:
-                    futures = {pool_ex.submit(_fetch_one, u): u for u in chart_urls}
-                    for fut in as_completed(futures):
-                        chart_url, html = fut.result()
-                        node_req_count += 1
+    def _finish_node_parse(node, parent_id, depth, node_req_count, parse_jobs, worker_id):
+        """Result-coordinator task: wait for CPU parsing, then merge atomically."""
+        try:
+            all_children = []
+            seen_child_ids = set()
+            for _chart_url, parse_future in parse_jobs:
+                for child in parse_future.result():
+                    child_id = child.get("node_id")
+                    if child_id and child_id not in seen_child_ids:
+                        seen_child_ids.add(child_id)
+                        all_children.append(child)
+            new_count = _merge_children(all_children, parent_id, depth)
+            _record_node_complete(node, depth, node_req_count, new_count, worker_id)
+        except BaseException as exc:
+            with lock:
+                worker_failures.append((worker_id, "parse", repr(exc)))
+        finally:
+            with lock:
+                in_flight[0] -= 1
+
+    def _process_node(node, lane_sessions, worker_id, proxy_key):
+        url = node["url"]
+        depth = node["depth"]
+        if depth >= max_depth:
+            return
+        node_nid = node.get("node_id")
+        node_slug = extract_slug(url) or slug
+        parent_id = node_nid or slug
+
+        if node_nid:
+            chart_urls = [normalize_url(f"{_DOMAIN}{p}{node_slug}/{node_nid}/") for p in CHART_PREFIXES]
+        else:
+            chart_urls = [url]
+
+        parse_jobs = []
+        node_req_count = 0
+
+        # 节点内多路并发：每条 chart 绑定一条独立 lane Session（复用连接、不跨线程共享）
+        def _fetch_lane(lane, u):
+            html, reason = _safe_get(lane_sessions[lane], u)
+            return lane, u, html, reason
+
+        with ThreadPoolExecutor(max_workers=len(chart_urls)) as pool_ex:
+            futures = [
+                pool_ex.submit(_fetch_lane, i % NUM_LANES, u)
+                for i, u in enumerate(chart_urls)
+            ]
+            for fut in as_completed(futures):
+                _lane, chart_url, html, reason = fut.result()
+                node_req_count += 1
+                with lock:
+                    _record_request(worker_id, bool(html))
+                if not html:
+                    # 补抓粒度是失败的单个 URL，而不是整个节点：成功的入口正常并入，
+                    # 失败的入口投入补抓队列换其它 IP 重试。
+                    if _is_retryable_chart_failure(reason):
+                        _enqueue_retry(
+                            chart_url, parent_id, depth, node.get("name", ""),
+                            reason, attempt=1, failed_proxy_key=proxy_key,
+                        )
+                    elif not _is_confirmed_absent(reason):
                         with lock:
-                            bfs_stats["requests_made"] += 1
-                            if html:
-                                bfs_stats["requests_ok"] += 1
-                                proxy_stats[worker_id]["ok"] += 1
-                            else:
-                                bfs_stats["requests_fail"] += 1
-                                proxy_stats[worker_id]["fail"] += 1
-                        if not html:
-                            continue
-                        found = parse_sidebar_children(html, chart_url)
-                        for c in found:
-                            cid = c.get("node_id")
-                            if cid and cid not in seen_child_ids:
-                                seen_child_ids.add(cid)
-                                all_children.append(c)
+                            errors.append({"url": chart_url, "parent_id": parent_id,
+                                           "reason": reason, "attempts": 1})
+                    continue
+                parse_jobs.append((chart_url, parse_pipeline.submit(html, chart_url, _DOMAIN)))
 
-                if not all_children and not node_nid:
-                    html = _safe_get(session, url)
-                    if html:
-                        all_children = parse_sidebar_children(html, url)
-                children = all_children
-                parent_id = node.get("node_id") or slug
+        # The single root request stays synchronous because its fallback reuses
+        # this worker's lane Session. Normal five-chart nodes never wait here.
+        if not node_nid:
+            all_children = []
+            for _chart_url, parse_future in parse_jobs:
+                all_children.extend(parse_future.result())
+            # 无 node_id 的根任务：并发无所获时回退单请求
+            if not all_children:
+                html, _reason = _safe_get(lane_sessions[0], url)
+                if html:
+                    all_children = parse_pipeline.submit(html, url, _DOMAIN).result()
+            new_count = _merge_children(all_children, parent_id, depth)
+            _record_node_complete(node, depth, node_req_count, new_count, worker_id)
+            return
 
-                new_count = 0
-                with lock:
-                    for c in children:
-                        c_url = normalize_url(c["url"])
-                        c_nid = c.get("node_id")
-                        edge_key = (c_nid or c_url, parent_id)
-                        if edge_key in visited_edges:
-                            continue
-                        visited_edges.add(edge_key)
-                        visited_urls.add(c_url)
-                        c["depth"] = depth + 1
-                        c["parent_node_id"] = parent_id
-                        c["source"] = "subtree"
-                        pending_nodes.append(c)
-                        # Persist every real parent edge, but expand a node only
-                        # once per slug crawl to avoid duplicate HTTP work.
-                        if not c_nid or c_nid not in visited_ids:
-                            if c_nid:
-                                visited_ids.add(c_nid)
-                            task_q.put(c)
-                        new_count += 1
-                        total_found[0] += 1
+        # Keep completion detection correct: the fetch task will decrement one
+        # in-flight slot, while this extra slot remains until parsing, merging,
+        # and child enqueueing have all completed.
+        with lock:
+            in_flight[0] += 1
+        try:
+            result_executor.submit(
+                _finish_node_parse,
+                node, parent_id, depth, node_req_count, parse_jobs, worker_id,
+            )
+        except BaseException:
+            with lock:
+                in_flight[0] -= 1
+            raise
 
-                    if len(pending_nodes) >= BFS_BATCH_SIZE:
-                        _flush()
+        # Preserve the old per-stream pacing without blocking the parse stage.
+        time.sleep(random.uniform(0.3, 0.8))
 
-                with lock:
-                    bfs_stats["nodes_processed"] += 1
-                    np = bfs_stats["nodes_processed"]
-                    elapsed = time.time() - bfs_stats["start_time"]
-                    if np % 100 == 0:
-                        rpm = np / elapsed * 60 if elapsed > 0 else 0
-                        req_rpm = bfs_stats["requests_made"] / elapsed * 60 if elapsed > 0 else 0
-                        ts = time.strftime("%H:%M:%S")
-                        print(f"  [{ts}] 📊 已处理 {np} 节点 | {rpm:.1f} 节点/分 | {req_rpm:.0f} 请求/分 | "
-                              f"请求 {bfs_stats['requests_ok']}✓ {bfs_stats['requests_fail']}✗ | "
-                              f"新节点 {total_found[0]} | 队列 {task_q.qsize()}", flush=True)
-                        ip_parts = [f"W{wid}({ps['port']}): {ps['ok']}✓{ps['fail']}✗"
-                                    for wid, ps in sorted(proxy_stats.items())]
-                        print(f"  [{ts}] 🌐 IP池  " + "  ".join(ip_parts), flush=True)
+    def _process_chart_retry(task, lane_sessions, worker_id, proxy_key):
+        chart_url = task["chart_url"]
+        parent_id = task["parent_id"]
+        depth = task["depth"]
+        attempt = task["attempt"]
+        # 由不同 worker（不同 IP）消费本任务；lane 轮换以复用不同连接。
+        html, reason = _safe_get(lane_sessions[attempt % NUM_LANES], chart_url)
+        with lock:
+            _record_request(worker_id, bool(html))
+        if html:
+            children = parse_pipeline.submit(html, chart_url, _DOMAIN).result()
+            _merge_children(children, parent_id, depth)
+            return
+        if _is_confirmed_absent(reason):
+            return
+        if _is_retryable_chart_failure(reason) and attempt < MAX_URL_RETRY:
+            _enqueue_retry(
+                chart_url, parent_id, depth, task.get("name", ""), reason,
+                attempt=attempt + 1, failed_proxy_key=proxy_key,
+            )
+        else:
+            with lock:
+                errors.append({"url": chart_url, "parent_id": parent_id,
+                               "reason": reason, "attempts": attempt})
+            print(f"  [补抓耗尽] {chart_url} reason={reason} attempts={attempt}", flush=True)
 
-                time.sleep(random.uniform(0.3, 0.8))
-                if new_count > 0 or depth <= 1:
-                    ts = time.strftime("%H:%M:%S")
-                    print(f"  [{ts}] [W{worker_id}] L{depth} {node['name']}  子+{new_count}  请求×{node_req_count}  队列:{task_q.qsize()}  总:{total_found[0]}", flush=True)
+    def bfs_worker(proxy_entry, worker_id, proxy_index):
+        # 每个 worker 预建 NUM_LANES 条长期 Session（分别对应 5 个榜单入口 lane），
+        # 复用连接；节点内 5 路并发时每路用独立 Session，消除跨线程共享 Session。
+        lane_sessions = []
+        ua = USER_AGENTS[proxy_index % len(USER_AGENTS)]
+        proxy_key = (
+            proxy_entry.get("exit_ip") or proxy_entry.get("proxy")
+            if proxy_entry else "direct"
+        )
+        for lane in range(NUM_LANES):
+            s = requests.Session()
+            s.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": _LANG})
+            if proxy_entry:
+                s.proxies.update({"http": proxy_entry["proxy"], "https": proxy_entry["proxy"]})
+            lane_sessions.append(s)
 
-            finally:
-                with lock:
-                    in_flight[0] -= 1
-                task_q.task_done()
+        try:
+            while True:
+                item = _next_task(worker_id, proxy_key)
+                if item is None:
+                    return
+                if item == "WAIT":
+                    time.sleep(0.1)
+                    continue
+                kind, payload = item
+                try:
+                    if kind == "node":
+                        _process_node(payload, lane_sessions, worker_id, proxy_key)
+                    else:
+                        _process_chart_retry(payload, lane_sessions, worker_id, proxy_key)
+                except BaseException as exc:
+                    with lock:
+                        worker_failures.append((worker_id, kind, repr(exc)))
+                    return
+                finally:
+                    with lock:
+                        in_flight[0] -= 1
+        finally:
+            for s in lane_sessions:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
-    print(f"[{slug}] BFS 启动: {num_workers} worker", flush=True)
+    print(
+        f"[{slug}] BFS 启动: {num_workers} worker "
+        f"({NODE_STREAMS_PER_PROXY} streams/IP) + {PARSE_PROCESS_WORKERS} parser processes",
+        flush=True,
+    )
     _save_checkpoint({"slug": slug, "phase": "bfs", "started_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
+    parse_pipeline = BoundedParsePipeline(PARSE_PROCESS_WORKERS, PARSE_MAX_PENDING_PAGES)
+    result_executor = ThreadPoolExecutor(max_workers=RESULT_COORDINATOR_WORKERS)
     threads = []
-    for i in range(num_workers):
-        px = proxy_entries[i] if proxy_entries else None
-        t = threading.Thread(target=bfs_worker, args=(px, i), daemon=True)
-        t.start()
-        threads.append(t)
-        time.sleep(0.2)
+    try:
+        for i in range(num_workers):
+            proxy_index = i // NODE_STREAMS_PER_PROXY if proxy_entries else 0
+            px = proxy_entries[proxy_index] if proxy_entries else None
+            t = threading.Thread(target=bfs_worker, args=(px, i, proxy_index), daemon=True)
+            t.start()
+            threads.append(t)
+            time.sleep(0.02)
 
-    for t in threads:
-        t.join()
+        for t in threads:
+            t.join()
+    finally:
+        result_executor.shutdown(wait=True, cancel_futures=True)
+        parse_pipeline.shutdown(wait=True, cancel_futures=True)
 
     # 写入剩余缓冲
     with lock:
@@ -608,13 +843,36 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     elapsed = time.time() - bfs_stats["start_time"]
     mins = elapsed / 60
     rpm = bfs_stats["nodes_processed"] / mins if mins > 0 else 0
-    print(f"[{slug}] BFS 完成: {total_found[0]} 个新节点, {len(errors)} 个错误, DB 累计写入 {total_added[0]}", flush=True)
+    crawl_state = "完成" if not errors and not worker_failures else "未完成"
+    print(f"[{slug}] BFS {crawl_state}: {total_found[0]} 个新节点, {len(errors)} 个补抓耗尽 URL, DB 累计写入 {total_added[0]}", flush=True)
     print(f"  耗时 {mins:.1f} 分钟 | 处理 {bfs_stats['nodes_processed']} 节点 ({rpm:.1f}/分) | "
           f"HTTP 请求 {bfs_stats['requests_made']} ({bfs_stats['requests_ok']}✓ {bfs_stats['requests_fail']}✗)", flush=True)
+    if worker_failures:
+        for worker_id, kind, detail in worker_failures:
+            print(f"  ⚠️ W{worker_id} {kind} worker异常: {detail}", flush=True)
+        raise RuntimeError(
+            f"[{slug}] incomplete: {len(worker_failures)} worker exception(s); "
+            "site completion is blocked"
+        )
+    if errors:
+        reason_counts = {}
+        for e in errors:
+            reason_counts[e["reason"]] = reason_counts.get(e["reason"], 0) + 1
+        reason_summary = ", ".join(f"{k}×{v}" for k, v in sorted(reason_counts.items()))
+        print(f"  ⚠️ 补抓耗尽 {len(errors)} 个 URL（已达 {MAX_URL_RETRY} 次上限）: {reason_summary}", flush=True)
+        for e in errors[:20]:
+            print(f"     - {e['url']} reason={e['reason']} attempts={e['attempts']}", flush=True)
+        if len(errors) > 20:
+            print(f"     … 其余 {len(errors) - 20} 个略", flush=True)
     for wid, ps in sorted(proxy_stats.items()):
         total_w = ps["ok"] + ps["fail"]
         fail_rate = ps["fail"] / total_w * 100 if total_w > 0 else 0
         print(f"  W{wid} ({ps['port']}): {total_w} 请求, {ps['ok']}✓ {ps['fail']}✗, 失败率 {fail_rate:.1f}%", flush=True)
+    if errors:
+        raise RuntimeError(
+            f"[{slug}] incomplete: {len(errors)} chart URL(s) exhausted; "
+            "site completion is blocked"
+        )
     _save_checkpoint({"slug": slug, "phase": "bfs_done", "total": total_found[0],
                       "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
@@ -730,7 +988,7 @@ def run_breadcrumb():
 
                 for prefix in CHART_PREFIXES:
                     chart_url = normalize_url(f"{_DOMAIN}{prefix}{leaf_slug}/{leaf_nid}/")
-                    html = _safe_get(session, chart_url)
+                    html, _ = _safe_get(session, chart_url)
                     with lock:
                         if html:
                             bc_proxy_stats[worker_id]["ok"] += 1
@@ -780,7 +1038,7 @@ def run_breadcrumb():
                 continue
 
             try:
-                prod_html = _safe_get(session, f"{_DOMAIN}/dp/{asin}")
+                prod_html, _ = _safe_get(session, f"{_DOMAIN}/dp/{asin}")
                 with lock:
                     bc_proxy_stats[worker_id]["asins"] += 1
                     if prod_html:
@@ -955,10 +1213,10 @@ def discover_l1_slugs(domain: str, lang: str) -> list[str]:
     ua = USER_AGENTS[0]
     session.headers.update({**HEADERS, "User-Agent": ua, "Accept-Language": lang})
     url = f"{domain}/gp/new-releases/"
-    html = _safe_get(session, url)
+    html, _ = _safe_get(session, url)
     if not html:
         print(f"[discover] 无法访问 {url}，尝试 bestsellers 入口", flush=True)
-        html = _safe_get(session, f"{domain}/gp/bestsellers/")
+        html, _ = _safe_get(session, f"{domain}/gp/bestsellers/")
     if not html:
         print("[discover] 无法获取根页面", flush=True)
         return []

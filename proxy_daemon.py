@@ -757,7 +757,13 @@ class ProxyDaemon:
         for event in events:
             if event.outcome != "SUCCESS":
                 affected.setdefault((event.target, event.outcome), set()).add(event.node_key)
-        broad = {pair for pair, keys in affected.items() if len(keys) >= 3}
+        # 只有明确的站点限流/服务不可用才暂停整个目标。CAPTCHA、TLS、连接
+        # 错误都可能只属于单个出口；把它们升级成整站 90 秒暂停会形成反馈风暴。
+        target_wide_outcomes = {"HTTP_429", "HTTP_503"}
+        broad = {
+            pair for pair, keys in affected.items()
+            if pair[1] in target_wide_outcomes and len(keys) >= 3
+        }
         now = time.time()
 
         with self._lock:

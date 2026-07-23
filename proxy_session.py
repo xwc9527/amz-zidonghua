@@ -257,6 +257,15 @@ class ForcedProxyPool:
         with self._cv:
             return len(self._usable_states_locked())
 
+    def usable_entries_snapshot(self) -> list[dict]:
+        """返回当前未禁用、未冷却节点的副本，供高吞吐只读快路径分片。
+
+        快路径不会占用 ForcedProxyPool 的独占重试租约；只有失败请求才进入
+        acquire/release 状态机。返回副本避免调用方修改池内控制字段。
+        """
+        with self._cv:
+            return [dict(state["entry"]) for state in self._usable_states_locked()]
+
     def wait_if_target_paused(self) -> None:
         """多出口同时报错时的全局保护闸。对已持有短租约的 worker 也生效。"""
         with self._cv:
@@ -368,8 +377,8 @@ class ForcedProxyPool:
             state["in_use"] = False
             state["last_used_at"] = now
             if code in (
-                "SUCCESS", "ROTATE", "FILTERED", "PARSE_ERROR",
-                "CLIENT_TLS_ERROR", "SESSION_CREATE_ERROR",
+                    "SUCCESS", "ROTATE", "FILTERED", "PARSE_ERROR",
+                    "PARSER_MISS", "CLIENT_TLS_ERROR", "SESSION_CREATE_ERROR",
             ):
                 if code == "SUCCESS":
                     state["successes"] += 1
@@ -392,9 +401,9 @@ class ForcedProxyPool:
                 state["last_error"] = code
                 state["cooldown_until"] = now + min(PROXY_RATE_LIMIT_COOLDOWN, 120)
             elif code in (
-                "CONNECT_TIMEOUT", "READ_TIMEOUT", "PROXY_CONNECT_ERROR",
-                "TLS_ERROR", "CONNECTION_RESET", "REQUEST_ERROR", "EMPTY_RESPONSE",
-                "OTHER_HTTP_STATUS", "EXIT_IP_UNVERIFIED",
+                    "CONNECT_TIMEOUT", "READ_TIMEOUT", "PROXY_CONNECT_ERROR",
+                    "TLS_ERROR", "CONNECTION_RESET", "REQUEST_ERROR", "EMPTY_RESPONSE",
+                    "OTHER_HTTP_STATUS", "EXIT_IP_UNVERIFIED",
             ):
                 state["network_errors"] += 1
                 state["consecutive_errors"] += 1
@@ -411,7 +420,8 @@ class ForcedProxyPool:
             else:
                 state["last_error"] = code
             if self.feedback_enabled and code not in {
-                "ROTATE", "FILTERED", "PARSE_ERROR", "CLIENT_TLS_ERROR", "SESSION_CREATE_ERROR",
+                    "ROTATE", "FILTERED", "PARSE_ERROR", "PARSER_MISS",
+                    "CLIENT_TLS_ERROR", "SESSION_CREATE_ERROR",
             }:
                 feedback_entry = dict(state["entry"])
                 feedback_code = code

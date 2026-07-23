@@ -478,8 +478,6 @@ app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
 _DEFAULT_CORS = [
     "http://127.0.0.1:8081",
     "http://localhost:8081",
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
     "null",  # file:// 打开 dashboard 时 Origin 为 null
 ]
 _extra_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]

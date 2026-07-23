@@ -160,6 +160,7 @@ class WorkerProxyClient:
         auditor: AttemptAuditor | None = None,
         is_captcha: PageCheckFn | None = None,
         is_currency_mismatch: PageCheckFn | None = None,
+        is_valid_page: PageCheckFn | None = None,
         timeout: float = 18,
         verify_exit: bool = False,
         exit_probe_ttl_sec: float = 600,
@@ -171,6 +172,7 @@ class WorkerProxyClient:
         self.auditor = auditor
         self.is_captcha = is_captcha or is_captcha_page
         self.is_currency_mismatch = is_currency_mismatch
+        self.is_valid_page = is_valid_page
         self.timeout = timeout
         self.verify_exit = bool(verify_exit)
         self.exit_probe_ttl_sec = max(30.0, float(exit_probe_ttl_sec or 600))
@@ -259,6 +261,9 @@ class WorkerProxyClient:
         self.acquired_at = 0.0
 
     def _ensure_session(self, excluded: set[str]):
+        current_ip = str((self.entry or {}).get("exit_ip") or "")
+        if self.entry is not None and current_ip and current_ip in excluded:
+            self._release("ROTATE")
         expired = self.entry is not None and (
             self.requests_used >= self.rotate_after
             or time.monotonic() - self.acquired_at >= PROXY_ROTATE_TTL
@@ -281,16 +286,20 @@ class WorkerProxyClient:
             if self.warmup:
                 self.warmup(self.session)
 
-    def get(self, url: str, *, phase: str, item_id: str, referer: str = "") -> FetchOutcome:
+    def get(
+        self, url: str, *, phase: str, item_id: str, referer: str = "",
+        exclude_exit_ips: set[str] | None = None,
+    ) -> FetchOutcome:
         started = time.monotonic()
         used_ips: set[str] = set()
+        initially_excluded = set(exclude_exit_ips or ())
         used_evidence: list[dict] = []
         reasons: list[str] = []
         last_status = None
         for attempt in range(1, PROXY_REQUEST_DISTINCT_ATTEMPTS + 1):
             last_status = None
             try:
-                self._ensure_session(used_ips)
+                self._ensure_session(initially_excluded | used_ips)
             except ProxyRequiredError as exc:
                 reasons.append(exc.code)
                 break
@@ -357,6 +366,8 @@ class WorkerProxyClient:
                     code = http_error_code(last_status)
                 elif not body.strip():
                     code = "EMPTY_RESPONSE"
+                elif self.is_valid_page and not self.is_valid_page(body):
+                    code = "PARSER_MISS"
                 else:
                     self.requests_used += 1
                     self.pool.record_success(
