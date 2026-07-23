@@ -200,6 +200,21 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
     d = {}
     site = (site or "US").upper()
 
+    # 商品详情页的面包屑是侧边栏树之外的独立类目来源；保持页面从根到叶的顺序。
+    breadcrumb_container = soup.select_one("#wayfinding-breadcrumbs_feature_div")
+    if breadcrumb_container:
+        breadcrumb_nodes = []
+        for anchor in breadcrumb_container.select("a"):
+            name = anchor.get_text(strip=True)
+            match = re.search(r"node=(\d+)", anchor.get("href", ""))
+            if name and match:
+                breadcrumb_nodes.append({
+                    "name": name,
+                    "node_id": match.group(1),
+                })
+        if breadcrumb_nodes:
+            d["breadcrumb_nodes"] = breadcrumb_nodes
+
     badge_blob = " ".join(
         el.get_text(" ", strip=True)
         for el in soup.select(
@@ -274,6 +289,33 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
         if len(bsr_matches) > 1:
             d["bsr_sub_rank"] = bsr_matches[1][0]
             d["bsr_sub_category"] = bsr_matches[1][1]
+
+        # 保留现有的纯文本 BSR 数值解析；额外采集 BSR 链接的可用类目图节点。
+        # 这些值仅由普通 str/dict 组成，以便进程池安全地回传给抓取主进程。
+        bsr_node_links = []
+        seen_bsr_nodes = set()
+        for anchor in bsr_section.select("a[href]"):
+            href = anchor.get("href", "")
+            match = re.search(
+                r"/gp/bestsellers/([^/?#]+)/(\d+)(?:[/?#]|$)",
+                href,
+                flags=re.I,
+            )
+            if not match:
+                continue
+            name = anchor.get_text(" ", strip=True)
+            node_id = match.group(2)
+            slug = match.group(1).lower()
+            if not name or (node_id, slug) in seen_bsr_nodes:
+                continue
+            seen_bsr_nodes.add((node_id, slug))
+            bsr_node_links.append({
+                "name": name,
+                "node_id": node_id,
+                "slug": slug,
+            })
+        if bsr_node_links:
+            d["bsr_node_links"] = bsr_node_links
 
     detail_rows = soup.select(
         "#detailBullets_feature_div li, "

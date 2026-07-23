@@ -174,6 +174,9 @@ _seen_lock = threading.Lock()
 _checkpoint: ProductsCheckpoint | None = None
 _detail_parse_pipeline = None
 _detail_writer = None
+_category_reverse_lock = threading.Lock()
+_category_reverse_seen_edges: set[tuple[str, str, str]] = set()
+_category_reverse_seen_db_path = ""
 
 
 class BoundedDetailParsePipeline:
@@ -415,6 +418,153 @@ def _attach_normalized_dims(d: dict) -> dict:
 def parse_detail_fields(html: str) -> dict:
     """兼容原调用：内部转发到共享模块并注入当前站点。"""
     return _parse_detail_fields_shared(html, _SITE)
+
+
+def _reverse_category_url(node: dict, parent_slug: str) -> str:
+    """Build a chart URL for a detail-page-discovered category without fetching it."""
+    node_id = node["node_id"]
+    slug = node.get("slug") or parent_slug
+    if node.get("kind") == "bsr" and node.get("slug"):
+        return f"{_DOMAIN}/gp/bestsellers/{node['slug']}/{node_id}/"
+    if slug:
+        return f"{_DOMAIN}/gp/new-releases/{slug}/{node_id}/"
+    return f"{_DOMAIN}/gp/new-releases/{node_id}/"
+
+
+def _discover_category_nodes_from_detail(detail: dict, site: str = None) -> int:
+    """Persist previously unseen category edges inferred from one parsed detail page.
+
+    This intentionally consumes only parser output: no request is made here.  The
+    in-process edge cache avoids opening SQLite for the many products that share a
+    breadcrumb, while the database unique key remains the cross-process authority.
+    """
+    site = (site or _SITE).upper()
+    breadcrumbs = [
+        crumb for crumb in (detail.get("breadcrumb_nodes") or [])
+        if isinstance(crumb, dict) and crumb.get("name") and crumb.get("node_id")
+    ]
+    candidates = []
+    previous_node_id = ""
+    for crumb in breadcrumbs:
+        node_id = str(crumb["node_id"])
+        candidates.append({
+            "name": str(crumb["name"]),
+            "node_id": node_id,
+            "parent_node_id": previous_node_id,
+            "slug": "",
+            "kind": "breadcrumb",
+        })
+        previous_node_id = node_id
+
+    breadcrumb_leaf = previous_node_id
+    for link in detail.get("bsr_node_links") or []:
+        if not isinstance(link, dict) or not link.get("name") or not link.get("node_id"):
+            continue
+        node_id = str(link["node_id"])
+        # A BSR link sometimes points at the breadcrumb leaf itself; that is not
+        # a new parent-child relationship and must never create a self-edge.
+        if breadcrumb_leaf and node_id == breadcrumb_leaf:
+            continue
+        candidates.append({
+            "name": str(link["name"]),
+            "node_id": node_id,
+            "parent_node_id": breadcrumb_leaf,
+            "slug": str(link.get("slug") or "").lower(),
+            "kind": "bsr",
+        })
+    if not candidates:
+        return 0
+
+    global _category_reverse_seen_db_path
+    db_path = os.path.abspath(DB_PATH)
+    with _category_reverse_lock:
+        # Tests and long-lived callers can switch DB_PATH; never let an old
+        # in-memory dedup cache suppress writes to the new database.
+        if _category_reverse_seen_db_path != db_path:
+            _category_reverse_seen_edges.clear()
+            _category_reverse_seen_db_path = db_path
+        candidate_keys = {
+            (site, node["node_id"], node["parent_node_id"] or "")
+            for node in candidates
+        }
+        pending_keys = candidate_keys - _category_reverse_seen_edges
+        if not pending_keys:
+            return 0
+        candidates = [
+            node for node in candidates
+            if (site, node["node_id"], node["parent_node_id"] or "") in pending_keys
+        ]
+
+        assert_testing_paths_safe(db_path=DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=15)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("BEGIN IMMEDIATE")
+
+            existing_edges = set()
+            for _, node_id, parent_node_id in pending_keys:
+                row = conn.execute(
+                    "SELECT 1 FROM categories "
+                    "WHERE site=? AND node_id=? AND parent_node_id=? LIMIT 1",
+                    (site, node_id, parent_node_id),
+                ).fetchone()
+                if row:
+                    existing_edges.add((site, node_id, parent_node_id))
+
+            # Parent metadata determines depth and, for breadcrumbs, the chart
+            # slug.  Pick the shallowest known occurrence when the parent is a
+            # DAG node with multiple incoming edges.
+            parent_ids = {node["parent_node_id"] for node in candidates if node["parent_node_id"]}
+            parent_metadata = {}
+            for parent_id in parent_ids:
+                row = conn.execute(
+                    "SELECT depth, slug FROM categories WHERE site=? AND node_id=? "
+                    "ORDER BY depth ASC, id ASC LIMIT 1",
+                    (site, parent_id),
+                ).fetchone()
+                if row:
+                    parent_metadata[parent_id] = {
+                        "depth": int(row[0] or 0),
+                        "slug": row[1] or "",
+                    }
+
+            added = 0
+            resolved_metadata = dict(parent_metadata)
+            inserted_keys = set()
+            for node in candidates:
+                key = (site, node["node_id"], node["parent_node_id"] or "")
+                parent = resolved_metadata.get(node["parent_node_id"], {})
+                depth = int(parent.get("depth", -1)) + 1
+                parent_slug = parent.get("slug", "")
+                slug = node["slug"] or parent_slug
+                if key not in existing_edges and key not in inserted_keys:
+                    cur = conn.execute(
+                        "INSERT INTO categories "
+                        "(name, url, node_id, depth, source, explored, parent_node_id, slug, site) "
+                        "VALUES(?, ?, ?, ?, 'asin_reverse', 0, ?, ?, ?) "
+                        "ON CONFLICT(site, node_id, parent_node_id) DO UPDATE SET "
+                        "name=categories.name, url=categories.url",
+                        (
+                            node["name"], _reverse_category_url(node, parent_slug),
+                            node["node_id"], depth, node["parent_node_id"] or "",
+                            slug, site,
+                        ),
+                    )
+                    added += cur.rowcount
+                    inserted_keys.add(key)
+                resolved_metadata.setdefault(node["node_id"], {
+                    "depth": depth,
+                    "slug": slug,
+                })
+            conn.commit()
+            _category_reverse_seen_edges.update(candidate_keys)
+            return added
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _check_detail_filters(detail: dict, filters: dict) -> bool:
@@ -1216,6 +1366,11 @@ def enrich_with_details(products: list, client: WorkerProxyClient,
                 )
                 fetch_failures += 1
                 continue
+            _discover_category_nodes_from_detail(detail, _SITE)
+            # These parser-only discovery fields are not product_sightings
+            # columns (and are intentionally not persisted with products).
+            detail.pop("breadcrumb_nodes", None)
+            detail.pop("bsr_node_links", None)
             _finalize_detail(p, detail, filters)
         except ProxyRequiredError:
             raise
