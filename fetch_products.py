@@ -13,6 +13,7 @@ from fba_fees_us import estimate_fba_fees
 from detail_parser import (
     parse_detail_fields as _parse_detail_fields_shared,
     check_detail_filters as _check_detail_filters_shared,
+    active_filter_none_flags as _active_filter_none_flags,
     attach_normalized_dims,
     extract_image_url,
 )
@@ -169,6 +170,10 @@ _stats = {"total_nodes": 0, "done_nodes": 0, "skipped": 0,
           "products_found": 0, "products_saved": 0, "products_dup": 0, "errors": 0,
           "pool_usable": 0, "pool_cooling": 0, "pool_disabled": 0}
 _stats_lock = threading.Lock()
+# 字段解析探针：按维度累计"该维度筛选已启用时，字段解析为 None"的比例。
+# 用于在跑完后自动识别"选择器过期导致字段恒为 None"这类静默失效（不报错、
+# 只是结果异常少），而不是等人工去猜"是不是没有商品达标"。
+_filter_field_probe: dict[str, dict[str, int]] = {}
 _seen_asins = set()
 _seen_lock = threading.Lock()
 _checkpoint: ProductsCheckpoint | None = None
@@ -1295,6 +1300,16 @@ def _finalize_detail(product: dict, detail: dict, filters: dict) -> bool:
     payload["detail_scraped"] = 1
     payload["run_id"] = _RUN_ID
 
+    if filters:
+        none_flags = _active_filter_none_flags(payload, filters)
+        if none_flags:
+            with _stats_lock:
+                for field, is_none in none_flags.items():
+                    slot = _filter_field_probe.setdefault(field, {"none": 0, "total": 0})
+                    slot["total"] += 1
+                    if is_none:
+                        slot["none"] += 1
+
     if filters and not _check_detail_filters(payload, filters):
         _delete_sighting(
             product["asin"],
@@ -1789,6 +1804,8 @@ def _run_batch_leased_legacy(root_ids: list, lists: list, review_max: int,
     _stats["total_nodes"] = len(nodes)
     _stats["products_dup"] = 0
     _stats["done_nodes"] = 0
+    with _stats_lock:
+        _filter_field_probe.clear()
     with _seen_lock:
         _seen_asins.clear()
     try:
@@ -1957,6 +1974,8 @@ def run_batch(root_ids: list, lists: list, review_max: int,
     _stats["total_nodes"] = len(nodes)
     with _seen_lock:
         _seen_asins.clear()
+    with _stats_lock:
+        _filter_field_probe.clear()
     try:
         list_limit = int(list_limit)
     except (TypeError, ValueError):
@@ -2408,6 +2427,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
             _stats["products_found"], _stats["products_saved"],
             _stats["products_dup"], _stats["errors"],
         )
+        _warn_if_filter_field_collapsed()
         export_excel()
     finally:
         for thread in threads:
@@ -2425,6 +2445,54 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         if _checkpoint is not None:
             _checkpoint.close()
             _checkpoint = None
+
+
+# 达到多少样本才具备统计意义；样本太少（比如只测了 3 个商品）不足以判断
+# "字段解析坍缩"还是"恰好没有一个是 None"，避免小样本误报。
+_FIELD_PROBE_MIN_SAMPLES = 15
+# None 率超过这个比例才告警；正常数据也会有一定缺失（比如部分商品确实没有
+# "其他卖家"），只有接近/等于全 None 才是选择器过期的强信号。
+_FIELD_PROBE_NONE_RATE_ALARM = 0.8
+
+
+def _warn_if_filter_field_collapsed():
+    """探针：本轮跑完后检查是否有"启用了阈值的字段，几乎全部解析为 None"。
+
+    check_detail_filters 对 None 值和"真实不达标"一视同仁地判不通过，所以
+    一旦某个字段的选择器过期（比如 Amazon 改版 DOM），筛选结果会静默地异常
+    偏少甚至清零——不会报错，只会表现成"没有符合条件的商品"。这里主动把
+    每个启用维度的 None 率打出来，命中阈值就高亮成 WARNING，避免每次都要
+    靠人工用抓包脚本抽样才能发现。
+    """
+    with _stats_lock:
+        probe_snapshot = {k: dict(v) for k, v in _filter_field_probe.items()}
+        found = _stats.get("products_found", 0)
+        saved = _stats.get("products_saved", 0)
+
+    suspects = []
+    for field, counts in probe_snapshot.items():
+        total = counts["total"]
+        none_n = counts["none"]
+        if total < _FIELD_PROBE_MIN_SAMPLES:
+            continue
+        rate = none_n / total
+        if rate >= _FIELD_PROBE_NONE_RATE_ALARM:
+            suspects.append((field, none_n, total, rate))
+
+    if suspects:
+        for field, none_n, total, rate in sorted(suspects, key=lambda x: -x[3]):
+            _log.warning(
+                "[fetch_products] 疑似字段解析失效: %s 在本轮 %d 个已启用该维度筛选的详情页里 "
+                "%d 个 (%.0f%%) 解析为 None——大概率是选择器/正则过期，而不是商品真的不达标，"
+                "建议核对 detail_parser.py 对应字段的抓取逻辑",
+                field, total, none_n, rate * 100,
+            )
+    elif found > 0 and saved == 0:
+        _log.warning(
+            "[fetch_products] found=%d 但 saved=0，且未命中字段探针阈值（样本量不足 %d 或 None 率"
+            "低于 %.0f%%）——请人工核实一次抓取到的详情字段，不要默认视为\"确实没有商品达标\"",
+            found, _FIELD_PROBE_MIN_SAMPLES, _FIELD_PROBE_NONE_RATE_ALARM * 100,
+        )
 
 
 def export_excel():

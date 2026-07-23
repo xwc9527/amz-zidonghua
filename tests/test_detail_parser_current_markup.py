@@ -12,7 +12,7 @@ _range_check 会把 None 一律判定为不通过——导致组合条件抓取�
 """
 from __future__ import annotations
 
-from detail_parser import parse_detail_fields
+from detail_parser import active_filter_none_flags, parse_detail_fields
 
 
 def _wrap(inner: str) -> str:
@@ -148,3 +148,44 @@ def test_item_weight_parsed_from_voyager_ns_desktop_table():
     )
     d = parse_detail_fields(html, "US")
     assert d.get("item_weight") == "8 ounces"
+
+
+# ── active_filter_none_flags：运行期探针（区分"字段解析坍缩"与"真实不达标"）──
+
+def test_active_filter_none_flags_no_filters_returns_empty():
+    assert active_filter_none_flags({"variant_option_count": None}, {}) == {}
+
+
+def test_active_filter_none_flags_only_flags_enabled_dimensions():
+    detail = {"variant_option_count": None, "bsr_main_rank": 5000}
+    filters = {"variant_max": 3}
+    flags = active_filter_none_flags(detail, filters)
+    assert flags == {"variant_option_count": True}
+    # bsr_main 维度没启用阈值，不应该出现在返回值里
+    assert "bsr_main_rank" not in flags
+
+
+def test_active_filter_none_flags_false_when_value_present():
+    detail = {"variant_option_count": 5}
+    filters = {"variant_max": 3}
+    assert active_filter_none_flags(detail, filters) == {"variant_option_count": False}
+
+
+def test_active_filter_none_flags_dims_group_flags_together():
+    filters = {"dim_l": 10}
+    assert active_filter_none_flags({"dim_l_in": None, "dim_w_in": 5, "dim_h_in": 2}, filters) == {
+        "dim_l_in/dim_w_in/dim_h_in": True
+    }
+    assert active_filter_none_flags(
+        {"dim_l_in": 8, "dim_w_in": 5, "dim_h_in": 2}, filters
+    ) == {"dim_l_in/dim_w_in/dim_h_in": False}
+
+
+def test_active_filter_none_flags_fulfillment_and_country():
+    filters = {"fulfillment_type": "FBA", "country": "China"}
+    flags = active_filter_none_flags({}, filters)
+    assert flags == {"fulfillment_type": True, "country_of_origin": True}
+    flags2 = active_filter_none_flags(
+        {"fulfillment_type": "FBA", "country_of_origin": "China"}, filters
+    )
+    assert flags2 == {"fulfillment_type": False, "country_of_origin": False}

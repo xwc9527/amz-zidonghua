@@ -517,6 +517,48 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
     return d
 
 
+# 维度名 -> (min参数名, max参数名)；需与 check_detail_filters 里 _range_check 的调用逐一对应，
+# 用于运行期探针识别"启用了阈值但取值恒为 None"的字段（多半是选择器过期，而非真的不达标）。
+_RANGE_FILTER_FIELDS = (
+    ("bsr_main_rank", "bsr_main_min", "bsr_main_max"),
+    ("bsr_sub_rank", "bsr_sub_min", "bsr_sub_max"),
+    ("variant_option_count", "variant_min", "variant_max"),
+    ("other_sellers_count", "sellers_min", "sellers_max"),
+    ("social_proof_count", "social_proof_min", "social_proof_max"),
+    ("weight_lb", "weight_min", "weight_max"),
+    ("fba_fee", "fba_fee_min", "fba_fee_max"),
+)
+
+
+def active_filter_none_flags(detail: dict, filters: dict) -> dict[str, bool]:
+    """返回本次筛选里"已启用阈值/条件"的每个维度字段是否解析为 None。
+
+    只统计 filters 里真正配置了阈值的维度；未启用的维度不会出现在返回值里
+    （因为那些维度即使 None 也不影响筛选结果，不算异常信号）。
+    调用方可以据此按维度累计 None 率，用于探针告警：区分"字段解析坍缩为全
+    None"（选择器过期等 bug）与"样本恰好都不达标"（正常）。
+    """
+    flags: dict[str, bool] = {}
+    if not filters:
+        return flags
+    for field, fmin_key, fmax_key in _RANGE_FILTER_FIELDS:
+        fmin = filters.get(fmin_key, 0) or 0
+        fmax = filters.get(fmax_key, 0) or 0
+        if fmin or fmax:
+            flags[field] = detail.get(field) is None
+    if filters.get("dim_l") or filters.get("dim_w") or filters.get("dim_h"):
+        flags["dim_l_in/dim_w_in/dim_h_in"] = (
+            detail.get("dim_l_in") is None
+            or detail.get("dim_w_in") is None
+            or detail.get("dim_h_in") is None
+        )
+    if filters.get("fulfillment_type"):
+        flags["fulfillment_type"] = not detail.get("fulfillment_type")
+    if filters.get("country"):
+        flags["country_of_origin"] = not detail.get("country_of_origin")
+    return flags
+
+
 def check_detail_filters(detail: dict, filters: dict) -> bool:
     """检查详情页字段是否满足筛选条件。返回 True=通过，False=不符合。"""
     if not filters:
