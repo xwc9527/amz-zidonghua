@@ -1,6 +1,6 @@
-# 数据库（默认不入库；categories.db 含类目树，显式入库）
+# 数据库（不入库；均为本地运行期数据，非源码。categories.db 曾显式入库，
+# 现改为仅本地保留，不再进入 git 提交历史）
 data/*.db
-!data/categories.db
 data/*.db-wal
 data/*.db-shm
 data/backups/
