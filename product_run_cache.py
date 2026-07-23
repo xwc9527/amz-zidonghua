@@ -541,6 +541,57 @@ def update_detail(
             return cur.rowcount
 
 
+def update_details_batch(updates: Iterable[dict]) -> int:
+    """Apply heterogeneous detail updates in one connection/transaction."""
+    normalized = []
+    for item in updates:
+        asin = _validate_asin(item["asin"])
+        run_id = _validate_run_id(item["run_id"])
+        site = _validate_site(item["site"])
+        node_id = item.get("node_id")
+        list_type = item.get("list_type")
+        payload = {
+            k: v for k, v in dict(item.get("detail") or {}).items()
+            if k in DETAIL_UPDATE_COLS
+        }
+        if not payload:
+            continue
+        payload["detail_scraped"] = int(payload.get("detail_scraped") or 1)
+        payload["detail_status"] = payload.get("detail_status") or "ok"
+        payload["run_id"] = run_id
+        normalized.append(
+            (asin, run_id, site, node_id, list_type, payload)
+        )
+    if not normalized:
+        return 0
+
+    ensure_schema()
+    groups: dict[tuple, list[list]] = {}
+    for asin, run_id, site, node_id, list_type, payload in normalized:
+        columns = tuple(payload)
+        scoped = node_id is not None and list_type is not None
+        key = (columns, scoped)
+        values = list(payload.values()) + [asin, site, run_id]
+        if scoped:
+            values += [node_id, list_type]
+        groups.setdefault(key, []).append(values)
+
+    with _LOCK:
+        with _conn() as con:
+            for (columns, scoped), rows in groups.items():
+                sets = ", ".join(f"{column}=?" for column in columns)
+                where = "asin=? AND site=? AND run_id=?"
+                if scoped:
+                    where += " AND node_id=? AND list_type=?"
+                con.executemany(
+                    f"""UPDATE product_cache
+                           SET {sets}, updated_at=datetime('now')
+                         WHERE {where}""",
+                    rows,
+                )
+    return len(normalized)
+
+
 def mark_detail_failed(
     asin: str,
     *,
@@ -548,10 +599,11 @@ def mark_detail_failed(
     site: str,
     node_id: str | None = None,
     list_type: str | None = None,
+    status: str = "failed",
 ) -> int:
     return update_detail(
         asin,
-        {"detail_scraped": 2, "detail_status": "failed", "run_id": run_id},
+        {"detail_scraped": 2, "detail_status": status, "run_id": run_id},
         run_id=run_id,
         site=site,
         node_id=node_id,

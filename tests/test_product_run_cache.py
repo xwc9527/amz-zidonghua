@@ -77,6 +77,43 @@ class TestProductRunCache(unittest.TestCase):
         miss = self.rc.load_cached_detail("B000000002", run_id="RUN-OTHER", site="US")
         self.assertIsNone(miss)
 
+    def test_batch_detail_updates_are_atomic_and_scoped(self):
+        self.rc.create_generation("RUN-BATCH", "products")
+        self.rc.activate_generation("RUN-BATCH", "products")
+        self.rc.upsert_products(
+            [
+                {"asin": "B000000003", "node_id": "n1", "list_type": "bestsellers", "site": "US"},
+                {"asin": "B000000004", "node_id": "n2", "list_type": "new-releases", "site": "US"},
+            ],
+            run_id="RUN-BATCH",
+        )
+        written = self.rc.update_details_batch([
+            {
+                "asin": "B000000003",
+                "detail": {"bsr_main_rank": 7, "detail_scraped": 1},
+                "run_id": "RUN-BATCH",
+                "site": "US",
+                "node_id": "n1",
+                "list_type": "bestsellers",
+            },
+            {
+                "asin": "B000000004",
+                "detail": {"detail_scraped": 2, "detail_status": "failed"},
+                "run_id": "RUN-BATCH",
+                "site": "US",
+                "node_id": "n2",
+                "list_type": "new-releases",
+            },
+        ])
+        self.assertEqual(written, 2)
+        hit = self.rc.load_cached_detail(
+            "B000000003", run_id="RUN-BATCH", site="US",
+        )
+        self.assertEqual(hit["bsr_main_rank"], 7)
+        self.assertIsNone(self.rc.load_cached_detail(
+            "B000000004", run_id="RUN-BATCH", site="US",
+        ))
+
     def test_resume_mismatch(self):
         self.rc.create_generation("RUN-1", "products")
         self.rc.activate_generation("RUN-1", "products")

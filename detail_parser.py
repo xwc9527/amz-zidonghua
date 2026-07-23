@@ -196,7 +196,7 @@ def attach_normalized_dims(d: dict) -> dict:
 
 def parse_detail_fields(html: str, site: str = "US") -> dict:
     """从详情页 HTML 提取补全字段。site 用于 FBA 费率估算。"""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "lxml")
     d = {}
     site = (site or "US").upper()
 

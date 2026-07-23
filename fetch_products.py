@@ -4,6 +4,8 @@ fetch_products.py — 商品抓取脚本（独立进程）
 用法: python fetch_products.py
 """
 import sqlite3, threading, time, sys, os, re, json, argparse, logging, traceback, random, hashlib
+from concurrent.futures import ProcessPoolExecutor
+from queue import PriorityQueue, Queue
 from curl_cffi import requests as requests
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -15,8 +17,9 @@ from detail_parser import (
     extract_image_url,
 )
 from crawl_checkpoint import ProductsCheckpoint, canonical_signature
+from crawler_hotpath_experiment import AsyncBatchWriter
 from config import (
-    DATA_DIR, DB_FILE, PROXY_MIN_START_NODES, get_marketplace,
+    DATA_DIR, DB_FILE, PROXY_MIN_START_NODES, PROXY_VERIFY, get_marketplace,
     assert_testing_paths_safe, use_run_cache,
 )
 from proxy_daemon import touch_crawl_activity
@@ -79,6 +82,26 @@ DEFAULT_PRICE_MIN     = 0.0
 DEFAULT_PRICE_MAX     = 0.0
 DEFAULT_DELAY         = 2.0   # 请求间隔（秒）
 DEFAULT_LISTS         = ["new-releases", "bestsellers", "most-wished-for", "most-gifted"]
+PRODUCT_STREAMS_PER_PROXY = max(1, int(os.getenv("PRODUCT_STREAMS_PER_PROXY", "3")))
+PRODUCT_TASK_MAX_ATTEMPTS = max(1, int(os.getenv("PRODUCT_TASK_MAX_ATTEMPTS", "3")))
+PRODUCT_PARSE_WORKERS = max(1, int(os.getenv("PRODUCT_PARSE_WORKERS", "3")))
+PRODUCT_PARSE_MAX_PENDING = max(
+    PRODUCT_PARSE_WORKERS,
+    int(os.getenv("PRODUCT_PARSE_MAX_PENDING", str(PRODUCT_PARSE_WORKERS * 4))),
+)
+PRODUCT_DETAIL_WRITE_BATCH_SIZE = max(
+    1, int(os.getenv("PRODUCT_DETAIL_WRITE_BATCH_SIZE", "100")),
+)
+PRODUCT_DETAIL_WRITE_FLUSH_SEC = max(
+    0.05, float(os.getenv("PRODUCT_DETAIL_WRITE_FLUSH_SEC", "0.25")),
+)
+PRODUCT_LANE_CAPTCHA_MIN_SAMPLES = max(
+    1, int(os.getenv("PRODUCT_LANE_CAPTCHA_MIN_SAMPLES", "10")),
+)
+PRODUCT_LANE_CAPTCHA_PAUSE_RATE = max(
+    0.0, min(1.0, float(os.getenv("PRODUCT_LANE_CAPTCHA_PAUSE_RATE", "0.5"))),
+)
+PRODUCT_MOPUP_MAX_ATTEMPTS = max(1, int(os.getenv("PRODUCT_MOPUP_MAX_ATTEMPTS", "3")))
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -108,6 +131,7 @@ from proxy_session import (
 )
 from proxy_worker import (
     AttemptAuditor,
+    FetchOutcome,
     WorkerProxyClient as SharedWorkerProxyClient,
     has_us_currency_mismatch,
     is_captcha_page,
@@ -148,6 +172,40 @@ _stats_lock = threading.Lock()
 _seen_asins = set()
 _seen_lock = threading.Lock()
 _checkpoint: ProductsCheckpoint | None = None
+_detail_parse_pipeline = None
+_detail_writer = None
+
+
+class BoundedDetailParsePipeline:
+    """Process detail HTML with bounded submitted-but-unfinished work."""
+
+    def __init__(self, workers: int, max_pending: int):
+        if workers < 1 or max_pending < workers:
+            raise ValueError("workers must be >=1 and max_pending must be >= workers")
+        self._executor = ProcessPoolExecutor(max_workers=workers)
+        self._slots = threading.BoundedSemaphore(max_pending)
+        self._closed = False
+        self._state_lock = threading.Lock()
+
+    def submit(self, html: str, site: str):
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("detail parse pipeline is closed")
+        self._slots.acquire()
+        try:
+            future = self._executor.submit(_parse_detail_fields_shared, html, site)
+        except BaseException:
+            self._slots.release()
+            raise
+        future.add_done_callback(lambda _future: self._slots.release())
+        return future
+
+    def shutdown(self, *, wait: bool = True, cancel_futures: bool = False):
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 # ── 代理池（强制代理 + 独立出口轮换，与最新到货共用 Worker）────────
 
@@ -214,6 +272,89 @@ class WorkerProxyClient(SharedWorkerProxyClient):
             is_currency_mismatch=_has_marketplace_currency_mismatch,
             verify_exit=verify_exit,
         )
+
+
+class FixedProxyClient:
+    """One long-lived Session pinned to one proxy; never acquires a lease."""
+
+    def __init__(
+        self, pool: ProxyPool, proxy_entry: dict, worker_id: int,
+        auditor: AttemptAuditor | None = None,
+        on_result: "Callable[[FetchOutcome], None] | None" = None,
+    ):
+        self.pool = pool
+        self.entry = dict(proxy_entry)
+        self.worker_id = worker_id
+        self.session = _make_session(worker_id, self.entry)
+        self.auditor = auditor or AttemptAuditor(_AUDIT_PATH, _RUN_ID)
+        self.on_result = on_result
+        self.proxy_key = str(
+            self.entry.get("exit_ip")
+            or self.entry.get("node_key")
+            or self.entry.get("proxy")
+            or f"worker-{worker_id}"
+        )
+
+    def get(self, url: str, *, phase: str, item_id: str, referer: str = "") -> FetchOutcome:
+        started = time.monotonic()
+        status_code = None
+        html = None
+        reason = ""
+        ok = False
+        try:
+            self.pool.wait_if_target_paused()
+            headers = {"Referer": referer} if referer else None
+            response = self.session.get(
+                url, headers=headers, timeout=18, verify=PROXY_VERIFY,
+            )
+            status_code = int(response.status_code)
+            html = response.text or ""
+            if status_code != 200:
+                reason = f"HTTP_{status_code}"
+            elif is_captcha_page(html):
+                reason = "CAPTCHA"
+            elif _has_marketplace_currency_mismatch(html):
+                reason = "CURRENCY_MISMATCH"
+            else:
+                ok = True
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        result = "SUCCESS" if ok else "FAILED"
+        self.auditor.write(
+            phase=phase,
+            item_id=item_id,
+            worker=self.worker_id,
+            attempt=1,
+            result=result,
+            reason=reason,
+            status_code=status_code,
+            exit_ips=[self.proxy_key],
+            elapsed_ms=elapsed_ms,
+            rotated=False,
+            fixed_proxy=True,
+        )
+        outcome = FetchOutcome(
+            ok=ok,
+            html=html if ok else None,
+            error_code="" if ok else "FIXED_PROXY_REQUEST_FAILED",
+            final_reason=reason,
+            status_code=status_code,
+            attempts=1,
+            exit_ips=[self.proxy_key],
+            reasons=[] if ok else [reason],
+            elapsed_ms=elapsed_ms,
+        )
+        if self.on_result is not None:
+            self.on_result(outcome)
+        return outcome
+
+    def close(self):
+        try:
+            self.session.close()
+        except Exception:
+            pass
 
 
 def _update_pool_stats(pool: ProxyPool):
@@ -998,11 +1139,13 @@ def _finalize_detail(product: dict, detail: dict, filters: dict) -> bool:
 
 
 def enrich_with_details(products: list, client: WorkerProxyClient,
-                        delay: float, filters: dict = None) -> int:
+                        delay: float, filters: dict = None,
+                        terminal_asins: set | None = None) -> int:
     """对列表页抓到的商品逐个请求详情页，补全字段并 UPDATE 到数据库。
     不符合筛选条件的商品从数据库删除（仅当前榜单归属）。
     已有成功详情时复用并重跑当前筛选，避免漏填新归属行或沿用旧筛选结果。
-    返回详情抓取失败（非"筛选剔除"）的商品数，供调用方将节点标为 error。"""
+    返回详情抓取失败（非"筛选剔除"、非HTTP 404永久不存在）的商品数，供调用方将节点标为 error。
+    HTTP 404 视为商品永久不存在的终态：单独写入 terminal_asins（若提供），不计入失败数、不参与跨IP重试。"""
     if not products:
         return 0
     if filters is None:
@@ -1021,12 +1164,25 @@ def enrich_with_details(products: list, client: WorkerProxyClient,
             outcome = client.get(url, phase="DETAIL", item_id=asin, referer=referer)
             raise_if_pool_below_minimum(outcome)
             if not outcome.ok or outcome.status_code != 200:
-                _mark_detail_failed(
-                    asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
-                )
-                fetch_failures += 1
+                if outcome.status_code == 404:
+                    _mark_detail_failed(
+                        asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+                        status="not_found",
+                    )
+                    if terminal_asins is not None:
+                        terminal_asins.add(asin)
+                else:
+                    _mark_detail_failed(
+                        asin, node_id=p.get("node_id"), list_type=p.get("list_type"),
+                    )
+                    fetch_failures += 1
                 continue
-            detail = parse_detail_fields(outcome.html or "")
+            if _detail_parse_pipeline is None:
+                detail = parse_detail_fields(outcome.html or "")
+            else:
+                detail = _detail_parse_pipeline.submit(
+                    outcome.html or "", _SITE,
+                ).result()
             if not detail:
                 # HTTP 200 但解析为空（验证码/结构变化）必须计入失败
                 _mark_detail_failed(
@@ -1092,11 +1248,24 @@ def _delete_sighting(asin: str, node_id: str = None, list_type: str = None):
                 conn.close()
 
 
-def _mark_detail_failed(asin: str, node_id: str = None, list_type: str = None):
-    """详情抓取失败：当前归属行 detail_scraped=2，并写入本次 run_id。"""
+def _mark_detail_failed(
+    asin: str, node_id: str = None, list_type: str = None, status: str = "failed",
+):
+    """详情抓取失败：当前归属行 detail_scraped=2，并写入本次 run_id。
+    status="not_found" 表示 HTTP 404（商品永久不存在），与代理/CAPTCHA导致的
+    可重试失败("failed")分开记录；legacy 原始SQL分支无 detail_status 列，不做区分。"""
+    if _detail_writer is not None:
+        _detail_writer.submit_many([{
+            "kind": status,
+            "asin": asin,
+            "node_id": node_id,
+            "list_type": list_type,
+        }])
+        return
     if use_run_cache():
         run_cache.mark_detail_failed(
             asin, run_id=_RUN_ID, site=_SITE, node_id=node_id, list_type=list_type,
+            status=status,
         )
         return
     with _db_lock:
@@ -1138,6 +1307,15 @@ def _update_sighting_detail(asin: str, detail: dict,
     """更新详情：优先写当前归属行；否则回退 asin+site。"""
     detail = dict(detail)
     detail.setdefault("run_id", _RUN_ID)
+    if _detail_writer is not None:
+        _detail_writer.submit_many([{
+            "kind": "success",
+            "asin": asin,
+            "detail": detail,
+            "node_id": node_id,
+            "list_type": list_type,
+        }])
+        return
     if use_run_cache():
         run_cache.update_detail(
             asin, detail, run_id=_RUN_ID, site=_SITE,
@@ -1182,6 +1360,76 @@ def _update_sighting_detail(asin: str, detail: dict,
                 conn.close()
 
 
+def _write_detail_batch(events: list[dict]) -> int:
+    """Durability boundary for the single detail writer."""
+    if use_run_cache():
+        updates = []
+        for event in events:
+            detail = dict(event.get("detail") or {})
+            if event["kind"] in ("failed", "not_found"):
+                detail = {
+                    "detail_scraped": 2,
+                    "detail_status": event["kind"],
+                    "run_id": _RUN_ID,
+                }
+            updates.append({
+                "asin": event["asin"],
+                "detail": detail,
+                "run_id": _RUN_ID,
+                "site": _SITE,
+                "node_id": event.get("node_id"),
+                "list_type": event.get("list_type"),
+            })
+        return run_cache.update_details_batch(updates)
+
+    groups: dict[tuple, list[list]] = {}
+    for event in events:
+        if event["kind"] in ("failed", "not_found"):
+            detail = {"detail_scraped": 2, "run_id": _RUN_ID}
+        else:
+            detail = dict(event.get("detail") or {})
+            detail.setdefault("run_id", _RUN_ID)
+        columns = tuple(detail)
+        scoped = (
+            event.get("node_id") is not None
+            and event.get("list_type") is not None
+        )
+        values = list(detail.values()) + [event["asin"], _SITE]
+        if scoped:
+            values += [event["node_id"], event["list_type"]]
+        groups.setdefault((columns, scoped), []).append(values)
+
+    with _db_lock:
+        if DB_BACKEND == "pg":
+            conn = _get_pg()
+            with conn.cursor() as cur:
+                for (columns, scoped), rows in groups.items():
+                    sets = ", ".join(f"{column}=%s" for column in columns)
+                    where = "asin=%s AND site=%s"
+                    if scoped:
+                        where += " AND node_id=%s AND list_type=%s"
+                    cur.executemany(
+                        f"UPDATE product_sightings SET {sets} WHERE {where}",
+                        rows,
+                    )
+        else:
+            conn = db_conn()
+            try:
+                for (columns, scoped), rows in groups.items():
+                    sets = ", ".join(f"{column}=?" for column in columns)
+                    where = "asin=? AND site=?"
+                    if scoped:
+                        where += " AND node_id=? AND list_type=?"
+                    conn.executemany(
+                        f"UPDATE product_sightings SET {sets} WHERE {where}",
+                        rows,
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+    return len(events)
+
+
 # ── Worker 主循环 ───────────────────────────────────────────────────
 
 def process_node(node: dict, lists: list, review_max: int,
@@ -1191,7 +1439,9 @@ def process_node(node: dict, lists: list, review_max: int,
                  rating_min: float = 0.0, rating_max: float = 0.0,
                  max_pages: int = 2, delay: float = 2.0,
                  detail_filters: dict = None,
-                 list_limit: int = 0) -> tuple[str, str, int, int]:
+                 list_limit: int = 0,
+                 detail_submit=None,
+                 count_completion: bool = True) -> tuple[str, str, int, int]:
     """处理单个节点的所有榜单。返回 (status, error_code, products_found, attempts)。"""
     node_id = node["node_id"]
     slug    = extract_slug(node["url"])
@@ -1297,6 +1547,9 @@ def process_node(node: dict, lists: list, review_max: int,
             saved = save_products(all_products)
             with _stats_lock:
                 _stats["products_saved"] += saved
+            if detail_submit is not None:
+                detail_submit(all_products)
+                continue
             detail_failures = enrich_with_details(all_products, client, delay, detail_filters)
             if detail_failures:
                 with _stats_lock:
@@ -1311,14 +1564,15 @@ def process_node(node: dict, lists: list, review_max: int,
                         node_id, list_type, detail_failures, len(all_products),
                     )
 
-    with _stats_lock:
-        _stats["done_nodes"] += 1
+    if count_completion:
+        with _stats_lock:
+            _stats["done_nodes"] += 1
     if node_error:
         return ("error", node_error, node_found, node_attempts)
     return ("done", "", node_found, node_attempts)
 
 
-def run_batch(root_ids: list, lists: list, review_max: int,
+def _run_batch_leased_legacy(root_ids: list, lists: list, review_max: int,
               min_list_size: int, delay: float = 2.0,
               price_min: float = 0.0, price_max: float = 0.0,
               review_min: int = 0,
@@ -1478,6 +1732,505 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         export_excel()
     finally:
         client.close()
+        if _checkpoint is not None:
+            _checkpoint.close()
+            _checkpoint = None
+
+
+def run_batch(root_ids: list, lists: list, review_max: int,
+              min_list_size: int, delay: float = 2.0,
+              price_min: float = 0.0, price_max: float = 0.0,
+              review_min: int = 0,
+              rating_min: float = 0.0, rating_max: float = 0.0,
+              max_pages: int = 2,
+              slugs: list = None,
+              detail_filters: dict = None,
+              list_limit: int = 0,
+              include_descendants: bool = True,
+              resume: bool = True,
+              depths: list[int] = None):
+    """Fixed-proxy producer/consumer scheduler with bounded cross-IP retries."""
+    global _checkpoint, _detail_parse_pipeline, _detail_writer
+    if depths:
+        nodes = get_nodes_by_depth(depths, site=_SITE)
+    elif slugs:
+        nodes = get_nodes_by_slugs(slugs, lists, site=_SITE)
+    else:
+        nodes = get_descendant_nodes(
+            root_ids, lists, site=_SITE, include_descendants=include_descendants
+        )
+
+    for key in _stats:
+        if key not in ("pool_usable", "pool_cooling", "pool_disabled"):
+            _stats[key] = 0
+    _stats["total_nodes"] = len(nodes)
+    with _seen_lock:
+        _seen_asins.clear()
+    try:
+        list_limit = int(list_limit)
+    except (TypeError, ValueError):
+        list_limit = 0
+    list_limit = max(0, min(list_limit, 100))
+    max_pages = max(1, min(int(max_pages), 2))
+    if not nodes:
+        _log.warning("[fetch_products] no target nodes")
+        return
+
+    try:
+        pool = ProxyPool()
+    except ProxyRequiredError as exc:
+        _log.error("[fetch_products] proxy pool unavailable: %s %s", exc.code, exc)
+        raise SystemExit(2) from exc
+    proxy_entries = pool.usable_entries_snapshot()
+    if len(proxy_entries) < PROXY_MIN_START_NODES:
+        _log.error(
+            "[proxy] start refused: usable=%d minimum=%d",
+            len(proxy_entries), PROXY_MIN_START_NODES,
+        )
+        pool.stop_live_reload()
+        raise SystemExit(2)
+    touch_crawl_activity(active=True, source="fetch_products")
+
+    checkpoint_config = {
+        "site": _SITE,
+        "db_backend": DB_BACKEND,
+        "roots": sorted(root_ids or []),
+        "depths": sorted(depths or []),
+        "slugs": sorted(slugs or []),
+        "lists": sorted(lists or []),
+        "exact_roots": not include_descendants,
+        "max_pages": max_pages,
+        "list_limit": list_limit,
+        "review_max": review_max,
+        "review_min": review_min,
+        "min_list_size": min_list_size,
+        "price_min": price_min,
+        "price_max": price_max,
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "detail_filters": detail_filters or {},
+        "node_count": len(nodes),
+        "node_ids_sha256": hashlib.sha256(
+            "\n".join(sorted(str(n["node_id"]) for n in nodes)).encode("utf-8")
+        ).hexdigest(),
+        "scheduler": "fixed_proxy_queue_v1",
+        "streams_per_proxy": PRODUCT_STREAMS_PER_PROXY,
+    }
+    signature = canonical_signature(checkpoint_config)
+    _checkpoint = ProductsCheckpoint(signature, checkpoint_config, resume=resume)
+    done_nodes = _checkpoint.done_ids()
+    remaining = [node for node in nodes if str(node["node_id"]) not in done_nodes]
+    _stats["done_nodes"] = len(done_nodes)
+    _update_pool_stats(pool)
+
+    task_q = PriorityQueue()
+    state_lock = threading.RLock()
+    enqueue_seq = [0]
+    finalized_nodes = set(done_nodes)
+    worker_failures = []
+    shared_auditor = AttemptAuditor(_AUDIT_PATH, _RUN_ID)
+    lane_stats: dict[str, dict] = {}
+    mainphase_failed_details: list[dict] = []
+    t0 = time.time()
+
+    def entry_key(entry):
+        return str(
+            entry.get("exit_ip")
+            or entry.get("node_key")
+            or entry.get("proxy")
+            or ""
+        )
+
+    def _record_lane_result(key, outcome):
+        with state_lock:
+            st = lane_stats.setdefault(key, {"total": 0, "captcha": 0, "paused": False})
+            st["total"] += 1
+            if outcome.final_reason == "CAPTCHA":
+                st["captcha"] += 1
+            if (
+                not st["paused"]
+                and st["total"] >= PRODUCT_LANE_CAPTCHA_MIN_SAMPLES
+                and st["captcha"] / st["total"] >= PRODUCT_LANE_CAPTCHA_PAUSE_RATE
+            ):
+                st["paused"] = True
+                _log.warning(
+                    "[fetch_products] lane %s paused: captcha=%d/%d (rate=%.0f%%)",
+                    key, st["captcha"], st["total"], 100 * st["captcha"] / st["total"],
+                )
+
+    def enqueue_task(task):
+        with state_lock:
+            enqueue_seq[0] += 1
+            sequence = enqueue_seq[0]
+        if task is None:
+            priority = 2
+        else:
+            priority = 0 if task["kind"] == "detail" else 1
+        task_q.put((priority, sequence, task))
+
+    for node in remaining:
+        enqueue_task({
+            "kind": "node",
+            "node": node,
+            "attempt": 1,
+            "used_proxies": set(),
+            "http_attempts": 0,
+        })
+
+    def finalize_group(group):
+        with state_lock:
+            if group["dispatch_open"] or group["pending_details"] > 0:
+                return
+            node = group["node"]
+            node_id = str(node["node_id"])
+            if node_id in finalized_nodes:
+                return
+
+            if group["detail_errors"]:
+                status = "error"
+                error_code = f"DETAIL_FETCH_FAILED:{group['detail_errors']}"
+            elif group["list_status"] != "done":
+                if group["node_attempt"] < PRODUCT_TASK_MAX_ATTEMPTS:
+                    enqueue_task({
+                        "kind": "node",
+                        "node": node,
+                        "attempt": group["node_attempt"] + 1,
+                        "used_proxies": set(group["used_proxies"]),
+                        "http_attempts": group["http_attempts"],
+                    })
+                    return
+                status = "error"
+                error_code = group["list_error"] or "LIST_FETCH_FAILED"
+            else:
+                status = "done"
+                error_code = ""
+
+            finalized_nodes.add(node_id)
+            _checkpoint.save_node(
+                node_id,
+                status=status,
+                error_code=error_code,
+                products_found=group["products_found"],
+                attempts=group["http_attempts"] + group["detail_attempts"],
+            )
+            with _stats_lock:
+                _stats["done_nodes"] += 1
+                completed = _stats["done_nodes"]
+                total = _stats["total_nodes"]
+            if completed % 10 == 0 or completed == total:
+                elapsed_now = time.time() - t0
+                rate = completed / elapsed_now if elapsed_now > 0 else 0
+                _log.info(
+                    "  [%d/%d] %.1f nodes/s found:%d saved:%d skipped:%d",
+                    completed, total, rate, _stats["products_found"],
+                    _stats["products_saved"], _stats["skipped"],
+                )
+
+    def worker_main(entry, worker_id):
+        key = entry_key(entry)
+        client = FixedProxyClient(
+            pool, entry, worker_id, auditor=shared_auditor,
+            on_result=lambda outcome: _record_lane_result(key, outcome),
+        )
+        try:
+            while True:
+                _priority, _sequence, task = task_q.get()
+                try:
+                    if task is None:
+                        return
+                    if lane_stats.get(key, {}).get("paused"):
+                        enqueue_task(task)
+                        return
+                    used = set(task.get("used_proxies") or ())
+                    if key in used and len(used) < len(proxy_entries):
+                        enqueue_task(task)
+                        time.sleep(0.001)
+                        continue
+
+                    if task["kind"] == "node":
+                        group = {
+                            "node": task["node"],
+                            "node_attempt": task["attempt"],
+                            "used_proxies": used | {key},
+                            "http_attempts": task.get("http_attempts", 0),
+                            "detail_attempts": 0,
+                            "products_found": 0,
+                            "pending_details": 0,
+                            "detail_errors": 0,
+                            "list_status": "error",
+                            "list_error": "",
+                            "dispatch_open": True,
+                        }
+
+                        def submit_details(products):
+                            for product in products:
+                                with state_lock:
+                                    group["pending_details"] += 1
+                                enqueue_task({
+                                    "kind": "detail",
+                                    "product": product,
+                                    "group": group,
+                                    "attempt": 1,
+                                    "used_proxies": set(),
+                                })
+
+                        try:
+                            status, err_code, found, attempts = process_node(
+                                task["node"], lists, review_max, min_list_size,
+                                client, price_min, price_max, review_min,
+                                rating_min, rating_max, max_pages, delay,
+                                detail_filters, list_limit,
+                                detail_submit=submit_details,
+                                count_completion=False,
+                            )
+                            group["list_status"] = status
+                            group["list_error"] = err_code
+                            group["products_found"] = found
+                            group["http_attempts"] += attempts
+                        except BaseException as exc:
+                            group["list_error"] = f"{type(exc).__name__}: {exc}"
+                            with state_lock:
+                                worker_failures.append(
+                                    (worker_id, "node", repr(exc))
+                                )
+                        finally:
+                            with state_lock:
+                                group["dispatch_open"] = False
+                            finalize_group(group)
+                    else:
+                        group = task["group"]
+                        failure = 1
+                        terminal_asins: set = set()
+                        try:
+                            failure = enrich_with_details(
+                                [task["product"]], client, delay, detail_filters,
+                                terminal_asins=terminal_asins,
+                            )
+                        except BaseException as exc:
+                            with state_lock:
+                                worker_failures.append(
+                                    (worker_id, "detail", repr(exc))
+                                )
+                        with state_lock:
+                            group["detail_attempts"] += 1
+                        if task["product"]["asin"] in terminal_asins:
+                            # HTTP 404：商品永久不存在，不重试、不计入失败队列
+                            with state_lock:
+                                group["pending_details"] -= 1
+                            finalize_group(group)
+                        elif failure and task["attempt"] < PRODUCT_TASK_MAX_ATTEMPTS:
+                            enqueue_task({
+                                "kind": "detail",
+                                "product": task["product"],
+                                "group": group,
+                                "attempt": task["attempt"] + 1,
+                                "used_proxies": used | {key},
+                            })
+                        else:
+                            with state_lock:
+                                group["pending_details"] -= 1
+                                if failure:
+                                    group["detail_errors"] += 1
+                                    mainphase_failed_details.append({
+                                        "product": task["product"], "group": group,
+                                    })
+                            finalize_group(group)
+                finally:
+                    task_q.task_done()
+        finally:
+            client.close()
+
+    def _run_mopup_pass():
+        """主阶段结束后，用本轮实测健康的lane对 mainphase_failed_details 做一轮独立收尾补跑。
+        成功或补跑中命中404的item会把对应group的detail_errors减到0；
+        减到0的node重新写checkpoint为done（save_node是upsert，覆盖主阶段写入的error安全）。
+        补跑仍失败的item保持原状——node维持error，checkpoint仍会在末尾拒绝complete。"""
+        if not mainphase_failed_details:
+            return
+        healthy_entries = [
+            e for e in proxy_entries
+            if not lane_stats.get(entry_key(e), {}).get("paused")
+        ]
+        if not healthy_entries:
+            _log.error(
+                "[fetch_products] mopup skipped: no healthy lane left "
+                "(%d failed details remain unresolved)",
+                len(mainphase_failed_details),
+            )
+            return
+        mopup_budget = min(PRODUCT_MOPUP_MAX_ATTEMPTS, len(healthy_entries))
+        mopup_q: Queue = Queue()
+        final_failed_details: list[dict] = []
+        recovered_node_ids: set[str] = set()
+
+        for item in mainphase_failed_details:
+            mopup_q.put({
+                "product": item["product"], "group": item["group"],
+                "attempt": 1, "used_proxies": set(),
+            })
+
+        def mopup_worker_main(entry, worker_id):
+            key = entry_key(entry)
+            client = FixedProxyClient(
+                pool, entry, worker_id, auditor=shared_auditor,
+                on_result=lambda outcome: _record_lane_result(key, outcome),
+            )
+            try:
+                while True:
+                    item = mopup_q.get()
+                    try:
+                        if item is None:
+                            return
+                        used = set(item.get("used_proxies") or ())
+                        if key in used and len(used) < len(healthy_entries):
+                            mopup_q.put(item)
+                            time.sleep(0.001)
+                            continue
+                        group = item["group"]
+                        terminal_asins: set = set()
+                        failure = 1
+                        try:
+                            failure = enrich_with_details(
+                                [item["product"]], client, delay, detail_filters,
+                                terminal_asins=terminal_asins,
+                            )
+                        except BaseException as exc:
+                            with state_lock:
+                                worker_failures.append(
+                                    (worker_id, "mopup", repr(exc))
+                                )
+                        asin = item["product"]["asin"]
+                        if asin in terminal_asins or not failure:
+                            with state_lock:
+                                group["detail_errors"] -= 1
+                                recovered_node_ids.add(str(group["node"]["node_id"]))
+                        elif item["attempt"] < mopup_budget:
+                            mopup_q.put({
+                                "product": item["product"], "group": group,
+                                "attempt": item["attempt"] + 1,
+                                "used_proxies": used | {key},
+                            })
+                        else:
+                            with state_lock:
+                                final_failed_details.append(item)
+                    finally:
+                        mopup_q.task_done()
+            finally:
+                client.close()
+
+        mopup_threads = []
+        for lane_idx, entry in enumerate(healthy_entries):
+            for stream_idx in range(PRODUCT_STREAMS_PER_PROXY):
+                worker_id = 100000 + lane_idx * PRODUCT_STREAMS_PER_PROXY + stream_idx
+                thread = threading.Thread(
+                    target=mopup_worker_main, args=(entry, worker_id), daemon=True,
+                )
+                thread.start()
+                mopup_threads.append(thread)
+        mopup_q.join()
+        for _ in mopup_threads:
+            mopup_q.put(None)
+        for thread in mopup_threads:
+            thread.join()
+
+        affected_groups = {
+            str(item["group"]["node"]["node_id"]): item["group"]
+            for item in mainphase_failed_details
+        }
+        reconciled = 0
+        for node_id, group in affected_groups.items():
+            if group["detail_errors"] == 0:
+                _checkpoint.save_node(
+                    node_id, status="done", error_code="",
+                    products_found=group["products_found"],
+                    attempts=group["http_attempts"] + group["detail_attempts"],
+                )
+                reconciled += 1
+        _log.info(
+            "[fetch_products] mopup done: healthy_lanes=%d budget=%d "
+            "items=%d recovered=%d still_failed=%d nodes_reconciled=%d",
+            len(healthy_entries), mopup_budget, len(mainphase_failed_details),
+            len(mainphase_failed_details) - len(final_failed_details),
+            len(final_failed_details), reconciled,
+        )
+
+    worker_count = len(proxy_entries) * PRODUCT_STREAMS_PER_PROXY
+    threads = []
+    _detail_parse_pipeline = BoundedDetailParsePipeline(
+        PRODUCT_PARSE_WORKERS, PRODUCT_PARSE_MAX_PENDING,
+    )
+    _detail_writer = AsyncBatchWriter(
+        _write_detail_batch,
+        batch_size=PRODUCT_DETAIL_WRITE_BATCH_SIZE,
+        flush_interval=PRODUCT_DETAIL_WRITE_FLUSH_SEC,
+        max_pending_batches=32,
+    )
+    try:
+        _checkpoint.set_phase("LIST_DETAIL_QUEUE")
+        _log.info(
+            "[fetch_products] fixed queue: %d proxies x %d streams = %d workers; "
+            "detail parsers=%d pending=%d",
+            len(proxy_entries), PRODUCT_STREAMS_PER_PROXY, worker_count,
+            PRODUCT_PARSE_WORKERS, PRODUCT_PARSE_MAX_PENDING,
+        )
+        for worker_id in range(worker_count):
+            entry = proxy_entries[worker_id // PRODUCT_STREAMS_PER_PROXY]
+            thread = threading.Thread(
+                target=worker_main, args=(entry, worker_id), daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+        task_q.join()
+        for _ in threads:
+            enqueue_task(None)
+        for thread in threads:
+            thread.join()
+
+        _run_mopup_pass()
+
+        _detail_writer.close()
+        _detail_writer = None
+
+        pending = [
+            str(node["node_id"]) for node in nodes
+            if str(node["node_id"]) not in _checkpoint.done_ids()
+        ]
+        if worker_failures:
+            _checkpoint.set_phase("WORKER_FAILURE")
+            raise RuntimeError(
+                f"{len(worker_failures)} worker exception(s); checkpoint retained"
+            )
+        if pending:
+            _checkpoint.set_phase("RETRY_PENDING")
+            _log.error(
+                "[fetch_products] incomplete: %d nodes remain in checkpoint",
+                len(pending),
+            )
+            raise SystemExit(4)
+
+        _checkpoint.complete()
+        elapsed = time.time() - t0
+        _log.info(
+            "[fetch_products] complete elapsed=%.0fs nodes=%d/%d "
+            "found=%d saved=%d duplicates=%d errors=%d",
+            elapsed, _stats["done_nodes"], _stats["total_nodes"],
+            _stats["products_found"], _stats["products_saved"],
+            _stats["products_dup"], _stats["errors"],
+        )
+        export_excel()
+    finally:
+        for thread in threads:
+            if thread.is_alive():
+                enqueue_task(None)
+        for thread in threads:
+            thread.join(timeout=2)
+        if _detail_parse_pipeline is not None:
+            _detail_parse_pipeline.shutdown(wait=True, cancel_futures=False)
+            _detail_parse_pipeline = None
+        if _detail_writer is not None:
+            _detail_writer.close()
+            _detail_writer = None
+        pool.stop_live_reload()
         if _checkpoint is not None:
             _checkpoint.close()
             _checkpoint = None
