@@ -321,7 +321,9 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
         "#detailBullets_feature_div li, "
         "#productDetails_techSpec_section_1 tr, "
         "#productDetails_detailBullets_sections1 tr, "
-        "#prodDetails tr"
+        "#prodDetails tr, "
+        "#topHighlight tr, "
+        "table.voyager-ns-desktop-table tr"
     )
     for row in detail_rows:
         text = row.get_text(" ", strip=True)
@@ -433,13 +435,34 @@ def parse_detail_fields(html: str, site: str = "US") -> dict:
             if val:
                 d["country_of_origin"] = val
 
-    variants = soup.select("#twister_feature_div li[data-defaultasin]")
-    if variants:
-        d["variant_option_count"] = len(variants)
+    # Amazon 已把 twister 换成新标记（data-asin 取代旧的 data-defaultasin，
+    # 部分页面容器也换成了 #twister-plus-inline-twister），按 data-asin 去重计数。
+    variant_container = soup.select_one("#twister_feature_div, #twister-plus-inline-twister")
+    if variant_container:
+        variant_asins = {
+            li.get("data-asin") or li.get("data-defaultasin")
+            for li in variant_container.select("li[data-asin], li[data-defaultasin]")
+            if li.get("data-asin") or li.get("data-defaultasin")
+        }
+        if variant_asins:
+            d["variant_option_count"] = len(variant_asins)
 
-    olp = soup.select_one("#olp_feature_div, #aod-offer-list")
-    if olp:
-        om = re.search(r"(\d+)\s+(?:new|neu|nouveau)", olp.get_text(), re.I)
+    # #olp_feature_div/#aod-offer-list 现在多为 JS 异步渲染的空壳（"All Offers
+    # Display" 弹窗占位，SSR HTML 里没有文本）；实际展示的"其他卖家"文案在同级的
+    # #olpLinkWidget_feature_div 里。按优先级依次尝试，取第一个有文本的容器。
+    olp_text = ""
+    for sel in ("#olpLinkWidget_feature_div", "#olp_feature_div", "#aod-offer-list"):
+        el = soup.select_one(sel)
+        if el:
+            txt = el.get_text(" ", strip=True)
+            if txt:
+                olp_text = txt
+                break
+    if olp_text:
+        # 新格式："New (22) from $39.00"；旧格式兜底："22 new from $39.00"
+        om = re.search(r"(?:new|neu|nouveau)\w*\s*\((\d+)\)", olp_text, re.I)
+        if not om:
+            om = re.search(r"(\d+)\s+(?:new|neu|nouveau)", olp_text, re.I)
         if om:
             d["other_sellers_count"] = int(om.group(1))
 
