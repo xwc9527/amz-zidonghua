@@ -661,13 +661,39 @@ def _get_nodes_by_slugs_pg(slugs):
 
 
 def extract_slug(url: str) -> str:
-    """从类目 URL 提取 slug。"""
-    parts = url.rstrip("/").split("/")
-    try:
-        gp_idx = parts.index("gp")
-        return parts[gp_idx + 2]
-    except (ValueError, IndexError):
-        return ""
+    """从类目 URL 提取 chart slug。
+
+    兼容两套亚马逊榜单路径：
+    - 旧/通用：/gp/{list}/{slug}/...
+    - 新 SEO：/zgbs/{slug}/...、/zgns/{slug}/...
+    与 fetch_subtree.extract_slug 规则对齐；抽不到时返回空串。
+    """
+    text = str(url or "")
+    m = re.search(
+        r"/gp/(?:new-releases|bestsellers|movers-and-shakers|"
+        r"most-wished-for|most-gifted)/([a-z][a-z0-9-]+)",
+        text,
+        flags=re.I,
+    )
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"/zg(?:bs|ns)/([a-z][a-z0-9-]+)", text, flags=re.I)
+    return m.group(1).lower() if m else ""
+
+
+def _url_matches_list_type(url: str, list_type: str) -> bool:
+    """判断已存 URL 是否已经是目标榜单页（可直接复用，避免错误重拼）。"""
+    text = str(url or "").lower()
+    list_type = str(list_type or "").lower()
+    if not text or not list_type:
+        return False
+    if f"/gp/{list_type}/" in text:
+        return True
+    if list_type == "bestsellers" and "/zgbs/" in text:
+        return True
+    if list_type == "new-releases" and "/zgns/" in text:
+        return True
+    return False
 
 
 def save_link_validity(node_id: str, list_type: str, is_valid: int,
@@ -1466,14 +1492,24 @@ def process_node(node: dict, lists: list, review_max: int,
                 exact_type == list_type
                 or (
                     not exact_type
-                    and f"/gp/{list_type}/" in str(exact_url)
+                    and _url_matches_list_type(str(exact_url), list_type)
                 )
             )
         )
+        stored_url = str(node.get("url") or "")
         if exact_matches_list:
             url_base = str(exact_url)
+        elif _url_matches_list_type(stored_url, list_type):
+            # 类目表已是该榜单的 /zgbs|/zgns|/gp/{list}/ URL 时直接复用
+            url_base = stored_url
         else:
-            url_base = f"{_DOMAIN}/gp/{list_type}/{slug}/{node_id}/"
+            chart_slug = slug or str(node.get("slug") or "").strip().lower()
+            if not chart_slug:
+                with _stats_lock:
+                    _stats["errors"] += 1
+                node_error = "EMPTY_CHART_SLUG"
+                continue
+            url_base = f"{_DOMAIN}/gp/{list_type}/{chart_slug}/{node_id}/"
         outcome = client.get(
             url_base, phase="LIST", item_id=f"{node_id}:{list_type}",
             referer=f"{_DOMAIN}/",
