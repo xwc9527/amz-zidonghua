@@ -61,12 +61,10 @@ from config import (
     PROXY_DAEMON_WARM_RECHECK_INTERVAL_SEC,
     PROXY_MIN_START_NODES,
     PROXY_MAX_ACTIVE_PER_PREFIX,
-    PROXY_POOL_HOT_MAX_NODES,
-    PROXY_POOL_LOW_WATERMARK,
-    PROXY_POOL_TARGET_NODES,
     PROXY_POOL_FILE,
     PROXY_POOL_STATUS_FILE,
     PROXY_PORT_RANGE_END,
+    compute_pool_thresholds,
 )
 from proxy_events import ProxyEvent, drain_proxy_events
 from proxy_health import get_reference_ips, verify_node
@@ -537,6 +535,16 @@ class ProxyDaemon:
             for key in existing_keys & set(incoming):
                 self._states[key].node = incoming[key]
                 self._ensure_port_locked(key)
+            # 端口表持久化在磁盘上、只增不减；里面可能残留跨进程的陈旧 key
+            # （上一个进程异常退出未走到 removed_keys 分支、订阅节点轮换、
+            # 旧订阅节点消失等），这些 key 从未进入过本进程 self._states，
+            # 上面的 removed_keys 逻辑覆盖不到。不定期回收会导致端口范围
+            # 被历史节点占满，新增订阅/新节点再也分配不到端口
+            # （RuntimeError: 无可用本地端口可分配）。按"不在本次候选集合
+            # 里"统一回收，比扩大端口范围更能从根上解决"只增不减"问题。
+            stale_port_keys = set(self._port_map) - set(incoming)
+            for key in stale_port_keys:
+                self._release_port_locked(key)
             if new_keys or removed_keys:
                 self._runtime_dirty = True
                 # 纯新增且实例已存活 → 热重载；否则完整同步
@@ -550,6 +558,11 @@ class ProxyDaemon:
             log.info(
                 "[daemon] 订阅节点变化 +%d -%d (candidates=%d) run_id=%s",
                 len(new_keys), len(removed_keys), len(self._states), self.run_id,
+            )
+        if stale_port_keys:
+            log.info(
+                "[daemon] 回收 %d 个陈旧端口占用（历史节点已不在当前订阅集合中）run_id=%s",
+                len(stale_port_keys), self.run_id,
             )
 
     def _evict_key_locked(self, key: str) -> None:
@@ -708,8 +721,16 @@ class ProxyDaemon:
             self._refs_cache_at = now
         return set(banned)
 
+    def _pool_thresholds_locked(self) -> dict:
+        """按当前候选池规模（self._states 总数）动态算出水位；调用方需持锁。
+
+        候选池会随着新增机场订阅持续增长，水位跟着按比例走，不用每次都
+        手动改 config.py 里的绝对值（历史上 hot_pool_max 就手动从16改到40）。"""
+        return compute_pool_thresholds(len(self._states))
+
     def _select_tiers_locked(self) -> tuple[list[str], list[str]]:
         """按质量和出口网段选出热池，其余已验证节点作为温池。"""
+        hot_max_nodes = self._pool_thresholds_locked()["hot_max"]
         ranked = sorted(
             (
                 self._states[key] for key in self._live_keys
@@ -722,7 +743,7 @@ class ProxyDaemon:
         deferred: list[NodeState] = []
         prefix_counts: dict[str, int] = {}
         for st in ranked:
-            if len(hot) >= PROXY_POOL_HOT_MAX_NODES:
+            if len(hot) >= hot_max_nodes:
                 deferred.append(st)
                 continue
             prefix = network_prefix(st.exit_ip)
@@ -734,9 +755,9 @@ class ProxyDaemon:
                 prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
 
         # 候选多样性不足时不能因网段上限把热池压到启动门槛以下。
-        if len(hot) < min(PROXY_POOL_HOT_MAX_NODES, len(ranked)):
+        if len(hot) < min(hot_max_nodes, len(ranked)):
             for st in deferred:
-                if len(hot) >= PROXY_POOL_HOT_MAX_NODES:
+                if len(hot) >= hot_max_nodes:
                     break
                 hot.append(st.key)
         hot_set = set(hot)
@@ -840,7 +861,7 @@ class ProxyDaemon:
             now = time.time()
             hot, _warm = self._select_tiers_locked()
             hot_set = set(hot)
-            pool_at_target = len(hot) >= PROXY_POOL_TARGET_NODES
+            pool_at_target = len(hot) >= self._pool_thresholds_locked()["target"]
             due: list[tuple[int, float, NodeState]] = []
             exploration: list[NodeState] = []
             for k, st in self._states.items():
@@ -1099,6 +1120,7 @@ class ProxyDaemon:
             total = len(self._states)
             verified = len(self._live_keys)
             hot, warm = self._select_tiers_locked()
+            thresholds = self._pool_thresholds_locked()
             checking = len(self._inflight)
             failed = sum(1 for st in self._states.values() if st.state == STATE_FAILED)
             pending_new = sum(1 for st in self._states.values() if st.state == STATE_NEW)
@@ -1112,11 +1134,11 @@ class ProxyDaemon:
             "runtime_ok": runtime_ok,
             "idle_mode": idle,
             "start_gate": PROXY_MIN_START_NODES,
-            "low_watermark": PROXY_POOL_LOW_WATERMARK,
-            "target_pool_size": PROXY_POOL_TARGET_NODES,
-            "hot_pool_max": PROXY_POOL_HOT_MAX_NODES,
+            "low_watermark": thresholds["low_watermark"],
+            "target_pool_size": thresholds["target"],
+            "hot_pool_max": thresholds["hot_max"],
             "start_ready": len(hot) >= PROXY_MIN_START_NODES,
-            "pool_low": len(hot) < PROXY_POOL_LOW_WATERMARK,
+            "pool_low": len(hot) < thresholds["low_watermark"],
             "candidates": total,
             "verified": verified,
             "hot": len(hot),

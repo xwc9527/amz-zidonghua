@@ -102,7 +102,48 @@ PRODUCT_LANE_CAPTCHA_MIN_SAMPLES = max(
 PRODUCT_LANE_CAPTCHA_PAUSE_RATE = max(
     0.0, min(1.0, float(os.getenv("PRODUCT_LANE_CAPTCHA_PAUSE_RATE", "0.5"))),
 )
+# 非验证码的普通失败（连接超时/连接被拒等）——热池刚从冷启动补齐时，
+# 个别节点可能只过了一次轻量校验就被promote进热池，实际扛不住持续的真实
+# Amazon流量。这类出口不会触发验证码计数，如果不单独识别，会一直占着
+# worker反复重试到耗尽attempts，拖慢/拖垮整轮抓取。
+PRODUCT_LANE_FAILURE_MIN_SAMPLES = max(
+    1, int(os.getenv("PRODUCT_LANE_FAILURE_MIN_SAMPLES", "5")),
+)
+PRODUCT_LANE_FAILURE_PAUSE_RATE = max(
+    0.0, min(1.0, float(os.getenv("PRODUCT_LANE_FAILURE_PAUSE_RATE", "0.85"))),
+)
 PRODUCT_MOPUP_MAX_ATTEMPTS = max(1, int(os.getenv("PRODUCT_MOPUP_MAX_ATTEMPTS", "3")))
+# 详情失败补跑不再只等整轮 357 个节点全跑完才做一次：跑到一半被打断（重启服务/
+# 代理拥堵触发人工干预等）就会永远补不上。改成运行期内按此间隔周期性补跑，
+# 独立于全量收尾的最后一次 mopup（task_q.join() 之后仍会再补跑一次兜底）。
+PRODUCT_MOPUP_INTERVAL_SEC = max(30, int(os.getenv("PRODUCT_MOPUP_INTERVAL_SEC", "180")))
+
+
+def lane_pause_reason(st: dict, active_lane_count: int) -> str:
+    """纯判定函数：给定单条 lane 的运行期统计和当前活跃 lane 数，判断是否应该
+    暂停这条 lane。返回 "captcha" / "failure_rate" 触发原因，或 "" 表示不暂停。
+
+    st 结构: {"total": int, "captcha": int, "failed": int, "paused": bool}
+    """
+    if st.get("paused"):
+        return ""
+    # 至少留一条活跃通道，避免全员暂停后任务队列无人消费而死锁。
+    if active_lane_count <= 1:
+        return ""
+    total = st.get("total", 0)
+    if total <= 0:
+        return ""
+    if (
+        total >= PRODUCT_LANE_CAPTCHA_MIN_SAMPLES
+        and st.get("captcha", 0) / total >= PRODUCT_LANE_CAPTCHA_PAUSE_RATE
+    ):
+        return "captcha"
+    if (
+        total >= PRODUCT_LANE_FAILURE_MIN_SAMPLES
+        and st.get("failed", 0) / total >= PRODUCT_LANE_FAILURE_PAUSE_RATE
+    ):
+        return "failure_rate"
+    return ""
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -182,6 +223,48 @@ _detail_writer = None
 _category_reverse_lock = threading.Lock()
 _category_reverse_seen_edges: set[tuple[str, str, str]] = set()
 _category_reverse_seen_db_path = ""
+# depth=0（部门根节点）由侧边栏 BFS 全量枚举、人工验证过，是固定闭集。面包屑
+# 里部门这一级给出的是 Amazon 官方数字 node_id，跟我们当年入库时用的 URL slug
+# 占位 ID（如 "electronics"/"sporting-goods"/"hi"）不是一套编号——同一个真实
+# 部门，两种 ID，直接插入会在 depth=0 造出"名字相同、node_id不同"的假重复
+# （2026-07-23 实测发现：Electronics/172282、Sports & Outdoors/3375251、
+# Tools & Home Improvement/228013 三个假根节点，外加它们各自的一层子节点
+# 变成了已有正确边的重复边）。这里按名字把面包屑给的部门级 ID 对齐到已有
+# 根节点，链路仍然继续往下挂，只是不再插入竞争性的新根。
+_category_root_name_cache: dict[str, dict[str, str]] = {}
+_category_root_name_cache_db_path = ""
+
+
+def _lookup_canonical_root_id(site: str, name: str) -> str:
+    """按 (site, 部门名) 查已有 depth=0 根节点的 node_id；找不到返回空串。"""
+    global _category_root_name_cache_db_path
+    db_path = os.path.abspath(DB_PATH)
+    key = (name or "").strip().lower()
+    if not key:
+        return ""
+    with _category_reverse_lock:
+        if _category_root_name_cache_db_path != db_path:
+            _category_root_name_cache.clear()
+            _category_root_name_cache_db_path = db_path
+        cached = _category_root_name_cache.get(site)
+    if cached is None:
+        assert_testing_paths_safe(db_path=DB_PATH)
+        conn = sqlite3.connect(db_path, timeout=15)
+        try:
+            rows = conn.execute(
+                "SELECT name, node_id FROM categories WHERE site=? AND depth=0",
+                (site,),
+            ).fetchall()
+        finally:
+            conn.close()
+        cached = {}
+        for row_name, row_node_id in rows:
+            row_key = str(row_name or "").strip().lower()
+            if row_key and row_key not in cached:
+                cached[row_key] = str(row_node_id)
+        with _category_reverse_lock:
+            _category_root_name_cache[site] = cached
+    return cached.get(key, "")
 
 
 class BoundedDetailParsePipeline:
@@ -452,6 +535,15 @@ def _discover_category_nodes_from_detail(detail: dict, site: str = None) -> int:
     previous_node_id = ""
     for crumb in breadcrumbs:
         node_id = str(crumb["node_id"])
+        if not previous_node_id:
+            # 链路的第一个 crumb 是部门根节点：depth=0 是固定闭集，不允许
+            # 反向扩展新增或另立一个"同名不同 ID"的根。对齐到已有根节点
+            # 继续往下挂；对不上（比如站点还没有任何根节点，理论不该发生）
+            # 才退化成旧逻辑插入。
+            canonical_root_id = _lookup_canonical_root_id(site, crumb["name"])
+            if canonical_root_id:
+                previous_node_id = canonical_root_id
+                continue
         candidates.append({
             "name": str(crumb["name"]),
             "node_id": node_id,
@@ -462,21 +554,26 @@ def _discover_category_nodes_from_detail(detail: dict, site: str = None) -> int:
         previous_node_id = node_id
 
     breadcrumb_leaf = previous_node_id
-    for link in detail.get("bsr_node_links") or []:
-        if not isinstance(link, dict) or not link.get("name") or not link.get("node_id"):
-            continue
-        node_id = str(link["node_id"])
-        # A BSR link sometimes points at the breadcrumb leaf itself; that is not
-        # a new parent-child relationship and must never create a self-edge.
-        if breadcrumb_leaf and node_id == breadcrumb_leaf:
-            continue
-        candidates.append({
-            "name": str(link["name"]),
-            "node_id": node_id,
-            "parent_node_id": breadcrumb_leaf,
-            "slug": str(link.get("slug") or "").lower(),
-            "kind": "bsr",
-        })
+    # 面包屑解析失败/为空时 breadcrumb_leaf 是空串；BSR 榜单节点没有可靠的
+    # 父节点信息，插入的话 parent_node_id="" 会被当成新根节点（同样违反
+    # depth=0 闭集不变量）。宁可这一批 BSR 节点先不落库，等其它商品带着
+    # 完整面包屑再补上，也不能插入一个父节点缺失的假根。
+    if breadcrumb_leaf:
+        for link in detail.get("bsr_node_links") or []:
+            if not isinstance(link, dict) or not link.get("name") or not link.get("node_id"):
+                continue
+            node_id = str(link["node_id"])
+            # A BSR link sometimes points at the breadcrumb leaf itself; that is not
+            # a new parent-child relationship and must never create a self-edge.
+            if node_id == breadcrumb_leaf:
+                continue
+            candidates.append({
+                "name": str(link["name"]),
+                "node_id": node_id,
+                "parent_node_id": breadcrumb_leaf,
+                "slug": str(link.get("slug") or "").lower(),
+                "kind": "bsr",
+            })
     if not candidates:
         return 0
 
@@ -2051,22 +2148,35 @@ def run_batch(root_ids: list, lists: list, review_max: int,
             or ""
         )
 
+    def _active_lane_count_locked():
+        paused = sum(1 for st in lane_stats.values() if st["paused"])
+        return max(0, len(proxy_entries) - paused)
+
     def _record_lane_result(key, outcome):
         with state_lock:
-            st = lane_stats.setdefault(key, {"total": 0, "captcha": 0, "paused": False})
+            st = lane_stats.setdefault(
+                key, {"total": 0, "captcha": 0, "failed": 0, "paused": False}
+            )
             st["total"] += 1
+            if not outcome.ok:
+                st["failed"] += 1
             if outcome.final_reason == "CAPTCHA":
                 st["captcha"] += 1
-            if (
-                not st["paused"]
-                and st["total"] >= PRODUCT_LANE_CAPTCHA_MIN_SAMPLES
-                and st["captcha"] / st["total"] >= PRODUCT_LANE_CAPTCHA_PAUSE_RATE
-            ):
+            reason = lane_pause_reason(st, _active_lane_count_locked())
+            if reason:
                 st["paused"] = True
-                _log.warning(
-                    "[fetch_products] lane %s paused: captcha=%d/%d (rate=%.0f%%)",
-                    key, st["captcha"], st["total"], 100 * st["captcha"] / st["total"],
-                )
+                if reason == "captcha":
+                    _log.warning(
+                        "[fetch_products] lane %s paused: captcha=%d/%d (rate=%.0f%%)",
+                        key, st["captcha"], st["total"], 100 * st["captcha"] / st["total"],
+                    )
+                else:
+                    _log.warning(
+                        "[fetch_products] lane %s paused: failure_rate=%d/%d (rate=%.0f%%, "
+                        "非验证码——判定为该出口过慢/不可用，可能是刚从冷启动补入热池、尚未经过"
+                        "真实流量验证的节点)",
+                        key, st["failed"], st["total"], 100 * st["failed"] / st["total"],
+                    )
 
     def enqueue_task(task):
         with state_lock:
@@ -2251,21 +2361,32 @@ def run_batch(root_ids: list, lists: list, review_max: int,
             client.close()
 
     def _run_mopup_pass():
-        """主阶段结束后，用本轮实测健康的lane对 mainphase_failed_details 做一轮独立收尾补跑。
-        成功或补跑中命中404的item会把对应group的detail_errors减到0；
+        """对 mainphase_failed_details 当前积压做一轮独立收尾补跑，用本轮实测健康
+        的 lane。成功或补跑中命中404的item会把对应group的detail_errors减到0；
         减到0的node重新写checkpoint为done（save_node是upsert，覆盖主阶段写入的error安全）。
-        补跑仍失败的item保持原状——node维持error，checkpoint仍会在末尾拒绝complete。"""
-        if not mainphase_failed_details:
-            return
+        补跑仍失败的item保持原状——node维持error，checkpoint仍会在末尾拒绝complete。
+
+        可被多次调用（周期性补跑 + 全量收尾补跑各一次）：每次调用先在锁内把
+        mainphase_failed_details 取快照并清空，避免重复处理同一个item
+        （尤其是已经补成功的item——不清空的话第二次调用会对同一个group的
+        detail_errors重复递减，产生"已完成但被错误标记为剩余错误"的计数bug）。
+        """
+        with state_lock:
+            if not mainphase_failed_details:
+                return
+            batch = list(mainphase_failed_details)
+            mainphase_failed_details.clear()
         healthy_entries = [
             e for e in proxy_entries
             if not lane_stats.get(entry_key(e), {}).get("paused")
         ]
         if not healthy_entries:
+            with state_lock:
+                mainphase_failed_details.extend(batch)
             _log.error(
                 "[fetch_products] mopup skipped: no healthy lane left "
                 "(%d failed details remain unresolved)",
-                len(mainphase_failed_details),
+                len(batch),
             )
             return
         mopup_budget = min(PRODUCT_MOPUP_MAX_ATTEMPTS, len(healthy_entries))
@@ -2273,7 +2394,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         final_failed_details: list[dict] = []
         recovered_node_ids: set[str] = set()
 
-        for item in mainphase_failed_details:
+        for item in batch:
             mopup_q.put({
                 "product": item["product"], "group": item["group"],
                 "attempt": 1, "used_proxies": set(),
@@ -2343,9 +2464,15 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         for thread in mopup_threads:
             thread.join()
 
+        if final_failed_details:
+            # 补跑预算耗尽但仍失败：放回队列，等下一次周期性/收尾 mopup 再试
+            # （比如这一轮健康lane不够、或者恰好都在退避期）。
+            with state_lock:
+                mainphase_failed_details.extend(final_failed_details)
+
         affected_groups = {
             str(item["group"]["node"]["node_id"]): item["group"]
-            for item in mainphase_failed_details
+            for item in batch
         }
         reconciled = 0
         for node_id, group in affected_groups.items():
@@ -2359,8 +2486,8 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         _log.info(
             "[fetch_products] mopup done: healthy_lanes=%d budget=%d "
             "items=%d recovered=%d still_failed=%d nodes_reconciled=%d",
-            len(healthy_entries), mopup_budget, len(mainphase_failed_details),
-            len(mainphase_failed_details) - len(final_failed_details),
+            len(healthy_entries), mopup_budget, len(batch),
+            len(batch) - len(final_failed_details),
             len(final_failed_details), reconciled,
         )
 
@@ -2375,6 +2502,17 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         flush_interval=PRODUCT_DETAIL_WRITE_FLUSH_SEC,
         max_pending_batches=32,
     )
+    mopup_stop_event = threading.Event()
+
+    def _mopup_scheduler_main():
+        """周期性补跑详情失败项，不等全部节点跑完再收尾一次——运行中途被打断
+        （重启服务/人工干预）也已经补跑过若干轮，不会把全部希望押在最后一次。"""
+        while not mopup_stop_event.wait(PRODUCT_MOPUP_INTERVAL_SEC):
+            try:
+                _run_mopup_pass()
+            except BaseException as exc:
+                _log.warning("[fetch_products] 周期性 mopup 异常，继续下一轮: %r", exc)
+
     try:
         _checkpoint.set_phase("LIST_DETAIL_QUEUE")
         _log.info(
@@ -2390,11 +2528,18 @@ def run_batch(root_ids: list, lists: list, review_max: int,
             )
             thread.start()
             threads.append(thread)
+        mopup_scheduler_thread = threading.Thread(
+            target=_mopup_scheduler_main, daemon=True,
+        )
+        mopup_scheduler_thread.start()
         task_q.join()
         for _ in threads:
             enqueue_task(None)
         for thread in threads:
             thread.join()
+
+        mopup_stop_event.set()
+        mopup_scheduler_thread.join(timeout=PRODUCT_MOPUP_INTERVAL_SEC + 30)
 
         _run_mopup_pass()
 
@@ -2430,6 +2575,7 @@ def run_batch(root_ids: list, lists: list, review_max: int,
         _warn_if_filter_field_collapsed()
         export_excel()
     finally:
+        mopup_stop_event.set()
         for thread in threads:
             if thread.is_alive():
                 enqueue_task(None)

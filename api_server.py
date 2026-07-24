@@ -35,6 +35,7 @@ from proxy_pool_manager import (
     STATUS_RUNNING,
     STATUS_STARTING_CRAWLER,
     STATUS_STOPPING,
+    check_pool_quality,
     daemon_alive,
     daemon_status,
     ensure_daemon_running,
@@ -1865,6 +1866,19 @@ async def proxy_status():
     pid, daemon = await asyncio.to_thread(lambda: (daemon_alive(), daemon_status()))
     status["daemon"] = {"alive": bool(pid), "pid": pid, **daemon}
     return status
+
+
+@app.post("/api/v2/proxy_quality_check")
+async def proxy_quality_check():
+    """按需体检：对当前活池（默认热+温池）逐个发起一次真实 Amazon 请求，
+    量化延迟/成功率/验证码率。供前端弹窗展示，不修改 daemon 的池内状态。
+    这是同步阻塞的网络探测（每节点最多约 timeout 秒），放到线程里跑避免
+    阻塞事件循环；节点数不多（通常 <30），整体几秒到十几秒内返回。"""
+    try:
+        report = await asyncio.to_thread(check_pool_quality)
+        return report
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/v2/start_products")

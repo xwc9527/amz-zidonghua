@@ -44,12 +44,40 @@ def _node(key: str, idx: int, *, state: str = STATE_VERIFIED, prefix: str | None
 class ThresholdTests(unittest.TestCase):
     def test_thresholds_are_ordered(self):
         self.assertEqual(config.PROXY_MIN_START_NODES, 8)
-        self.assertEqual(config.PROXY_POOL_LOW_WATERMARK, 10)
-        self.assertEqual(config.PROXY_POOL_TARGET_NODES, 14)
-        self.assertEqual(config.PROXY_POOL_HOT_MAX_NODES, 16)
+        self.assertEqual(config.PROXY_POOL_LOW_WATERMARK, 20)
+        self.assertEqual(config.PROXY_POOL_TARGET_NODES, 32)
+        self.assertEqual(config.PROXY_POOL_HOT_MAX_NODES, 40)
         self.assertLess(config.PROXY_MIN_START_NODES, config.PROXY_POOL_LOW_WATERMARK)
         self.assertLess(config.PROXY_POOL_LOW_WATERMARK, config.PROXY_POOL_TARGET_NODES)
         self.assertLessEqual(config.PROXY_POOL_TARGET_NODES, config.PROXY_POOL_HOT_MAX_NODES)
+
+    def test_compute_pool_thresholds_scales_with_candidates(self):
+        # 候选池很小：按比例算出来的值低于绝对下限，用 FLOOR 兜底，不会
+        # 出现"候选只有10个但热池目标是4"这种荒谬结果。
+        small = config.compute_pool_thresholds(10)
+        self.assertEqual(small["target"], config.PROXY_POOL_TARGET_FLOOR)
+        self.assertEqual(small["hot_max"], config.PROXY_POOL_HOT_MAX_FLOOR)
+
+        # 候选池增长（新增机场订阅）：target/hot_max 应该按比例跟着涨，
+        # 不用手动改配置——这正是本次改动要解决的问题。
+        before = config.compute_pool_thresholds(80)
+        after = config.compute_pool_thresholds(150)
+        self.assertGreater(after["target"], before["target"])
+        self.assertGreater(after["hot_max"], before["hot_max"])
+        self.assertAlmostEqual(
+            after["target"], round(150 * config.PROXY_POOL_TARGET_RATIO), delta=1,
+        )
+        self.assertAlmostEqual(
+            after["hot_max"], round(150 * config.PROXY_POOL_HOT_MAX_RATIO), delta=1,
+        )
+        self.assertLessEqual(after["low_watermark"], after["target"])
+        self.assertLessEqual(after["target"], after["hot_max"])
+
+        # 候选池极大时：CEIL 兜底，不会无限膨胀。
+        if config.PROXY_POOL_HOT_MAX_CEIL > 0:
+            huge = config.compute_pool_thresholds(100_000)
+            self.assertEqual(huge["hot_max"], config.PROXY_POOL_HOT_MAX_CEIL)
+            self.assertLessEqual(huge["target"], huge["hot_max"])
 
 
 class FeedbackStoreTests(unittest.TestCase):
@@ -89,7 +117,10 @@ class DaemonArchitectureTests(unittest.TestCase):
         for i, st in enumerate(states):
             st.feedback_successes = 20 - i
         self._install(states)
-        with patch.object(proxy_daemon, "PROXY_POOL_HOT_MAX_NODES", 16):
+        with patch.object(
+            proxy_daemon, "compute_pool_thresholds",
+            lambda n: {"low_watermark": 1, "target": 16, "hot_max": 16},
+        ):
             hot, warm = self.daemon._select_tiers_locked()
         self.assertEqual(len(hot), 16)
         self.assertEqual(len(warm), 2)
@@ -106,7 +137,10 @@ class DaemonArchitectureTests(unittest.TestCase):
             st.feedback_successes = 100
         self._install(states)
         with (
-            patch.object(proxy_daemon, "PROXY_POOL_HOT_MAX_NODES", 3),
+            patch.object(
+                proxy_daemon, "compute_pool_thresholds",
+                lambda n: {"low_watermark": 1, "target": 3, "hot_max": 3},
+            ),
             patch.object(proxy_daemon, "PROXY_MAX_ACTIVE_PER_PREFIX", 2),
         ):
             hot, _ = self.daemon._select_tiers_locked()
@@ -127,7 +161,9 @@ class DaemonArchitectureTests(unittest.TestCase):
         self.assertEqual(submit.call_count, 3)
 
         submit.reset_mock()
-        stable = [_node(f"h{i}", i + 200) for i in range(14)]
+        stable = [
+            _node(f"h{i}", i + 200) for i in range(config.PROXY_POOL_TARGET_NODES)
+        ]
         stable.extend(_node(f"candidate{i}", 300 + i, state=STATE_NEW) for i in range(5))
         self._install(stable)
         self.daemon._inflight.clear()
@@ -223,7 +259,10 @@ class DaemonArchitectureTests(unittest.TestCase):
             pool_file = os.path.join(td, "pool.json")
             with (
                 patch.object(proxy_daemon, "PROXY_POOL_FILE", pool_file),
-                patch.object(proxy_daemon, "PROXY_POOL_HOT_MAX_NODES", 16),
+                patch.object(
+                    proxy_daemon, "compute_pool_thresholds",
+                    lambda n: {"low_watermark": 1, "target": 16, "hot_max": 16},
+                ),
             ):
                 self.daemon._publish_pool()
             with open(pool_file, encoding="utf-8") as fh:

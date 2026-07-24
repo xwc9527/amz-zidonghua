@@ -416,8 +416,17 @@ def _clear_checkpoint():
 # Phase 1: 多 worker 并发 BFS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
-    """多 worker 并发 BFS 抓取一个 L1 大类子树，每 100 条写入 DB。"""
+def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99,
+                full_rescan: bool = False):
+    """多 worker 并发 BFS 抓取一个 L1 大类子树，每 100 条写入 DB。
+
+    full_rescan=True 时不做"已有子节点=已展开，跳过"的续跑捷径判断——库里现有的
+    每一个节点（不管是不是已经有子节点记录）都重新入队、重新请求页面。这是因为
+    该捷径判断本身有缺陷：一个节点只要曾经写入过哪怕 1 个子节点（哪怕是被验证码/
+    超时腰斩的一次不完整抓取），后续所有续跑都会把它当"已完成"永久跳过，
+    Amazon 侧边栏后来新增的子类目、或者当次没抓全的子类目就再也补不上了。
+    全量重扫用于人工发起的低频校准，不追求速度，宁可全部重新访问一遍。
+    """
     num_workers = len(proxy_entries) * NODE_STREAMS_PER_PROXY if proxy_entries else 1
 
     # 从 DB 加载当前 slug 子树的已有节点（支持续跑 + 补全）
@@ -483,24 +492,31 @@ def crawl_slug(slug: str, proxy_entries: list[dict], max_depth: int = 99):
     _db_batch_insert([root_node])
 
     if existing:
-        existing_ids = {r[1] for r in existing if r[1]}
-        child_parent_ids = set()
-        conn2 = sqlite3.connect(DB_FILE, timeout=10)
-        for r in conn2.execute(
-            f"SELECT DISTINCT parent_node_id FROM categories "
-            f"WHERE parent_node_id != '' AND site = ? AND (slug = ? OR {like_clauses})",
-            [_SITE, slug] + slug_patterns
-        ).fetchall():
-            child_parent_ids.add(r[0])
-        conn2.close()
-        enqueued = 0
-        for url, node_id, name, depth, _parent_node_id in existing:
-            is_parent = node_id in child_parent_ids
-            if not is_parent:
+        if full_rescan:
+            enqueued = 0
+            for url, node_id, name, depth, _parent_node_id in existing:
                 task_q.put({"url": url, "name": name, "node_id": node_id, "depth": depth, "parent_node_id": None})
                 enqueued += 1
-        skipped = len(existing) - enqueued
-        print(f"  [{slug}] DB {len(existing)} 节点, 跳过 {skipped} 个已展开父节点, 入队 {enqueued} 个待探索", flush=True)
+            print(f"  [{slug}] 全量重扫: DB {len(existing)} 节点, 全部 {enqueued} 个重新入队（不跳过任何已展开节点）", flush=True)
+        else:
+            existing_ids = {r[1] for r in existing if r[1]}
+            child_parent_ids = set()
+            conn2 = sqlite3.connect(DB_FILE, timeout=10)
+            for r in conn2.execute(
+                f"SELECT DISTINCT parent_node_id FROM categories "
+                f"WHERE parent_node_id != '' AND site = ? AND (slug = ? OR {like_clauses})",
+                [_SITE, slug] + slug_patterns
+            ).fetchall():
+                child_parent_ids.add(r[0])
+            conn2.close()
+            enqueued = 0
+            for url, node_id, name, depth, _parent_node_id in existing:
+                is_parent = node_id in child_parent_ids
+                if not is_parent:
+                    task_q.put({"url": url, "name": name, "node_id": node_id, "depth": depth, "parent_node_id": None})
+                    enqueued += 1
+            skipped = len(existing) - enqueued
+            print(f"  [{slug}] DB {len(existing)} 节点, 跳过 {skipped} 个已展开父节点, 入队 {enqueued} 个待探索", flush=True)
     else:
         task_q.put({"url": root_url, "name": root_name, "node_id": None, "depth": 0, "parent_node_id": None})
     visited_urls.add(root_url)
@@ -1147,7 +1163,8 @@ def run_breadcrumb():
 # 主入口
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False, no_proxy: bool = False):
+def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False, no_proxy: bool = False,
+        full_rescan: bool = False):
     if no_proxy:
         entries = []
         print("[pool] 代理已禁用，使用直连 (1 worker)")
@@ -1155,11 +1172,27 @@ def run(slugs: list[str], max_depth: int = 99, skip_breadcrumb: bool = False, no
         pool = ProxyPool()
         entries = pool.all_entries()
 
+    failed_slugs = []
     for slug in slugs:
         print(f"\n{'='*50}")
-        print(f"开始: {slug}")
+        print(f"开始: {slug}" + ("（全量重扫模式）" if full_rescan else ""))
         print(f"{'='*50}")
-        crawl_slug(slug, entries, max_depth=max_depth)
+        try:
+            crawl_slug(slug, entries, max_depth=max_depth, full_rescan=full_rescan)
+        except RuntimeError as exc:
+            # crawl_slug 对"仍有补抓耗尽的URL/worker异常"会主动抛异常，专门用来阻止
+            # 该 slug 被错误标记为 bfs_done（未完成不能假装完成）。但这是多 slug 批量入口
+            # （--all / 多个 slug 一次性传入），一个 slug 因偶发网络问题没抓全，不该
+            # 连累后面还没跑的 slug 一个都跑不到——记下来继续跑下一个，最后统一汇报。
+            failed_slugs.append((slug, str(exc)))
+            print(f"  ⚠️ [{slug}] 本次未完全成功，已跳到下一个 slug（该 slug 未被标记为 bfs_done，之后可单独重跑补齐）: {exc}", flush=True)
+
+    if failed_slugs:
+        print(f"\n{'='*50}")
+        print(f"⚠️ 共 {len(failed_slugs)}/{len(slugs)} 个 slug 未完全成功，需要单独重跑：")
+        for slug, reason in failed_slugs:
+            print(f"  - {slug}: {reason}")
+        print(f"{'='*50}")
 
     # 面包屑阶段已从工作流移除：无界 asin_q 会撑爆内存导致 OOM，
     # 且实测 发现=0 毫无收益。仅保留 BFS。
@@ -1253,6 +1286,8 @@ if __name__ == "__main__":
                         help="仅面包屑补全（多 worker 并发）")
     parser.add_argument("--no-proxy", action="store_true",
                         help="禁用代理池，直连")
+    parser.add_argument("--full-rescan", action="store_true",
+                        help="全量重扫：不跳过已有子节点的节点，库里现有节点全部重新访问一遍页面校验")
     args = parser.parse_args()
 
     mp = get_marketplace(args.site)
@@ -1280,4 +1315,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     run(slugs, max_depth=args.max_depth, skip_breadcrumb=args.skip_breadcrumb,
-        no_proxy=args.no_proxy)
+        no_proxy=args.no_proxy, full_rescan=args.full_rescan)

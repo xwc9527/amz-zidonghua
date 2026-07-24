@@ -39,6 +39,7 @@ from proxy_daemon import (
     touch_crawl_activity,
 )
 from proxy_health import (
+    check_amazon,
     get_reference_ips,
     pool_entries_from_health,
     verify_pool,
@@ -973,3 +974,84 @@ class PoolManager:
         for ip in removed:
             if on_remove:
                 on_remove({"exit_ip": ip})
+
+
+def check_pool_quality(
+    tiers: tuple[str, ...] = ("hot", "warm"),
+    max_workers: int = 12,
+    timeout: tuple[float, float] = (5.0, 12.0),
+) -> dict:
+    """按需主动体检：对当前活池逐个发起一次真实 Amazon 请求，量化
+    延迟 / 成功率 / 验证码率，供前端弹窗展示。这是只读的一次性探测，
+    不改写 tier / quality_score，不影响 daemon 的池内判定。
+
+    daemon 的 lane 失败暂停（fetch_products.py 的 lane_pause_reason）只能
+    在有抓取任务运行时被动发现坏节点；本函数补齐"没有任务在跑时，
+    用户主动点一下就能看到当前池子到底行不行"的能力。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    pool = _read_json(PROXY_POOL_FILE) or {}
+    entries = pool.get("entries") or []
+    targets = [e for e in entries if e.get("tier") in tiers] if tiers else list(entries)
+    if not targets and entries:
+        # tier 字段缺失/口径不一致时兜底探测全部条目，避免误报"无数据"
+        targets = list(entries)
+
+    def _probe(entry: dict) -> dict:
+        amz = check_amazon(entry.get("proxy") or "", timeout=timeout)
+        return {
+            "name": entry.get("name") or "",
+            "exit_ip": entry.get("exit_ip") or "",
+            "tier": entry.get("tier") or "",
+            "ok": amz.ok,
+            "captcha": amz.captcha,
+            "status_code": amz.status_code,
+            "elapsed_ms": amz.elapsed_ms,
+            "error_code": amz.error_code,
+            "error": amz.error,
+        }
+
+    results: list[dict] = []
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(targets))) as ex:
+            futures = [ex.submit(_probe, e) for e in targets]
+            for f in as_completed(futures):
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    results.append({
+                        "name": "", "exit_ip": "", "tier": "", "ok": False,
+                        "captcha": False, "status_code": None, "elapsed_ms": 0,
+                        "error_code": "PROBE_EXCEPTION", "error": str(e),
+                    })
+
+    total = len(results)
+    ok_results = [r for r in results if r["ok"]]
+    ok_count = len(ok_results)
+    captcha_count = sum(1 for r in results if r["captcha"])
+    avg_latency_ms = int(sum(r["elapsed_ms"] for r in ok_results) / ok_count) if ok_count else 0
+    ok_rate = round(ok_count / total, 3) if total else 0.0
+
+    if total == 0:
+        verdict = "no_data"
+    elif ok_rate >= 0.7:
+        verdict = "healthy"
+    elif ok_rate >= 0.3:
+        verdict = "degraded"
+    else:
+        verdict = "unhealthy"
+
+    results.sort(key=lambda r: (not r["ok"], -r["elapsed_ms"]))
+    return {
+        "checked_at": _utc_now(),
+        "tiers": list(tiers) if tiers else "all",
+        "total": total,
+        "ok": ok_count,
+        "failed": total - ok_count,
+        "captcha": captcha_count,
+        "ok_rate": ok_rate,
+        "avg_latency_ms": avg_latency_ms,
+        "verdict": verdict,
+        "nodes": results,
+    }

@@ -96,6 +96,35 @@ class TestSubscriptionDiff(unittest.TestCase):
         self.assertEqual(daemon._states[key].state, proxy_daemon.STATE_VERIFIED)
         self.assertFalse(daemon._runtime_dirty)
 
+    def test_stale_cross_process_port_entries_are_reclaimed(self):
+        """端口表（proxy_daemon_port_map.json）持久化在磁盘上、跨进程复用；
+        上一个进程遗留的、从未进入过本进程 self._states 的陈旧 key（比如已从
+        所有订阅里消失的历史节点）也应该被回收，否则端口范围会被"只增不减"
+        占满，新增订阅的新节点会遇到 RuntimeError: 无可用本地端口可分配。"""
+        daemon = ProxyDaemon()
+        daemon._port_map = {"stale-leftover-key": 18099}
+        daemon._free_ports = []
+        node = _node("n1", "s1")
+        with mock.patch.object(proxy_daemon, "load_candidate_nodes", return_value=_loaded([node])):
+            daemon._maybe_reload_subscription(force=True)
+        self.assertNotIn("stale-leftover-key", daemon._port_map)
+        self.assertIn(18099, daemon._free_ports)
+        key = node_key(node)
+        self.assertIn(key, daemon._port_map)
+
+    def test_stale_port_reclaim_does_not_affect_active_nodes(self):
+        daemon = ProxyDaemon()
+        node = _node("n1", "s1")
+        with mock.patch.object(proxy_daemon, "load_candidate_nodes", return_value=_loaded([node])):
+            daemon._maybe_reload_subscription(force=True)
+        key = node_key(node)
+        assigned_port = daemon._port_map[key]
+        daemon._port_map["stale-leftover-key"] = 18099
+        with mock.patch.object(proxy_daemon, "load_candidate_nodes", return_value=_loaded([dict(node)])):
+            daemon._maybe_reload_subscription(force=True)
+        self.assertEqual(daemon._port_map[key], assigned_port)
+        self.assertNotIn("stale-leftover-key", daemon._port_map)
+
 
 class TestCheckResultStateMachine(unittest.TestCase):
     def test_success_adds_to_live_pool_and_marks_dirty(self):
@@ -193,7 +222,10 @@ class TestDispatchAndCheckOne(unittest.TestCase):
         daemon._states["k0"].next_check_at = time.time() - 1
         daemon._runtime_ok = True
         with mock.patch.object(proxy_daemon, "PROXY_DAEMON_CONCURRENCY", 2):
-            with mock.patch.object(proxy_daemon, "PROXY_POOL_TARGET_NODES", 11):
+            with mock.patch.object(
+                proxy_daemon, "compute_pool_thresholds",
+                lambda n: {"low_watermark": 1, "target": 11, "hot_max": 11},
+            ):
                 submitted = []
 
                 def _capture(fn, key, refs, light=False):
@@ -225,7 +257,10 @@ class TestDispatchAndCheckOne(unittest.TestCase):
             )
             daemon._live_keys.add(key)
         daemon._runtime_ok = True
-        with mock.patch.object(proxy_daemon, "PROXY_POOL_TARGET_NODES", 14):
+        with mock.patch.object(
+            proxy_daemon, "compute_pool_thresholds",
+            lambda n: {"low_watermark": 1, "target": 14, "hot_max": 16},
+        ):
             submitted = []
             with mock.patch.object(
                 daemon._executor, "submit",

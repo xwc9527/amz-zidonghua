@@ -292,6 +292,21 @@
     .proxy-card-close:hover { background: #F3F4F6; color: var(--fg); }
     .proxy-card-body { padding: 10px 12px 11px; }
     .proxy-card-hint { margin-top: 5px; font-size: 10.5px; color: #9CA3AF; }
+    .proxy-quality-btn {
+      display: block; width: 100%; margin-top: 9px; padding: 6px 0;
+      border: 1px solid var(--primary); border-radius: 7px;
+      background: #fff; color: var(--primary); font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: background .15s, color .15s, opacity .15s;
+    }
+    .proxy-quality-btn:hover:not(:disabled) { background: var(--primary); color: #fff; }
+    .proxy-quality-btn:disabled { opacity: .55; cursor: not-allowed; }
+    .proxy-quality-result {
+      margin-top: 7px; font-size: 11.5px; line-height: 1.5; color: var(--gray);
+      white-space: pre-line;
+    }
+    .proxy-quality-result.healthy { color: #059669; }
+    .proxy-quality-result.degraded { color: #D97706; }
+    .proxy-quality-result.unhealthy { color: #DC2626; }
     .proxy-live-badge .plb-text { display: block; white-space: normal; }
     .proxy-live-badge .plb-text b { color: var(--primary); font-weight: 700; }
     .proxy-live-badge.warn {
@@ -497,65 +512,65 @@
             <div class="filter-item">
               <span class="filter-label" id="lbl_price">现价 ($)</span>
               <div class="filter-inputs">
-                <input type="number" id="f_price_min" placeholder="最小" min="0">
+                <input type="number" id="f_price_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_price_max" placeholder="最大" min="0">
+                <input type="number" id="f_price_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">评分</span>
               <div class="filter-inputs">
-                <input type="number" id="f_rating_min" placeholder="最小" min="0" max="5" step="0.1">
+                <input type="number" id="f_rating_min" placeholder="≤" min="0" max="5" step="0.1" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_rating_max" placeholder="最大" min="0" max="5" step="0.1">
+                <input type="number" id="f_rating_max" placeholder="≥" min="0" max="5" step="0.1" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">评论数</span>
               <div class="filter-inputs">
-                <input type="number" id="f_review_min" placeholder="最小" min="0">
+                <input type="number" id="f_review_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_review_max" placeholder="最大" min="0">
+                <input type="number" id="f_review_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">BSR大类排名</span>
               <div class="filter-inputs">
-                <input type="number" id="f_bsr_main_min" placeholder="最小" min="0">
+                <input type="number" id="f_bsr_main_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_bsr_main_max" placeholder="最大" min="0">
+                <input type="number" id="f_bsr_main_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">BSR子类排名</span>
               <div class="filter-inputs">
-                <input type="number" id="f_bsr_sub_min" placeholder="最小" min="0">
+                <input type="number" id="f_bsr_sub_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_bsr_sub_max" placeholder="最大" min="0">
+                <input type="number" id="f_bsr_sub_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">变体选项数</span>
               <div class="filter-inputs">
-                <input type="number" id="f_variant_min" placeholder="最小" min="0">
+                <input type="number" id="f_variant_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_variant_max" placeholder="最大" min="0">
+                <input type="number" id="f_variant_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label">其他卖家数</span>
               <div class="filter-inputs">
-                <input type="number" id="f_sellers_min" placeholder="最小" min="0">
+                <input type="number" id="f_sellers_min" placeholder="≤" min="0" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_sellers_max" placeholder="最大" min="0">
+                <input type="number" id="f_sellers_max" placeholder="≥" min="0" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
               <span class="filter-label" id="lbl_weight">商品重量 (lb)</span>
               <div class="filter-inputs">
-                <input type="number" id="f_weight_min" placeholder="最小" min="0" step="0.1">
+                <input type="number" id="f_weight_min" placeholder="≤" min="0" step="0.1" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_weight_max" placeholder="最大" min="0" step="0.1">
+                <input type="number" id="f_weight_max" placeholder="≥" min="0" step="0.1" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
             </div>
             <div class="filter-item">
@@ -571,9 +586,9 @@
             <div class="filter-item">
               <span class="filter-label" id="lbl_fba_fee">FBA运费 ($)</span>
               <div class="filter-inputs">
-                <input type="number" id="f_fba_fee_min" placeholder="最小" min="0" step="0.01">
+                <input type="number" id="f_fba_fee_min" placeholder="≤" min="0" step="0.01" title="只填此框＝该值当上限（≤）；两框都填才是常规区间 [左,右]">
                 <span class="filter-sep">~</span>
-                <input type="number" id="f_fba_fee_max" placeholder="最大" min="0" step="0.01">
+                <input type="number" id="f_fba_fee_max" placeholder="≥" min="0" step="0.01" title="只填此框＝该值当下限（≥）；两框都填才是常规区间 [左,右]">
               </div>
               <div id="fba_support_tip" style="display:none; margin-top:4px; font-size:11px; color:#b45309; line-height:1.35;"></div>
             </div>
@@ -698,6 +713,10 @@
     </div>
     <div class="proxy-card-body">
       <span class="plb-text" id="plbText" aria-live="polite">检测中…</span>
+      <button type="button" class="proxy-quality-btn" id="proxyQualityBtn" onclick="checkProxyQuality()">
+        检测代理质量
+      </button>
+      <div class="proxy-quality-result" id="proxyQualityResult" aria-live="polite"></div>
       <div class="proxy-card-hint">拖动悬浮按钮可调整位置</div>
     </div>
   </div>
@@ -979,29 +998,69 @@
     }
 
 
+    // ── 双填区间栏的边界语义 ──
+    // 只填左框（标"最小"）→ 视为上限，等价于 <= 该值；只填右框（标"最大"）→ 视为下限，
+    // 等价于 >= 该值；两边都填才是常规区间 [左,右]（含边界）。只有一侧有值时不再套用
+    // "左=下限/右=上限"的常规区间语义，因为用户只填一个框时，表达的是"以这一个数为界"，
+    // 而不是"另一侧默认不限"下的下限/上限——两种解读在只填一侧时刚好相反。
+    function pairBound(minRaw, maxRaw) {
+      if (minRaw && maxRaw) return { min: minRaw, max: maxRaw };
+      if (minRaw) return { min: 0, max: minRaw };
+      if (maxRaw) return { min: maxRaw, max: 0 };
+      return { min: 0, max: 0 };
+    }
+
     // ── 筛选值收集 ──
     function getFilterValues() {
       syncPageControl(false);
       const pageValue = getPageValue();
+      const price = pairBound(
+        +document.getElementById('f_price_min').value || 0,
+        +document.getElementById('f_price_max').value || 0,
+      );
+      const rating = pairBound(
+        +document.getElementById('f_rating_min').value || 0,
+        +document.getElementById('f_rating_max').value || 0,
+      );
+      const review = pairBound(
+        +document.getElementById('f_review_min').value || 0,
+        +document.getElementById('f_review_max').value || 0,
+      );
+      const bsrMain = pairBound(
+        +document.getElementById('f_bsr_main_min').value || 0,
+        +document.getElementById('f_bsr_main_max').value || 0,
+      );
+      const bsrSub = pairBound(
+        +document.getElementById('f_bsr_sub_min').value || 0,
+        +document.getElementById('f_bsr_sub_max').value || 0,
+      );
+      const variant = pairBound(
+        +document.getElementById('f_variant_min').value || 0,
+        +document.getElementById('f_variant_max').value || 0,
+      );
+      const sellers = pairBound(
+        +document.getElementById('f_sellers_min').value || 0,
+        +document.getElementById('f_sellers_max').value || 0,
+      );
+      // 按当前站点本地单位录入；发往后端前统一换算为 lb（与 weight_lb 对齐），再套用边界语义
+      const weight = pairBound(
+        toBackendWeight(document.getElementById('f_weight_min').value),
+        toBackendWeight(document.getElementById('f_weight_max').value),
+      );
+      const fbaFee = pairBound(
+        +document.getElementById('f_fba_fee_min').value || 0,
+        +document.getElementById('f_fba_fee_max').value || 0,
+      );
       return {
-        price_min: +document.getElementById('f_price_min').value || 0,
-        price_max: +document.getElementById('f_price_max').value || 0,
-        rating_min: +document.getElementById('f_rating_min').value || 0,
-        rating_max: +document.getElementById('f_rating_max').value || 0,
-        review_min: +document.getElementById('f_review_min').value || 0,
-        review_max: +document.getElementById('f_review_max').value || 0,
-        bsr_main_min: +document.getElementById('f_bsr_main_min').value || 0,
-        bsr_main_max: +document.getElementById('f_bsr_main_max').value || 0,
-        bsr_sub_min: +document.getElementById('f_bsr_sub_min').value || 0,
-        bsr_sub_max: +document.getElementById('f_bsr_sub_max').value || 0,
-        variant_min: +document.getElementById('f_variant_min').value || 0,
-        variant_max: +document.getElementById('f_variant_max').value || 0,
-        sellers_min: +document.getElementById('f_sellers_min').value || 0,
-        sellers_max: +document.getElementById('f_sellers_max').value || 0,
+        price_min: price.min, price_max: price.max,
+        rating_min: rating.min, rating_max: rating.max,
+        review_min: review.min, review_max: review.max,
+        bsr_main_min: bsrMain.min, bsr_main_max: bsrMain.max,
+        bsr_sub_min: bsrSub.min, bsr_sub_max: bsrSub.max,
+        variant_min: variant.min, variant_max: variant.max,
+        sellers_min: sellers.min, sellers_max: sellers.max,
         social_proof_min: +document.getElementById('f_social_proof_min').value || 0,
-        // 按当前站点本地单位录入；发往后端前统一换算为 lb / inch（与 weight_lb / dim_*_in 对齐）
-        weight_min: toBackendWeight(document.getElementById('f_weight_min').value),
-        weight_max: toBackendWeight(document.getElementById('f_weight_max').value),
+        weight_min: weight.min, weight_max: weight.max,
         dim_l: toBackendDim(document.getElementById('f_dim_l').value),
         dim_w: toBackendDim(document.getElementById('f_dim_w').value),
         dim_h: toBackendDim(document.getElementById('f_dim_h').value),
@@ -1010,8 +1069,7 @@
           : (document.getElementById('f_date_range').value || ''),
         amazons_choice: document.getElementById('f_amazons_choice').checked,
         bestseller: document.getElementById('f_bestseller').checked,
-        fba_fee_min: +document.getElementById('f_fba_fee_min').value || 0,
-        fba_fee_max: +document.getElementById('f_fba_fee_max').value || 0,
+        fba_fee_min: fbaFee.min, fba_fee_max: fbaFee.max,
         fulfillment_type: document.getElementById('f_fulfillment_type').value || '',
         country: (document.getElementById('f_country').value || '').trim(),
         max_pages: pageValue,
@@ -1649,6 +1707,46 @@
       if (poolLow) extra += ` · 低于警戒线${lowWatermark}，已自动降载`;
       text.innerHTML = `代理池: <b>${hot}</b> 热 / ${candidates} 候选${extra}`;
       if (fab) fab.title = `${text.textContent}（可拖动）`;
+    }
+
+    const PROXY_QUALITY_VERDICT_LABEL = {
+      healthy: '健康', degraded: '拥堵/不稳定', unhealthy: '异常', no_data: '无可用节点',
+    };
+
+    async function checkProxyQuality() {
+      const btn = document.getElementById('proxyQualityBtn');
+      const resultEl = document.getElementById('proxyQualityResult');
+      if (!btn || btn.disabled) return;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '检测中…（真实请求，约几秒~十几秒）';
+      resultEl.className = 'proxy-quality-result';
+      resultEl.textContent = '';
+      try {
+        const r = await fetch(API + '/api/v2/proxy_quality_check', { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+        const verdictLabel = PROXY_QUALITY_VERDICT_LABEL[d.verdict] || d.verdict;
+        const summary = d.total
+          ? `代理质量：${verdictLabel}\n抽检 ${d.total} 个节点：正常 ${d.ok} · 失败 ${d.failed}`
+            + (d.captcha ? ` · 验证码 ${d.captcha}` : '')
+            + (d.ok ? `\n正常节点平均延迟 ${d.avg_latency_ms}ms` : '')
+          : '当前活池为空，无法检测（守护进程可能仍在补池，稍后再试）';
+        resultEl.classList.add(d.verdict === 'no_data' ? 'unhealthy' : d.verdict);
+        resultEl.textContent = summary;
+        // 明确要求"弹窗可见"：用 alert 强提示一次检测结论，附失败节点样例便于定位
+        const worst = (d.nodes || []).filter(n => !n.ok).slice(0, 5)
+          .map(n => `  · ${n.name || n.exit_ip || '未知节点'}: ${n.error_code || n.error || '失败'}`)
+          .join('\n');
+        alert('代理质量检测结果\n' + summary + (worst ? '\n\n失败节点样例：\n' + worst : ''));
+      } catch (e) {
+        resultEl.classList.add('unhealthy');
+        resultEl.textContent = '检测失败：' + (e.message || e);
+        alert('代理质量检测失败：' + (e.message || e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
     }
 
     async function refreshProductStats() {

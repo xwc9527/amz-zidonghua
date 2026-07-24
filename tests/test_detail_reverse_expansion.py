@@ -150,6 +150,75 @@ class TestDetailReverseCategoryWrites(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_breadcrumb_department_id_aligns_to_existing_root_not_a_new_duplicate(self):
+        """2026-07-23 实测 bug：面包屑给的部门级 node_id（Amazon 官方数字 ID）
+        跟入库时用的 slug 占位根节点 ID 不是一套编号，直接插入会在 depth=0
+        造出"名字相同、ID不同"的假根节点（Electronics/172282 等）。"""
+        detail = {
+            "breadcrumb_nodes": [
+                # "Root" 是 setUp 里已有的根节点（node_id="root"），这里面包屑
+                # 给出了一个不同的数字 ID，模拟 Amazon 官方部门 ID 和我们入库时
+                # slug 占位 ID 不一致的真实情况。
+                {"name": "Root", "node_id": "999888777"},
+                {"name": "New child of root", "node_id": "newchild"},
+            ],
+            "bsr_node_links": [],
+        }
+        added = self._discover(detail)
+        # 唯一应该新增的边是 newchild 挂在已有根节点 "root" 下面；不应该
+        # 额外插入一个 node_id=999888777 的竞争性新根。
+        self.assertEqual(added, 1)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM categories WHERE site='US' AND node_id='999888777'"
+                ).fetchone(),
+                "面包屑给的部门数字ID不应该被当成新根节点插入",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM categories WHERE site='US' AND depth=0"
+                ).fetchone()[0],
+                1,
+                "depth=0 是固定闭集，反向扩展不应该新增根节点",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT parent_node_id, depth FROM categories "
+                    "WHERE site='US' AND node_id='newchild'"
+                ).fetchone(),
+                ("root", 1),
+                "新子节点应该挂在已有根节点 'root' 下面，而不是挂在面包屑给的假根节点上",
+            )
+        finally:
+            conn.close()
+
+    def test_bsr_links_are_skipped_when_breadcrumb_is_empty(self):
+        """面包屑解析失败/为空时没有可靠的父节点信息；BSR 榜单节点如果仍被插入，
+        parent_node_id 只能是空串，会被当成新根节点——同样违反 depth=0 闭集
+        不变量，宁可先不落库。"""
+        detail = {
+            "breadcrumb_nodes": [],
+            "bsr_node_links": [
+                {"name": "Orphan BSR node", "node_id": "orphan", "slug": "orphan-slug"},
+            ],
+        }
+        added = self._discover(detail)
+        self.assertEqual(added, 0)
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM categories WHERE site='US' AND node_id='orphan'"
+                ).fetchone(),
+                "面包屑为空时不应该把 BSR 节点当成无父根节点插入",
+            )
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

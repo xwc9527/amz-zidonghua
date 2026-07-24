@@ -197,23 +197,86 @@ CLASH_MIXED_PORT = _env_int("CLASH_MIXED_PORT", 7897)
 
 PROXY_BASE_PORT = _env_int("PROXY_BASE_PORT", 18001)
 PROXY_CTRL_PORT = _env_int("PROXY_CTRL_PORT", 19897)
-PROXY_PORT_RANGE_END = _env_int("PROXY_PORT_RANGE_END", 18100)
+# 支持多机场订阅汇总后持续增长的候选节点数（原 18100 = 仅 100 个端口，单订阅
+# 场景够用；多订阅汇总 + 后续还会不断新增机场后很快被历史 node_key 占满，
+# 见 proxy_daemon._ensure_port_locked 的 "无可用本地端口可分配"）。留足余量。
+PROXY_PORT_RANGE_END = _env_int("PROXY_PORT_RANGE_END", 18800)
 PROXY_MAX_NODES = _env_int("PROXY_MAX_NODES", 0)  # 0 = 不限
 
-# 分层水位：8 启动、10 警戒、14 常态目标、16 热池上限。目标以上的
-# 已验证节点进入温池，不丢弃；热池跌落时无需重新验证即可晋升补位。
+# 分层水位：target/hot_max 按候选池规模的百分比动态算出，不再是固定绝对数——
+# 候选池会随着不断新增机场订阅持续增长，固定绝对值每次都要手动改一遍
+# （PROXY_POOL_HOT_MAX_NODES 就曾经从 16 手动改到 40）。改成比例后，新增
+# 订阅只要候选数变多，热池目标/上限自动跟着涨。
+# RATIO 是"候选总数"的占比；FLOOR 是候选池很小时（比如冷启动只扫到几个
+# 节点）兜底的绝对下限，避免比例算出来的值小到不够用；CEIL 是候选池很大
+# 时的绝对上限，避免热池无限膨胀（每个热节点要占本地端口+周期性健康检查+
+# 抓取时按 streams_per_proxy 开线程，热池太大会把本机资源和目标站请求量
+# 都推得过高）。0 = 不设上限。
+PROXY_POOL_TARGET_RATIO = float(
+    os.environ.get("PROXY_POOL_TARGET_RATIO", "0.40") or "0.40"
+)
+PROXY_POOL_HOT_MAX_RATIO = float(
+    os.environ.get("PROXY_POOL_HOT_MAX_RATIO", "0.60") or "0.60"
+)
+# 警戒线定义成"目标的比例"而不是"候选总数的比例"，语义更直观：警戒线永远是
+# "比目标还差多少就该报警"，不用再单独配一个候选池比例。
+PROXY_POOL_LOW_WATERMARK_OF_TARGET_RATIO = float(
+    os.environ.get("PROXY_POOL_LOW_WATERMARK_OF_TARGET_RATIO", "0.6") or "0.6"
+)
+
 PROXY_MIN_START_NODES = max(1, _env_int("PROXY_MIN_START_NODES", 8))
+PROXY_POOL_TARGET_FLOOR = max(
+    PROXY_MIN_START_NODES, _env_int("PROXY_POOL_TARGET_FLOOR", 14)
+)
+PROXY_POOL_HOT_MAX_FLOOR = max(
+    PROXY_POOL_TARGET_FLOOR, _env_int("PROXY_POOL_HOT_MAX_FLOOR", 16)
+)
+PROXY_POOL_HOT_MAX_CEIL = _env_int("PROXY_POOL_HOT_MAX_CEIL", 100)
+
+# 兼容仍按绝对值使用的老调用方（如 proxy_worker 的限速/轮换节流默认值，
+# 那类场景拿不到实时候选数，用一个合理的静态兜底即可）：给一组当前候选池
+# 规模（118）下换算出来的绝对值。daemon 侧的热池分层不再读这三个变量，
+# 一律走 compute_pool_thresholds() 动态计算。
 PROXY_POOL_LOW_WATERMARK = max(
-    PROXY_MIN_START_NODES, _env_int("PROXY_POOL_LOW_WATERMARK", 10)
+    PROXY_MIN_START_NODES, _env_int("PROXY_POOL_LOW_WATERMARK", 20)
 )
 PROXY_POOL_TARGET_NODES = max(
-    PROXY_POOL_LOW_WATERMARK, _env_int("PROXY_POOL_TARGET_NODES", 14)
+    PROXY_POOL_LOW_WATERMARK, _env_int("PROXY_POOL_TARGET_NODES", 32)
 )
 PROXY_POOL_HOT_MAX_NODES = max(
-    PROXY_POOL_TARGET_NODES, _env_int("PROXY_POOL_HOT_MAX_NODES", 16)
+    PROXY_POOL_TARGET_NODES, _env_int("PROXY_POOL_HOT_MAX_NODES", 40)
 )
+
+
+def compute_pool_thresholds(candidate_count: int) -> dict:
+    """按当前候选池规模动态算出 (low_watermark, target, hot_max)。
+
+    candidate_count 增长（比如新增机场订阅后候选从118涨到200）时三个水位
+    自动跟着涨；候选池很小或很大时分别用 FLOOR/CEIL 兜底，避免比例算出来的
+    值不合理。"""
+    candidate_count = max(0, int(candidate_count))
+    target = max(
+        PROXY_POOL_TARGET_FLOOR,
+        round(candidate_count * PROXY_POOL_TARGET_RATIO),
+    )
+    hot_max = max(
+        target,
+        PROXY_POOL_HOT_MAX_FLOOR,
+        round(candidate_count * PROXY_POOL_HOT_MAX_RATIO),
+    )
+    if PROXY_POOL_HOT_MAX_CEIL > 0:
+        hot_max = min(hot_max, PROXY_POOL_HOT_MAX_CEIL)
+        target = min(target, hot_max)
+    low_watermark = max(
+        PROXY_MIN_START_NODES,
+        round(target * PROXY_POOL_LOW_WATERMARK_OF_TARGET_RATIO),
+    )
+    low_watermark = min(low_watermark, target)
+    return {"low_watermark": low_watermark, "target": target, "hot_max": hot_max}
+
+
 # 兼容旧冷启动体检调用方：硬门槛是 8；常态扩容目标单独由
-# PROXY_POOL_TARGET_NODES 表达，不再用一个变量混用两种语义。
+# compute_pool_thresholds() 的 target 表达，不再用一个变量混用两种语义。
 PROXY_MIN_VERIFIED_NODES = _env_int("PROXY_MIN_VERIFIED_NODES", PROXY_MIN_START_NODES)
 PROXY_MIN_UNIQUE_IPS = _env_int("PROXY_MIN_UNIQUE_IPS", PROXY_MIN_START_NODES)
 PROXY_MIN_AMAZON_OK = _env_int("PROXY_MIN_AMAZON_OK", PROXY_MIN_START_NODES)
