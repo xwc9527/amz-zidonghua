@@ -22,6 +22,9 @@ python -m uvicorn amazonqac_search:app --host 127.0.0.1 --port 8091
 独立入口：`POST http://127.0.0.1:8091/api/v2/amazonqac/search`。
 OpenAPI 和交互式调用说明：`http://127.0.0.1:8091/docs`。
 
+全部匹配结果的 CSV 下载见 [AMAZONQAC_EXPORT.md](AMAZONQAC_EXPORT.md)，
+使用 `POST /api/v2/amazonqac/export`；复用下列筛选和排序条件，不使用分页参数。
+
 ```powershell
 $body = @{
     query = 'couch'
