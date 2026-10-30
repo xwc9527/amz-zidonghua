@@ -1,0 +1,6 @@
+# Independent import tools; original application requirements stay unchanged.
+pyarrow==26.0.0
+duckdb==2.0.0
+fsspec[http]==2026.9.0
+requests>=2.32
+psycopg2-binary>=2.9
