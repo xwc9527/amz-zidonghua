@@ -22,6 +22,7 @@ from config import (
 )
 import product_run_cache as run_cache
 import favorite_products as fav_store
+from keyword_search import router as keyword_search_router
 
 # 代理池：API 运行期间守护进程持续验证/增补/淘汰节点；点击开始时只需
 # 活池达到最低启动门槛。API 正常关闭时默认连带清理，避免后台孤儿进程；
@@ -473,6 +474,7 @@ async def lifespan(app: FastAPI):
                 logging.warning("[proxy] API 关闭时代理守护清理失败: %s", stopped)
 
 app = FastAPI(title="Amazon 选品看板 API", lifespan=lifespan)
+app.include_router(keyword_search_router)
 
 # CORS：默认仅本机；局域网访问时可通过 CORS_ORIGINS 追加，例如
 #   set CORS_ORIGINS=http://192.168.1.10:8081,http://localhost:8081
