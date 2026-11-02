@@ -208,3 +208,14 @@ def export_csv(request: SearchFilters):
         if isinstance(error, OSError):
             raise HTTPException(status_code=507, detail="CSV export temporary storage unavailable") from None
         raise
+
+
+# Independent research page; existing search/export contracts are unchanged.
+from amazonqac_translation import router as translation_router
+app.include_router(translation_router)
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/research", include_in_schema=False)
+def research_page():
+    return FileResponse(Path(__file__).with_name("amazonqac_research.html"), media_type="text/html")
